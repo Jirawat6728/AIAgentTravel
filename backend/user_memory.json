@@ -1,0 +1,14 @@
+{
+  "demo_user": {
+    "origin": "กรุงเทพฯ",
+    "destination": "ภูเก็ต",
+    "start_date": "2025-12-25",
+    "nights": 3,
+    "adults": 2,
+    "children": 1,
+    "hotel_area": "ป่าตอง",
+    "budget_level": "medium",
+    "style": "chill",
+    "area_preference": "ป่าตอง"
+  }
+}

@@ -1,0 +1,357 @@
+{
+  "demo_user": {
+    "agent_state": {
+      "intent": "plan_trip_and_autoselect",
+      "step": "plans_ready",
+      "steps": []
+    },
+    "plan_choices": [
+      {
+        "id": 1,
+        "label": "แพลน 2",
+        "recommended": true,
+        "tags": [
+          "Amadeus จริง"
+        ],
+        "description": "แพลนจากไฟลต์และโรงแรมจริงของ Amadeus (ไม่มโนราคา)",
+        "flight": {
+          "airline": "Flight",
+          "flight_number": "XXX",
+          "origin": "DMK",
+          "destination": "HKT",
+          "departure_time": "2025-12-25T16:30:00",
+          "return_time": ""
+        },
+        "hotel": {
+          "name": "HN TEST PROPERTY FOR HCR CLOUD MIGRATION",
+          "location": "Unknown",
+          "nights": 3
+        },
+        "transport": {
+          "mode": "Taxi / Van จากสนามบินไปโรงแรม",
+          "note": "ยังไม่ได้คำนวณราคาเดินทาง"
+        },
+        "currency": "THB",
+        "total_price": 169,
+        "price_breakdown": {
+          "flight_total": 130,
+          "hotel_total": 39,
+          "transport_total": 0,
+          "currency": "THB"
+        }
+      },
+      {
+        "id": 2,
+        "label": "แพลน 3",
+        "recommended": false,
+        "tags": [
+          "Amadeus จริง"
+        ],
+        "description": "แพลนจากไฟลต์และโรงแรมจริงของ Amadeus (ไม่มโนราคา)",
+        "flight": {
+          "airline": "Flight",
+          "flight_number": "XXX",
+          "origin": "DMK",
+          "destination": "HKT",
+          "departure_time": "2025-12-25T06:45:00",
+          "return_time": ""
+        },
+        "hotel": {
+          "name": "ibis Phuket Patong",
+          "location": "Unknown",
+          "nights": 3
+        },
+        "transport": {
+          "mode": "Taxi / Van จากสนามบินไปโรงแรม",
+          "note": "ยังไม่ได้คำนวณราคาเดินทาง"
+        },
+        "currency": "THB",
+        "total_price": 11484,
+        "price_breakdown": {
+          "flight_total": 130,
+          "hotel_total": 11354,
+          "transport_total": 0,
+          "currency": "THB"
+        }
+      },
+      {
+        "id": 3,
+        "label": "แพลน 1",
+        "recommended": false,
+        "tags": [
+          "Amadeus จริง"
+        ],
+        "description": "แพลนจากไฟลต์และโรงแรมจริงของ Amadeus (ไม่มโนราคา)",
+        "flight": {
+          "airline": "Flight",
+          "flight_number": "XXX",
+          "origin": "DMK",
+          "destination": "HKT",
+          "departure_time": "2025-12-25T10:00:00",
+          "return_time": ""
+        },
+        "hotel": {
+          "name": "Holiday Inn Exp Patong Beach Ce",
+          "location": "Unknown",
+          "nights": 3
+        },
+        "transport": {
+          "mode": "Taxi / Van จากสนามบินไปโรงแรม",
+          "note": "ยังไม่ได้คำนวณราคาเดินทาง"
+        },
+        "currency": "THB",
+        "total_price": 28268,
+        "price_breakdown": {
+          "flight_total": 130,
+          "hotel_total": 28138,
+          "transport_total": 0,
+          "currency": "THB"
+        }
+      }
+    ],
+    "current_plan": null,
+    "search_results": {
+      "flights": {
+        "data": []
+      },
+      "hotels": {
+        "data": []
+      },
+      "cars": {
+        "data": []
+      },
+      "places": {
+        "data": []
+      },
+      "booking": null
+    },
+    "user_memory": {
+      "origin": "กรุงเทพฯ",
+      "destination": "ภูเก็ต",
+      "start_date": "2025-12-25",
+      "nights": 3,
+      "adults": 2,
+      "children": 1,
+      "hotel_area": "ป่าตอง",
+      "budget_level": "medium",
+      "style": "chill",
+      "area_preference": "ป่าตอง"
+    },
+    "chat_history": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "{\"user_id\": \"demo_user\", \"message\": \"ฉันจะไปLAจากกรุงเทพวันที่ 24 ธ.ค.  3 คืน ไป 2 ผู้ใหญ่ 1 เด็ก\", \"today\": \"2025-12-17\", \"policy\": {\"amadeus_only\": true, \"no_mocking\": true, \"boats_ferries\": \"unavailable_via_amadeus\"}, \"previous\": {\"agent_state\": {\"intent\": \"idle\", \"step\": \"init\", \"steps\": []}, \"plan_choices\": [], \"current_plan\": null, \"search_results\": {\"flights\": {\"data\": []}, \"hotels\": {\"data\": []}, \"cars\": {\"data\": []}, \"places\": {\"data\": []}, \"booking\": null}}, \"user_memory\": {\"origin\": \"กรุงเทพฯ\", \"destination\": \"Los Angeles\", \"start_date\": \"2025-12-25\", \"adults\": 2, \"children\": 1, \"budget_level\": \"medium\", \"style\": \"chill\", \"hotel_area\": \"ป่าตอง\"}}"
+          }
+        ]
+      },
+      {
+        "role": "model",
+        "parts": [
+          {
+            "text": "{\"response\": \"❌ Gemini error: 403 PERMISSION_DENIED. {'error': {'code': 403, 'message': 'Your API key was reported as leaked. Please use another API key.', 'status': 'PERMISSION_DENIED'}}\", \"ui\": {\"mode\": \"chat\", \"title\": \"Gemini error\", \"chips\": [\"ลองใหม่\", \"ล้างประวัติ\"], \"progress\": []}, \"cards\": {\"flights\": [], \"hotels\": [], \"cars\": []}, \"search_results\": {\"flights\": {\"data\": []}, \"hotels\": {\"data\": []}, \"cars\": {\"data\": []}, \"places\": {\"data\": []}, \"booking\": null}, \"plan_choices\": [], \"current_plan\": null, \"agent_state\": {\"intent\": \"error\", \"step\": \"gemini_exception\", \"steps\": []}, \"user_memory\": {\"origin\": \"กรุงเทพฯ\", \"destination\": \"Los Angeles\", \"start_date\": \"2025-12-25\", \"adults\": 2, \"children\": 1, \"budget_level\": \"medium\", \"style\": \"chill\", \"hotel_area\": \"ป่าตอง\"}, \"suggestions\": [\"ลองใหม่\", \"ล้างประวัติ\"]}"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "{\"user_id\": \"demo_user\", \"message\": \"ฉันจะไปภูเก็ตจากกรุงเทพวันที่ 25 ธ.ค. พักป่าตอง 3 คืน ไป 2 ผู้ใหญ่ 1 เด็ก\", \"today\": \"2025-12-17\", \"policy\": {\"amadeus_only\": true, \"no_mocking\": true, \"boats_ferries\": \"unavailable_via_amadeus\"}, \"previous\": {\"agent_state\": {\"intent\": \"error\", \"step\": \"gemini_exception\", \"steps\": []}, \"plan_choices\": [], \"current_plan\": null, \"search_results\": {\"flights\": {\"data\": []}, \"hotels\": {\"data\": []}, \"cars\": {\"data\": []}, \"places\": {\"data\": []}, \"booking\": null}}, \"user_memory\": {\"origin\": \"กรุงเทพฯ\", \"destination\": \"Los Angeles\", \"start_date\": \"2025-12-25\", \"adults\": 2, \"children\": 1, \"budget_level\": \"medium\", \"style\": \"chill\", \"hotel_area\": \"ป่าตอง\"}}"
+          }
+        ]
+      },
+      {
+        "role": "model",
+        "parts": [
+          {
+            "text": "{\"response\": \"❌ Gemini error: 403 PERMISSION_DENIED. {'error': {'code': 403, 'message': 'Your API key was reported as leaked. Please use another API key.', 'status': 'PERMISSION_DENIED'}}\", \"ui\": {\"mode\": \"chat\", \"title\": \"Gemini error\", \"chips\": [\"ลองใหม่\", \"ล้างประวัติ\"], \"progress\": []}, \"cards\": {\"flights\": [], \"hotels\": [], \"cars\": []}, \"search_results\": {\"flights\": {\"data\": []}, \"hotels\": {\"data\": []}, \"cars\": {\"data\": []}, \"places\": {\"data\": []}, \"booking\": null}, \"plan_choices\": [], \"current_plan\": null, \"agent_state\": {\"intent\": \"error\", \"step\": \"gemini_exception\", \"steps\": []}, \"user_memory\": {\"origin\": \"กรุงเทพฯ\", \"destination\": \"Los Angeles\", \"start_date\": \"2025-12-25\", \"adults\": 2, \"children\": 1, \"budget_level\": \"medium\", \"style\": \"chill\", \"hotel_area\": \"ป่าตอง\"}, \"suggestions\": [\"ลองใหม่\", \"ล้างประวัติ\"]}"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "{\"user_id\": \"demo_user\", \"message\": \"ฉันจะไปภูเก็ตจากกรุงเทพวันที่ 25 ธ.ค. พักป่าตอง 3 คืน ไป 2 ผู้ใหญ่ 1 เด็ก\", \"today\": \"2025-12-17\", \"policy\": {\"amadeus_only\": true, \"no_mocking\": true, \"boats_ferries\": \"unavailable_via_amadeus\"}, \"previous\": {\"agent_state\": {\"intent\": \"error\", \"step\": \"gemini_exception\", \"steps\": []}, \"plan_choices\": [], \"current_plan\": null, \"search_results\": {\"flights\": {\"data\": []}, \"hotels\": {\"data\": []}, \"cars\": {\"data\": []}, \"places\": {\"data\": []}, \"booking\": null}}, \"user_memory\": {\"origin\": \"กรุงเทพฯ\", \"destination\": \"Los Angeles\", \"start_date\": \"2025-12-25\", \"adults\": 2, \"children\": 1, \"budget_level\": \"medium\", \"style\": \"chill\", \"hotel_area\": \"ป่าตอง\"}}"
+          }
+        ]
+      },
+      {
+        "role": "model",
+        "parts": [
+          {
+            "text": "{\"response\": \"❌ Gemini error: 403 PERMISSION_DENIED. {'error': {'code': 403, 'message': 'Your API key was reported as leaked. Please use another API key.', 'status': 'PERMISSION_DENIED'}}\", \"ui\": {\"mode\": \"chat\", \"title\": \"Gemini error\", \"chips\": [\"ลองใหม่\", \"ล้างประวัติ\"], \"progress\": []}, \"cards\": {\"flights\": [], \"hotels\": [], \"cars\": []}, \"search_results\": {\"flights\": {\"data\": []}, \"hotels\": {\"data\": []}, \"cars\": {\"data\": []}, \"places\": {\"data\": []}, \"booking\": null}, \"plan_choices\": [], \"current_plan\": null, \"agent_state\": {\"intent\": \"error\", \"step\": \"gemini_exception\", \"steps\": []}, \"user_memory\": {\"origin\": \"กรุงเทพฯ\", \"destination\": \"Los Angeles\", \"start_date\": \"2025-12-25\", \"adults\": 2, \"children\": 1, \"budget_level\": \"medium\", \"style\": \"chill\", \"hotel_area\": \"ป่าตอง\"}, \"suggestions\": [\"ลองใหม่\", \"ล้างประวัติ\"]}"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "{\"user_id\": \"demo_user\", \"message\": \"ฉันจะไปภูเก็ตจากกรุงเทพวันที่ 25 ธ.ค. พักป่าตอง 3 คืน ไป 2 ผู้ใหญ่ 1 เด็ก\", \"today\": \"2025-12-17\", \"policy\": {\"amadeus_only\": true, \"no_mocking\": true, \"boats_ferries\": \"unavailable_via_amadeus\"}, \"previous\": {\"agent_state\": {\"intent\": \"error\", \"step\": \"gemini_exception\", \"steps\": []}, \"plan_choices\": [], \"current_plan\": null, \"search_results\": {\"flights\": {\"data\": []}, \"hotels\": {\"data\": []}, \"cars\": {\"data\": []}, \"places\": {\"data\": []}, \"booking\": null}}, \"user_memory\": {\"origin\": \"กรุงเทพฯ\", \"destination\": \"Los Angeles\", \"start_date\": \"2025-12-25\", \"adults\": 2, \"children\": 1, \"budget_level\": \"medium\", \"style\": \"chill\", \"hotel_area\": \"ป่าตอง\"}}"
+          }
+        ]
+      },
+      {
+        "role": "model",
+        "parts": [
+          {
+            "text": "{\"response\": \"❌ Gemini error: 403 PERMISSION_DENIED. {'error': {'code': 403, 'message': 'Your API key was reported as leaked. Please use another API key.', 'status': 'PERMISSION_DENIED'}}\", \"ui\": {\"mode\": \"chat\", \"title\": \"Gemini error\", \"chips\": [\"ลองใหม่\", \"ล้างประวัติ\"], \"progress\": []}, \"cards\": {\"flights\": [], \"hotels\": [], \"cars\": []}, \"search_results\": {\"flights\": {\"data\": []}, \"hotels\": {\"data\": []}, \"cars\": {\"data\": []}, \"places\": {\"data\": []}, \"booking\": null}, \"plan_choices\": [], \"current_plan\": null, \"agent_state\": {\"intent\": \"error\", \"step\": \"gemini_exception\", \"steps\": []}, \"user_memory\": {\"origin\": \"กรุงเทพฯ\", \"destination\": \"Los Angeles\", \"start_date\": \"2025-12-25\", \"adults\": 2, \"children\": 1, \"budget_level\": \"medium\", \"style\": \"chill\", \"hotel_area\": \"ป่าตอง\"}, \"suggestions\": [\"ลองใหม่\", \"ล้างประวัติ\"]}"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "{\"user_id\": \"demo_user\", \"message\": \"ฉันจะไปภูเก็ตจากกรุงเทพวันที่ 25 ธ.ค. พักป่าตอง 3 คืน ไป 2 ผู้ใหญ่ 1 เด็ก\", \"today\": \"2025-12-17\", \"policy\": {\"amadeus_only\": true, \"no_mocking\": true, \"boats_ferries\": \"unavailable_via_amadeus\"}, \"previous\": {\"agent_state\": {\"intent\": \"error\", \"step\": \"gemini_exception\", \"steps\": []}, \"plan_choices\": [], \"current_plan\": null, \"search_results\": {\"flights\": {\"data\": []}, \"hotels\": {\"data\": []}, \"cars\": {\"data\": []}, \"places\": {\"data\": []}, \"booking\": null}}, \"user_memory\": {\"origin\": \"กรุงเทพฯ\", \"destination\": \"Los Angeles\", \"start_date\": \"2025-12-25\", \"adults\": 2, \"children\": 1, \"budget_level\": \"medium\", \"style\": \"chill\", \"hotel_area\": \"ป่าตอง\"}}"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "parts": [
+          {
+            "function_response": {
+              "name": "city_to_iata",
+              "response": {
+                "result": {
+                  "iata": "BKK"
+                }
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "text": "ฉันจะไปเชียงใหม่จากกรุงเทพวันที่ 25 ธ.ค. พักป่าตอง 3 คืน ไป 2 ผู้ใหญ่ 1 เด็ก"
+      },
+      {
+        "role": "assistant",
+        "text": "สวัสดีค่ะ! โอ้โห เดินทางช่วงคริสต์มาสเลย ดูดีมากเลยค่ะ! \n\nก่อนอื่นรบกวนช่วยยืนยันนิดนึงนะคะ เห็นแจ้งว่าจุดหมายคือ 'เชียงใหม่' แต่จะไปพักที่ 'ป่าตอง' ซึ่งป่าตองอยู่ภูเก็ตค่ะ... สรุปจุดหมายปลายทางที่ถูกต้องคือที่ไหนคะ? จะได้หาข้อมูลโรงแรมและไฟลต์ให้ตรงจุดที่สุดค่ะ\n\nพร้อมกับแจ้งสนามบินที่สะดวกในกรุงเทพฯ เลยนะคะ จะได้เริ่มดูไฟลต์สำหรับ 25 ธ.ค. - 28 ธ.ค. (3 คืน) ได้ทันทีเลยค่ะ"
+      },
+      {
+        "role": "user",
+        "text": "ฉันจะไปเชียงใหม่จากกรุงเทพวันที่ 25 ธ.ค. 3 คืน ไป 2 ผู้ใหญ่ 1 เด็ก"
+      },
+      {
+        "role": "assistant",
+        "text": "ขอบคุณที่ยืนยันนะคะ! เข้าใจชัดเจนแล้วค่ะว่าเป็นการเดินทางไปเชียงใหม่ (CNX) วันที่ 25 ธ.ค. และกลับ 28 ธ.ค. พร้อมผู้ร่วมเดินทาง 2 ผู้ใหญ่ 1 เด็ก \n\nตอนนี้ข้อมูลพร้อมเกือบหมดแล้ว เหลือแค่ **'สนามบินต้นทาง'** ที่คุณสะดวกค่ะ ระหว่างสุวรรณภูมิ (BKK) หรือดอนเมือง (DMK) ดีคะ? ถ้าได้ข้อมูลนี้ จะสามารถเรียกดูราคาไฟลต์พร้อมเที่ยวบินที่เหมาะสมให้ทันทีเลยค่ะ"
+      },
+      {
+        "role": "user",
+        "text": "ฉันจะไปเชียงใหม่จากกรุงเทพวันที่ 25 ธ.ค.  3 คืน ไป 2 ผู้ใหญ่ 1 เด็ก"
+      },
+      {
+        "role": "assistant",
+        "text": "สวัสดีค่ะ! ต้องขออภัยด้วยนะคะ ตอนนี้ระบบค้นหาเที่ยวบินของ Amadeus เกิดข้อผิดพลาด ทำให้ไม่สามารถดึงข้อมูลเที่ยวบินสำหรับเส้นทาง กรุงเทพ (BKK) ไปเชียงใหม่ (CNX) ในช่วงวันที่ 25-28 ธ.ค. สำหรับ 2 ผู้ใหญ่ 1 เด็กได้ค่ะ \n\nอยากให้ลองค้นหาอีกครั้ง หรือลองปรับเปลี่ยนวันเดินทางดูไหมคะ? หรืออาจจะลองเปลี่ยนสนามบินต้นทางจากสุวรรณภูมิ (BKK) เป็นดอนเมือง (DMK) ก่อนก็ได้ค่ะ เผื่อระบบจะกลับมาใช้งานได้ปกติค่ะ"
+      },
+      {
+        "role": "user",
+        "text": "ฉันจะไปเชียงใหม่จากกรุงเทพวันที่ 24 ธ.ค. พัก 3 คืน ไป 2 ผู้ใหญ่ 1 เด็ก"
+      },
+      {
+        "role": "assistant",
+        "text": "รับทราบค่ะ! เปลี่ยนเป็นเดินทางวันที่ 24 ธ.ค. และกลับวันที่ 27 ธ.ค. (3 คืน) สำหรับ 2 ผู้ใหญ่ 1 เด็กนะคะ \n\nตอนนี้ฉันเจอตัวเลือกเที่ยวบินไปเชียงใหม่ให้คุณแล้วค่ะ โดยมีทั้งจากสนามบินดอนเมือง (DMK) และสุวรรณภูมิ (BKK) ราคาที่แสดงเป็นราคาประมาณการจาก EUR เป็น THB โดยใช้อัตราแลกเปลี่ยน 1 EUR = 38 THB ซึ่งอาจมีการเปลี่ยนแปลงได้นะคะ \n\nนี่คือบางตัวเลือกที่น่าสนใจค่ะ:"
+      },
+      {
+        "role": "user",
+        "text": "ฉันจะไปภูเก็ตจากกรุงเทพวันที่ 25 ธ.ค. พักป่าตอง 3 คืน ไป 2 ผู้ใหญ่ 1 เด็ก"
+      },
+      {
+        "role": "assistant",
+        "text": "เข้าใจแล้วค่ะว่ารอบนี้ต้องการเดินทางไปภูเก็ต (HKT) จากกรุงเทพฯ วันที่ 25 ธ.ค. พักป่าตอง 3 คืน สำหรับ 2 ผู้ใหญ่ 1 เด็กนะคะ\n\nต้องขออภัยจริง ๆ ค่ะ! ตอนนี้ระบบค้นหาทั้งเที่ยวบินและโรงแรมของ Amadeus เกิดข้อผิดพลาด ไม่สามารถดึงข้อมูลได้เลยค่ะ ทำให้ยังไม่สามารถหาตัวเลือกให้คุณได้ค่ะ \n\nอยากให้ลองค้นหาอีกครั้ง หรือลองปรับเปลี่ยนวันเดินทาง หรือจุดหมายปลายทางดูไหมคะ?"
+      },
+      {
+        "role": "user",
+        "text": "ฉันจะไปภูเก็ตจากกรุงเทพวันที่ 25 ธ.ค. พักป่าตอง 3 คืน ไป 2 ผู้ใหญ่ 1 เด็ก"
+      },
+      {
+        "role": "assistant",
+        "text": "ต้องขออภัยจริง ๆ ค่ะ! ตอนนี้ระบบค้นหาทั้งเที่ยวบินและโรงแรมของ Amadeus เกิดข้อผิดพลาด ไม่สามารถดึงข้อมูลได้เลยค่ะ ทำให้ยังไม่สามารถหาตัวเลือกให้คุณได้ค่ะ \n\nอยากให้ลองค้นหาอีกครั้ง หรือลองปรับเปลี่ยนวันเดินทาง หรือจุดหมายปลายทางดูไหมคะ?"
+      },
+      {
+        "role": "user",
+        "text": "ฉันจะไปภูเก็ตจากกรุงเทพวันที่ 25 ธ.ค. พักป่าตอง 3 คืน ไป 2 ผู้ใหญ่ 1 เด็ก"
+      },
+      {
+        "role": "assistant",
+        "text": "ต้องขออภัยจริง ๆ ค่ะ! ตอนนี้ระบบค้นหาทั้งเที่ยวบินและโรงแรมของ Amadeus ยังคงมีข้อผิดพลาดอยู่ ทำให้ไม่สามารถดึงข้อมูลสำหรับเส้นทางกรุงเทพฯ ไปภูเก็ต (พักป่าตอง) วันที่ 25 ธ.ค. 3 คืน สำหรับ 2 ผู้ใหญ่ 1 เด็กได้เลยค่ะ \n\nอยากให้ลองค้นหาอีกครั้ง หรือลองปรับเปลี่ยนวันเดินทาง หรือจุดหมายปลายทางดูไหมคะ? ฉันจะพยายามอย่างเต็มที่เพื่อช่วยคุณวางแผนการเดินทางค่ะ"
+      }
+    ],
+    "facts": {
+      "departure_date": "2025-12-25",
+      "return_date": "2025-12-28",
+      "nights": 3,
+      "adults": 2,
+      "children": 1,
+      "origin": "BKK",
+      "destination": "HKT",
+      "default_origin_airport": "BKK",
+      "currency_hint": "THB",
+      "flights_searched": false,
+      "hotel_destination": "Patong",
+      "hotels_searched": false
+    },
+    "last_tool_results": {
+      "flights": {
+        "ok": false,
+        "data": [],
+        "error": {
+          "type": "amadeus_error",
+          "where": "flight_offers_search",
+          "message": "[400]\n[origin] Invalid query parameter\n[destination] Invalid query parameter\n[departure_date] Invalid query parameter\n[return_date] Invalid query parameter"
+        }
+      },
+      "hotels": {
+        "ok": false,
+        "data": [],
+        "error": {
+          "type": "amadeus_error",
+          "where": "hotel_offers",
+          "message": "'Shopping' object has no attribute 'hotel_offers'"
+        }
+      }
+    },
+    "tool_results": {
+      "flights": {
+        "ok": false,
+        "data": [],
+        "error": {
+          "type": "validation_error",
+          "message": "missing origin/destination/date"
+        }
+      },
+      "hotels": {
+        "ok": false,
+        "data": [],
+        "error": {
+          "type": "validation_error",
+          "message": "missing city/checkin/checkout"
+        }
+      },
+      "cars": {
+        "ok": true,
+        "data": [],
+        "error": null
+      }
+    },
+    "travel_slots": {
+      "adults": 2,
+      "budget_level": "medium",
+      "destination": "ภูเก็ต",
+      "hotel_area": "ป่าตอง",
+      "origin": "กรุงเทพ",
+      "children": 1,
+      "style": "chill",
+      "start_date": "2025-12-25",
+      "nights": 3,
+      "area_preference": "ป่าตอง"
+    }
+  }
+}
