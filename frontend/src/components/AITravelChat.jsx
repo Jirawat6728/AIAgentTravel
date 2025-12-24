@@ -1,34 +1,125 @@
-import React, { useState, useRef, useEffect } from 'react';
+// AITravelChat.jsx
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import './AITravelChat.css';
 import PlanChoiceCard from './PlanChoiceCard';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
+// ===== LocalStorage keys =====
+const LS_TRIPS_KEY = 'ai_travel_trips_v1';
+const LS_ACTIVE_TRIP_KEY = 'ai_travel_active_trip_id_v1';
+
+// ===== Helpers =====
+function nowISO() {
+  return new Date().toISOString();
+}
+
+function shortDate(iso) {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' });
+  } catch {
+    return iso || '';
+  }
+}
+
+function makeId(prefix = 'trip') {
+  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function defaultWelcomeMessage() {
+  return {
+    id: 1,
+    type: 'bot',
+    text: "สวัสดีค่ะ ดิฉันคือ AI Travel Agent 💙 เล่าไอเดียทริปของคุณได้เลย หรือจะให้ช่วยคิดทริปให้ตั้งแต่ศูนย์ก็ได้นะคะ"
+  };
+}
+
+function createNewTrip(title = 'ทริปใหม่') {
+  const tripId = makeId('trip');
+  return {
+    tripId,
+    title,
+    createdAt: nowISO(),
+    updatedAt: nowISO(),
+    messages: [defaultWelcomeMessage()]
+  };
+}
+
 export default function AITravelChat({ user, onLogout }) {
-  const [messages, setMessages] = useState([
-    {
-      id: 1,
-      type: 'bot',
-      text: "สวัสดีค่ะ ดิฉันคือ AI Travel Agent 💙 เล่าไอเดียทริปของคุณได้เลย หรือจะให้ช่วยคิดทริปให้ตั้งแต่ศูนย์ก็ได้นะคะ"
-    }
-  ]);
+  const userId = user?.id || 'demo_user';
+
+  const messagesEndRef = useRef(null);
+
+  // ===== Trips state (sidebar history) =====
+  const [trips, setTrips] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LS_TRIPS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (_) {}
+    return [createNewTrip('ทริปใหม่')];
+  });
+
+  const [activeTripId, setActiveTripId] = useState(() => {
+    try {
+      const saved = localStorage.getItem(LS_ACTIVE_TRIP_KEY);
+      if (saved) return saved;
+    } catch (_) {}
+    return null;
+  });
+
   const [inputText, setInputText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isConnected, setIsConnected] = useState(true);
-  const messagesEndRef = useRef(null);
 
-  // ===== Scroll ลงล่างทุกครั้งที่มีข้อความใหม่ =====
+  // ===== Derived: active trip =====
+  const activeTrip = useMemo(() => {
+    return trips.find(t => t.tripId === activeTripId) || trips[0];
+  }, [trips, activeTripId]);
+
+  const messages = activeTrip?.messages || [];
+
+  // ===== Persist trips + activeTripId =====
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_TRIPS_KEY, JSON.stringify(trips));
+    } catch (_) {}
+  }, [trips]);
+
+  useEffect(() => {
+    if (!activeTripId && trips.length > 0) {
+      setActiveTripId(trips[0].tripId);
+      return;
+    }
+    if (activeTripId && !trips.some(t => t.tripId === activeTripId) && trips.length > 0) {
+      setActiveTripId(trips[0].tripId);
+    }
+  }, [activeTripId, trips]);
+
+  useEffect(() => {
+    try {
+      if (activeTripId) localStorage.setItem(LS_ACTIVE_TRIP_KEY, activeTripId);
+    } catch (_) {}
+  }, [activeTripId]);
+
+  // ===== Scroll =====
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTripId, messages.length]);
 
+  // ===== API health =====
   useEffect(() => {
     checkApiConnection();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const checkApiConnection = async () => {
@@ -54,19 +145,14 @@ export default function AITravelChat({ user, onLogout }) {
     }
 
     // ลอง parse JSON ถ้าหน้าตาเหมือน JSON
-    if (
-      (raw.startsWith('{') && raw.endsWith('}')) ||
-      (raw.startsWith('[') && raw.endsWith(']'))
-    ) {
+    if ((raw.startsWith('{') && raw.endsWith('}')) || (raw.startsWith('[') && raw.endsWith(']'))) {
       try {
         const obj = JSON.parse(raw);
-
         if (typeof obj === 'string') return obj;
         if (obj && typeof obj === 'object' && typeof obj.response === 'string') {
           return obj.response;
         }
-      } catch (e) {
-        // parse ไม่ได้ก็แสดงข้อความเดิม
+      } catch {
         return text;
       }
     }
@@ -74,9 +160,57 @@ export default function AITravelChat({ user, onLogout }) {
     return text;
   };
 
-  // ===== ส่งข้อความไป backend (ใช้ได้ทั้งจาก input, suggestion, เลือกช้อยส์) =====
+  // ===== Trips update helpers =====
+  const appendMessageToTrip = (tripId, msg) => {
+    setTrips(prev =>
+      prev.map(t => {
+        if (t.tripId !== tripId) return t;
+        const nextMessages = [...(t.messages || []), msg];
+        return {
+          ...t,
+          messages: nextMessages,
+          updatedAt: nowISO(),
+        };
+      })
+    );
+  };
+
+  const setTripTitle = (tripId, title) => {
+    if (!title) return;
+    setTrips(prev =>
+      prev.map(t => {
+        if (t.tripId !== tripId) return t;
+        return { ...t, title, updatedAt: nowISO() };
+      })
+    );
+  };
+
+  // ===== Create/Delete trip =====
+  const handleNewTrip = () => {
+    const nt = createNewTrip('ทริปใหม่');
+    setTrips(prev => [nt, ...prev]);
+    setActiveTripId(nt.tripId);
+    setInputText('');
+  };
+
+  const handleDeleteTrip = (tripId) => {
+    const ok = window.confirm('ลบทริปนี้ออกจากประวัติใช่ไหม?');
+    if (!ok) return;
+
+    setTrips(prev => {
+      const next = prev.filter(t => t.tripId !== tripId);
+      return next.length > 0 ? next : [createNewTrip('ทริปใหม่')];
+    });
+
+    if (activeTripId === tripId) {
+      const remaining = trips.filter(t => t.tripId !== tripId);
+      setActiveTripId(remaining[0]?.tripId || null);
+    }
+  };
+
+  // ===== Send message to backend =====
   const sendMessage = async (textToSend) => {
-    const trimmed = textToSend.trim();
+    const trimmed = String(textToSend || '').trim();
     if (!trimmed) return;
 
     if (!isConnected) {
@@ -84,13 +218,16 @@ export default function AITravelChat({ user, onLogout }) {
       return;
     }
 
+    const tripId = activeTrip?.tripId;
+    if (!tripId) return;
+
     const userMessage = {
       id: Date.now(),
       type: 'user',
       text: trimmed
     };
 
-    setMessages(prev => [...prev, userMessage]);
+    appendMessageToTrip(tripId, userMessage);
     setIsTyping(true);
 
     try {
@@ -99,13 +236,11 @@ export default function AITravelChat({ user, onLogout }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: trimmed,
-          user_id: user?.id || 'demo_user'
+          user_id: userId
         })
       });
 
-      if (!response.ok) {
-        throw new Error(`API Error: ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`API Error: ${response.status}`);
 
       const data = await response.json();
       console.log('API data >>>', data);
@@ -118,10 +253,16 @@ export default function AITravelChat({ user, onLogout }) {
         planChoices: data.plan_choices || [],
         agentState: data.agent_state || null,
         suggestions: data.suggestions || [],
-        currentPlan: data.current_plan || null
+        currentPlan: data.current_plan || null,
+        tripTitle: data.trip_title || null
       };
 
-      setMessages(prev => [...prev, botMessage]);
+      appendMessageToTrip(tripId, botMessage);
+
+      // ✅ ตั้งชื่อทริปโดย Gemini จาก backend
+      if (data.trip_title) {
+        setTripTitle(tripId, data.trip_title);
+      }
     } catch (error) {
       console.error('Error calling API:', error);
 
@@ -131,7 +272,7 @@ export default function AITravelChat({ user, onLogout }) {
         text: `❌ Error: ${error.message}\n\nPlease check:\n1. Backend is running\n2. API Keys are correct`
       };
 
-      setMessages(prev => [...prev, errorMessage]);
+      appendMessageToTrip(tripId, errorMessage);
       setIsConnected(false);
     } finally {
       setIsTyping(false);
@@ -161,7 +302,7 @@ export default function AITravelChat({ user, onLogout }) {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         const recognition = new SpeechRecognition();
 
-        recognition.lang = 'th-TH'; // ปรับเป็นภาษาไทย
+        recognition.lang = 'th-TH';
         recognition.continuous = false;
         recognition.interimResults = false;
 
@@ -191,10 +332,62 @@ export default function AITravelChat({ user, onLogout }) {
     }
   };
 
-  // ===== เลือกช้อยส์แพลนจากการ์ด =====
-  const handleSelectPlanChoice = (choiceId) => {
-    const text = `เลือกช้อยส์ ${choiceId}`;
-    sendMessage(text);
+  // ===== Select plan choice (click card -> select immediately) =====
+  const handleSelectPlanChoice = async (choiceId) => {
+    if (!isConnected) {
+      alert('Backend is not connected. Please start the backend server first.');
+      return;
+    }
+
+    const tripId = activeTrip?.tripId;
+    if (!tripId) return;
+
+    setIsTyping(true);
+
+    try {
+      // ✅ ถ้า backend มี /api/select_choice จะเลือกได้ทันทีแบบไม่ต้องส่งข้อความ
+      const res = await fetch(`${API_BASE_URL}/api/select_choice`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: userId,
+          choice_id: choiceId
+        })
+      });
+
+      // fallback ถ้า endpoint ไม่มี
+      if (!res.ok) {
+        setIsTyping(false);
+        sendMessage(`เลือกช้อยส์ ${choiceId}`);
+        return;
+      }
+
+      const data = await res.json();
+
+      const botMessage = {
+        id: Date.now() + 1,
+        type: 'bot',
+        text: data.response,
+        searchResults: data.search_results || {},
+        planChoices: data.plan_choices || [],
+        agentState: data.agent_state || null,
+        suggestions: data.suggestions || [],
+        currentPlan: data.current_plan || null,
+        tripTitle: data.trip_title || null
+      };
+
+      appendMessageToTrip(tripId, botMessage);
+
+      if (data.trip_title) {
+        setTripTitle(tripId, data.trip_title);
+      }
+    } catch (e) {
+      console.error('select_choice error:', e);
+      // fallback
+      sendMessage(`เลือกช้อยส์ ${choiceId}`);
+    } finally {
+      setIsTyping(false);
+    }
   };
 
   // ===== Quick suggestions จากบอท =====
@@ -203,32 +396,12 @@ export default function AITravelChat({ user, onLogout }) {
   };
 
   // ===== Agent State / Typing Text =====
-
-  // หา agentState ล่าสุดจากข้อความบอท
   const lastBotWithState = [...messages]
     .slice()
     .reverse()
     .find(m => m.type === 'bot' && m.agentState);
 
   const currentAgentState = lastBotWithState?.agentState || null;
-
-  const mapIntentToThai = (intent) => {
-    switch (intent) {
-      case 'collect_preferences':
-        return 'กำลังถามเพื่อรู้จักสไตล์การเที่ยวของคุณ';
-      case 'suggest_destination':
-        return 'กำลังหาเมือง/จังหวัดที่เหมาะกับคุณ';
-      case 'plan_trip_and_autoselect':
-        return 'กำลังสร้างแพ็กเกจทริปให้เลือก (หลายช้อยส์)';
-      case 'edit_plan':
-        return 'กำลังปรับแพลนตามที่คุณขอ';
-      case 'confirm_plan':
-        return 'กำลังสรุปทริปให้ตรวจสอบก่อนจอง';
-      case 'idle':
-      default:
-        return 'รอให้คุณเริ่มคุยเรื่องทริป';
-    }
-  };
 
   const getTypingText = () => {
     if (!currentAgentState) return 'กำลังคิดคำตอบให้คุณ...';
@@ -263,12 +436,14 @@ export default function AITravelChat({ user, onLogout }) {
             </div>
             <span className="chat-logo-text">AI Travel Agent</span>
           </div>
+
           <nav className="chat-nav-links">
             <a href="#" className="chat-nav-link">Flights</a>
             <a href="#" className="chat-nav-link">Hotels</a>
             <a href="#" className="chat-nav-link">Car Rentals</a>
             <a href="#" className="chat-nav-link">My Bookings</a>
           </nav>
+
           <div className="user-section">
             {user && (
               <div className="user-info">
@@ -285,10 +460,58 @@ export default function AITravelChat({ user, onLogout }) {
         </div>
       </header>
 
-      {/* Chat Container */}
-      <main className="chat-main">
-        <div className="chat-box">
+      {/* Main: Sidebar + Chat */}
+      <main className="chat-main chat-main-split">
+        {/* ===== Sidebar: Trip History ===== */}
+        <aside className="trip-sidebar">
+          <div className="trip-sidebar-header">
+            <div className="trip-sidebar-title">ประวัติทริป</div>
+            <button className="trip-new-btn" onClick={handleNewTrip}>
+              + ทริปใหม่
+            </button>
+          </div>
 
+          <div className="trip-list">
+            {trips.map((t) => {
+              const isActive = t.tripId === activeTrip?.tripId;
+              return (
+                <div
+                  key={t.tripId}
+                  className={`trip-item ${isActive ? 'trip-item-active' : ''}`}
+                  onClick={() => setActiveTripId(t.tripId)}
+                  title={t.title}
+                >
+                  <div className="trip-item-top">
+                    <div className="trip-item-title">
+                      {t.title || 'ทริป'}
+                    </div>
+                    <button
+                      className="trip-delete-btn"
+                      onClick={(e) => { e.stopPropagation(); handleDeleteTrip(t.tripId); }}
+                      title="ลบทริป"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="trip-item-sub">อัปเดต: {shortDate(t.updatedAt)}</div>
+                  <div className="trip-item-sub">ข้อความ: {(t.messages?.length || 0) - 1}</div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="trip-sidebar-footer">
+            <div className="connection-status">
+              <div className={`status-dot ${isConnected ? 'status-connected' : 'status-disconnected'}`}></div>
+              <span className="status-text">
+                {isConnected ? 'Connected' : 'Disconnected'}
+              </span>
+            </div>
+          </div>
+        </aside>
+
+        {/* ===== Chat ===== */}
+        <div className="chat-box">
           {/* Chatbox Header */}
           <div className="chatbox-header">
             <div className="chatbox-header-left">
@@ -298,12 +521,9 @@ export default function AITravelChat({ user, onLogout }) {
                 </svg>
               </div>
               <div>
-                <h3 className="chatbox-title">AI Travel Assistant</h3>
-                <div className="connection-status">
-                  <div className={`status-dot ${isConnected ? 'status-connected' : 'status-disconnected'}`}></div>
-                  <span className="status-text">
-                    {isConnected ? 'Connected' : 'Disconnected'}
-                  </span>
+                <h3 className="chatbox-title">{activeTrip?.title || 'AI Travel Assistant'}</h3>
+                <div className="chatbox-subtitle">
+                  {activeTrip?.updatedAt ? `อัปเดตล่าสุด: ${shortDate(activeTrip.updatedAt)}` : ''}
                 </div>
               </div>
             </div>
@@ -312,23 +532,19 @@ export default function AITravelChat({ user, onLogout }) {
           {/* Messages Area */}
           <div className="messages-area">
             <div className="messages-list">
-
               {messages.map((message) => (
                 <div
                   key={message.id}
                   className={`message-wrapper ${message.type === 'user' ? 'message-right' : 'message-left'}`}
                 >
                   <div className={`message-bubble ${message.type === 'user' ? 'message-user' : 'message-bot'}`}>
-
                     {/* ข้อความหลัก */}
-                    <p className="message-text">
-                      {formatMessageText(message.text)}
-                    </p>
+                    <p className="message-text">{formatMessageText(message.text)}</p>
 
                     {/* แสดงแพลนที่เลือกปัจจุบัน (หลังจากเลือกช้อยส์แล้ว) */}
                     {message.type === 'bot' && message.currentPlan && (
                       <div className="current-plan-summary">
-                        <div className="current-plan-title">📌 แพลนที่เลือกปัจจุบัน</div>
+                        <div className="current-plan-title">แพลนที่เลือกปัจจุบัน</div>
                         <div className="current-plan-body">
                           {message.currentPlan.trip_meta && (
                             <div className="current-plan-row">
@@ -337,7 +553,7 @@ export default function AITravelChat({ user, onLogout }) {
                               </span>
                               {message.currentPlan.trip_meta.check_in && message.currentPlan.trip_meta.check_out && (
                                 <span>
-                                  • {message.currentPlan.trip_meta.check_in} – {message.currentPlan.trip_meta.check_out}
+                                  {' '}• {message.currentPlan.trip_meta.check_in} – {message.currentPlan.trip_meta.check_out}
                                 </span>
                               )}
                             </div>
@@ -352,7 +568,7 @@ export default function AITravelChat({ user, onLogout }) {
                       </div>
                     )}
 
-                    {/* การ์ดแผนเที่ยวจาก planChoices (รองรับ 1–10 ช้อยส์) */}
+                    {/* การ์ดแผนเที่ยวจาก planChoices */}
                     {message.planChoices && message.planChoices.length > 0 && (
                       <div className="plan-choices-block">
                         <div className="plan-choices-header">
@@ -371,22 +587,19 @@ export default function AITravelChat({ user, onLogout }) {
                     )}
 
                     {/* Suggestion chips จากบอท */}
-                    {message.type === 'bot' &&
-                      message.suggestions &&
-                      message.suggestions.length > 0 && (
-                        <div className="suggestion-chips">
-                          {message.suggestions.map((s, idx) => (
-                            <button
-                              key={idx}
-                              className="suggestion-chip"
-                              onClick={() => handleSuggestionClick(s)}
-                            >
-                              {s}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-
+                    {message.type === 'bot' && message.suggestions && message.suggestions.length > 0 && (
+                      <div className="suggestion-chips">
+                        {message.suggestions.map((s, idx) => (
+                          <button
+                            key={idx}
+                            className="suggestion-chip"
+                            onClick={() => handleSuggestionClick(s)}
+                          >
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
@@ -395,9 +608,7 @@ export default function AITravelChat({ user, onLogout }) {
               {isTyping && (
                 <div className="typing-indicator">
                   <div className="typing-bubble">
-                    <div className="typing-text">
-                      {getTypingText()}
-                    </div>
+                    <div className="typing-text">{getTypingText()}</div>
                     <div className="typing-dots">
                       <div className="typing-dot"></div>
                       <div className="typing-dot"></div>
@@ -432,24 +643,14 @@ export default function AITravelChat({ user, onLogout }) {
                   <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
                 </svg>
               </button>
-              <button
-                onClick={handleSend}
-                disabled={!inputText.trim()}
-                className="btn-send"
-              >
+              <button onClick={handleSend} disabled={!inputText.trim()} className="btn-send">
                 Send
               </button>
             </div>
-            {isRecording && (
-              <div className="recording-status">
-                🎤 Listening...
-              </div>
-            )}
-            <div className="powered-by">
-              Powered by Google Gemini AI + Amadeus API
-            </div>
-          </div>
 
+            {isRecording && <div className="recording-status">Listening...</div>}
+            <div className="powered-by">Powered by Google Gemini AI + Amadeus API</div>
+          </div>
         </div>
       </main>
     </div>
