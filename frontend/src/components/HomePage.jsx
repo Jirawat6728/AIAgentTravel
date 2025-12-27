@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import './HomePage.css';
 
-export default function HomePage({ onGetStarted }) {
+export default function HomePage({ onGetStarted, onSignIn, onSignOut, isLoggedIn }) {
   const [searchQuery, setSearchQuery] = useState('');
 
   const handleSearch = (e) => {
@@ -31,7 +31,11 @@ export default function HomePage({ onGetStarted }) {
             <a href="#about" className="nav-link">About</a>
           </nav>
           <div className="header-buttons">
-            <button onClick={onGetStarted} className="btn-header">Sign In</button>
+            {isLoggedIn ? (
+              <button onClick={onSignOut} className="btn-header">Sign Out</button>
+            ) : (
+              <button onClick={onSignIn} className="btn-header">Sign In</button>
+            )}
             <button onClick={onGetStarted} className="btn-header-primary">Get Started</button>
           </div>
         </div>

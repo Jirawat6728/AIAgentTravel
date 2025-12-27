@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import './AITravelChat.css'; // ใช้คลาสจากไฟล์หลักร่วมกันได้
 
 function formatMoney(value, currency = 'THB') {
@@ -33,6 +33,8 @@ function carriersLabel(flight) {
 }
 
 export default function PlanChoiceCard({ choice, onSelect }) {
+  const [showItinerary, setShowItinerary] = useState(false);
+  
   const {
     id,
     label,
@@ -47,6 +49,10 @@ export default function PlanChoiceCard({ choice, onSelect }) {
     total_price_text,
     price_breakdown,
     title, // เผื่อ backend ส่ง title มา (เช่น "🟢 ช้อยส์ 1 (แนะนำ) ...")
+    ground_transport, // ✅ ข้อมูลการเดินทาง/ขนส่ง
+    itinerary, // ✅ ข้อมูล itinerary
+    is_fastest, // ✅ เร็วสุดสะดวกสุด
+    is_day_trip, // ✅ 1 วันไปกลับ
   } = choice || {};
 
   const displayCurrency =
@@ -124,6 +130,16 @@ export default function PlanChoiceCard({ choice, onSelect }) {
             }
           </span>
           {recommended && <span className="plan-card-tag">แนะนำ</span>}
+          {/* ✅ แสดง tag "บินตรง" ถ้าเป็น non-stop */}
+          {choice?.is_non_stop && flightStops === 'Non-stop' && (
+            <span className="plan-card-tag" style={{ 
+              background: '#e3f2fd', 
+              color: '#1976d2',
+              marginLeft: '6px'
+            }}>
+              ✈️ บินตรง
+            </span>
+          )}
         </div>
 
         {tags && Array.isArray(tags) && tags.length > 0 && (
@@ -142,39 +158,56 @@ export default function PlanChoiceCard({ choice, onSelect }) {
         <p className="plan-card-desc">{description}</p>
       )}
 
-      {/* Flight Section (Amadeus) */}
+      {/* Flight Section (Amadeus) - แสดงทุก segments */}
       {flight && (
         <div className="plan-card-section">
           <div className="plan-card-section-title">✈️ เที่ยวบิน</div>
 
           <div className="plan-card-section-body">
-            {/* Carrier / flight number */}
-            {firstSeg ? (
-              <div>
-                สายการบิน: {firstSeg.carrier}
-                {firstSeg.flight_number ? ` • ${firstSeg.flight_number}` : ''}
-              </div>
+            {/* แสดงทุก segments */}
+            {flight.segments && flight.segments.length > 0 ? (
+              flight.segments.map((seg, idx) => (
+                <div key={idx} style={{ marginBottom: idx < flight.segments.length - 1 ? '12px' : '0' }}>
+                  <div style={{ fontWeight: '500', marginBottom: '4px' }}>
+                    Segment {idx + 1}
+                  </div>
+                  <div>
+                    สายการบิน: {seg.carrier || 'Unknown'}
+                    {seg.flight_number ? ` • ${seg.flight_number}` : ''}
+                  </div>
+                  <div className="plan-card-small">
+                    เส้นทาง: {seg.from || '-'} → {seg.to || '-'}
+                  </div>
+                  <div className="plan-card-small">
+                    ออก: {seg.depart_time || '-'} → ถึง: {seg.arrive_time || '-'}{seg.arrive_plus ? ` ${seg.arrive_plus}` : ''}
+                  </div>
+                  {seg.aircraft_code && (
+                    <div className="plan-card-small">
+                      เครื่อง: {seg.aircraft_code}
+                    </div>
+                  )}
+                  {seg.duration && (
+                    <div className="plan-card-small">
+                      ระยะเวลา: {seg.duration}
+                    </div>
+                  )}
+                </div>
+              ))
             ) : (
               <div>มีข้อมูลเที่ยวบิน (แต่ไม่พบ segment)</div>
             )}
 
-            {/* Route + time */}
-            <div className="plan-card-small">
-              {flightRoute ? `เส้นทาง: ${flightRoute}` : 'เส้นทาง: -'}
-              {flightTime ? ` • เวลา: ${flightTime}` : ''}
-            </div>
-
-            {/* Stops / carriers / cabin / baggage */}
-            <div className="plan-card-small">
-              {flightStops ? `${flightStops}` : ''}
-              {flightCarriers ? ` • ${flightCarriers}` : ''}
-              {flight?.cabin ? ` • Cabin: ${flight.cabin}` : ''}
-              {flight?.baggage ? ` • Bag: ${flight.baggage}` : ''}
+            {/* Cabin / baggage / stops */}
+            <div className="plan-card-small" style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(0,0,0,0.1)' }}>
+              {flightStops && <span>{flightStops}</span>}
+              {flightCarriers && <span> • {flightCarriers}</span>}
+              {flight?.cabin && <span> • Cabin: {flight.cabin}</span>}
+              {flight?.baggage && <span> • Bag: {flight.baggage}</span>}
             </div>
 
             {/* Flight price */}
             {flightPrice && (
-              <div className="plan-card-small">
+              <div className="plan-card-small" style={{ marginTop: '4px', fontWeight: '500' }}>
                 ราคาไฟลต์: {flightPrice}
               </div>
             )}
@@ -187,13 +220,23 @@ export default function PlanChoiceCard({ choice, onSelect }) {
         <div className="plan-card-section">
           <div className="plan-card-section-title">🏨 ที่พัก</div>
           <div className="plan-card-section-body">
-            <div>{hotelName || 'Unknown Hotel'}</div>
+            <div style={{ fontWeight: '500' }}>{hotelName || 'Unknown Hotel'}</div>
             <div className="plan-card-small">
               {hotelNights != null ? `${hotelNights} คืน` : ''}
               {hotelBoard ? ` • ${hotelBoard}` : ''}
             </div>
-            {hotelPrice && (
+            {hotel?.address && (
               <div className="plan-card-small">
+                ที่อยู่: {hotel.address}
+              </div>
+            )}
+            {hotel?.cityCode && (
+              <div className="plan-card-small">
+                เมือง: {hotel.cityCode}
+              </div>
+            )}
+            {hotelPrice && (
+              <div className="plan-card-small" style={{ marginTop: '4px', fontWeight: '500' }}>
                 ราคาโรงแรม: {hotelPrice}
               </div>
             )}
@@ -201,8 +244,76 @@ export default function PlanChoiceCard({ choice, onSelect }) {
         </div>
       )}
 
+      {/* Ground Transport Section */}
+      {ground_transport && (
+        <div className="plan-card-section">
+          <div className="plan-card-section-title">🚆/🚗 เดินทาง/ขนส่ง</div>
+          <div className="plan-card-section-body plan-card-small">
+            {ground_transport.split('\n').map((line, idx) => (
+              <div key={idx}>{line}</div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Itinerary Section - ซ่อนไว้และมีปุ่มแสดง/ซ่อน */}
+      {itinerary && (
+        <div className="plan-card-section">
+          <div className="plan-card-section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>📅 Day-by-Day Itinerary</span>
+            <button
+              onClick={() => setShowItinerary(!showItinerary)}
+              style={{
+                background: 'transparent',
+                border: '1px solid rgba(0,0,0,0.2)',
+                borderRadius: '4px',
+                padding: '4px 12px',
+                fontSize: '11px',
+                cursor: 'pointer',
+                color: '#666',
+                transition: 'all 0.2s',
+              }}
+              onMouseOver={(e) => {
+                e.target.style.background = 'rgba(0,0,0,0.05)';
+                e.target.style.borderColor = 'rgba(0,0,0,0.3)';
+              }}
+              onMouseOut={(e) => {
+                e.target.style.background = 'transparent';
+                e.target.style.borderColor = 'rgba(0,0,0,0.2)';
+              }}
+            >
+              {showItinerary ? '▼ ซ่อน' : '▶ ข้อมูลเพิ่มเติม'}
+            </button>
+          </div>
+          {showItinerary && (
+            <div className="plan-card-section-body plan-card-small" style={{ marginTop: '8px' }}>
+              {typeof itinerary === 'string' ? (
+                // If itinerary is a string (like day trip)
+                <div style={{ whiteSpace: 'pre-line' }}>{itinerary}</div>
+              ) : Array.isArray(itinerary) ? (
+                // If itinerary is an array of days
+                itinerary.map((day, idx) => (
+                  <div key={idx} style={{ marginBottom: '8px' }}>
+                    <div style={{ fontWeight: '500' }}>
+                      🗓 Day {day.day || idx + 1} – {day.title || 'Day ' + (idx + 1)}
+                    </div>
+                    {day.items && Array.isArray(day.items) && (
+                      <div style={{ marginLeft: '12px', marginTop: '4px' }}>
+                        {day.items.map((item, itemIdx) => (
+                          <div key={itemIdx}>- {item}</div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))
+              ) : null}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Transport Section (optional legacy) */}
-      {transport && (
+      {transport && !ground_transport && (
         <div className="plan-card-section">
           <div className="plan-card-section-title">🚗 การเดินทาง</div>
           <div className="plan-card-section-body plan-card-small">

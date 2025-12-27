@@ -244,20 +244,110 @@
 
 .message-wrapper {
   display: flex;
+  flex-direction: column;
 }
 
 .message-left {
-  justify-content: flex-start;
+  align-items: flex-start;
 }
 
 .message-right {
-  justify-content: flex-end;
+  align-items: flex-end;
+}
+
+.message-content-wrapper {
+  display: flex;
+  flex-direction: column;
+  max-width: 24rem;
+}
+
+.message-right .message-content-wrapper {
+  align-items: flex-end;
+}
+
+.message-left .message-content-wrapper {
+  align-items: flex-start;
 }
 
 .message-bubble {
-  max-width: 24rem;
   padding: 0.75rem 1rem;
   border-radius: 1rem;
+  width: 100%;
+}
+
+/* Action buttons under messages (ChatGPT style) */
+.message-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  align-items: center;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.message-wrapper:hover .message-actions {
+  opacity: 1;
+}
+
+.message-actions-user {
+  justify-content: flex-end;
+  padding-right: 4px;
+}
+
+.message-actions-bot {
+  justify-content: flex-start;
+  padding-left: 4px;
+}
+
+.btn-action {
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  background: rgba(255, 255, 255, 0.9);
+  color: #374151;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.message-user ~ .message-actions .btn-action {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+.btn-action:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 1);
+  border-color: rgba(0, 0, 0, 0.15);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.btn-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-refresh {
+  /* Inherits from .btn-action */
+}
+
+.btn-edit {
+  /* Inherits from .btn-action */
+}
+
+.btn-stop {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.3);
+  color: #dc2626;
+}
+
+.btn-stop:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #b91c1c;
 }
 
 .message-bot {
@@ -590,6 +680,34 @@
   background: linear-gradient(135deg, #7f00ff, #e100ff);
 }
 
+.plan-choices-grid .plan-card:nth-child(4) {
+  background: linear-gradient(135deg, #ff6b6b, #ee5a6f);
+}
+
+.plan-choices-grid .plan-card:nth-child(5) {
+  background: linear-gradient(135deg, #feca57, #ff9ff3);
+}
+
+.plan-choices-grid .plan-card:nth-child(6) {
+  background: linear-gradient(135deg, #48cae4, #023e8a);
+}
+
+.plan-choices-grid .plan-card:nth-child(7) {
+  background: linear-gradient(135deg, #a8e6cf, #3d5a80);
+}
+
+.plan-choices-grid .plan-card:nth-child(8) {
+  background: linear-gradient(135deg, #ffd93d, #6bcf7f);
+}
+
+.plan-choices-grid .plan-card:nth-child(9) {
+  background: linear-gradient(135deg, #c44569, #f8b500);
+}
+
+.plan-choices-grid .plan-card:nth-child(10) {
+  background: linear-gradient(135deg, #667eea, #764ba2);
+}
+
 /* Recommended highlight */
 .plan-card-recommended {
   border-color: rgba(255, 255, 255, 0.42);
@@ -706,6 +824,86 @@
   background: #ffffff;
   color: #111111 !important;
   transform: translateY(-1px);
+}
+
+/* =========================
+   Trip Summary UI (matches PlanChoiceCard look)
+   ========================= */
+
+.plan-card-summary {
+  background: linear-gradient(135deg, #0f172a, #111827) !important;
+}
+
+.summary-note {
+  font-size: 11px;
+  opacity: 0.85;
+  text-align: right;
+}
+
+.summary-kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.summary-k {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.summary-v {
+  font-size: 12px;
+  font-weight: 600;
+  text-align: right;
+  max-width: 62%;
+  word-break: break-word;
+}
+
+.summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.summary-action {
+  font-size: 12px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.14);
+  cursor: pointer;
+  transition: all 0.18s ease;
+  font-weight: 700;
+}
+
+.summary-action:hover {
+  background: #ffffff;
+  color: #111111 !important;
+  transform: translateY(-1px);
+}
+
+.summary-hints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.summary-footer {
+  justify-content: flex-end;
+}
+
+.summary-disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.summary-flow {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 /* ===== Typing Indicator (ตอน AI กำลังพิมพ์) ===== */
@@ -931,4 +1129,42 @@
 .trip-sidebar,
 .trip-sidebar * {
   color: #000 !important;
+}
+
+/* ===== Debug details (collapsible) ===== */
+.debug-details {
+  margin-top: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.debug-summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.debug-pre {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+
+/* ===== Trip summary UI (after selecting a choice) ===== */
+.trip-summary-ui-wrap {
+  margin: 12px 16px 0;
+  padding: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.trip-summary-ui-wrap * {
+  box-sizing: border-box;
 }

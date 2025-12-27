@@ -2,6 +2,12 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import './AITravelChat.css';
 import PlanChoiceCard from './PlanChoiceCard';
+import {
+  TripSummaryCard,
+  EditSectionCard,
+  UserInfoCard,
+  ConfirmBookingCard,
+} from './TripSummaryUI';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
@@ -46,10 +52,15 @@ function createNewTrip(title = 'ทริปใหม่') {
   };
 }
 
-export default function AITravelChat({ user, onLogout }) {
+export default function AITravelChat({ user, onLogout, initialPrompt = '' }) {
   const userId = user?.id || 'demo_user';
 
+  // Cooldown for regenerate/refresh to prevent spam
+  const REFRESH_COOLDOWN_MS = 4000;
+  const lastRefreshAtRef = useRef({}); // { [messageId]: number }
+
   const messagesEndRef = useRef(null);
+  const inputRef = useRef(null);
 
   // ===== Trips state (sidebar history) =====
   const [trips, setTrips] = useState(() => {
@@ -75,11 +86,23 @@ export default function AITravelChat({ user, onLogout }) {
   const [isTyping, setIsTyping] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isConnected, setIsConnected] = useState(true);
+  const [editingMessageId, setEditingMessageId] = useState(null);
+  const abortControllerRef = useRef(null);
+
+  // ===== Selected plan (persists across messages) =====
+  const [selectedPlan, setSelectedPlan] = useState(null);
+  const [selectedTravelSlots, setSelectedTravelSlots] = useState(null);
+  const [latestPlanChoices, setLatestPlanChoices] = useState([]);
 
   // ===== Derived: active trip =====
   const activeTrip = useMemo(() => {
     return trips.find(t => t.tripId === activeTripId) || trips[0];
   }, [trips, activeTripId]);
+
+  const lastUserMessageId = useMemo(() => {
+    const last = [...(activeTrip?.messages || [])].slice().reverse().find(m => m.type === 'user');
+    return last?.id;
+  }, [activeTrip]);
 
   const messages = activeTrip?.messages || [];
 
@@ -191,6 +214,17 @@ export default function AITravelChat({ user, onLogout }) {
     setTrips(prev => [nt, ...prev]);
     setActiveTripId(nt.tripId);
     setInputText('');
+
+    // Reset backend trip context (agent shouldn't auto-run on new trip)
+    fetch(`${API_BASE_URL}/api/chat/reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        user_id: userId,
+        client_trip_id: nt.tripId
+      })
+    }).catch(() => {});
   };
 
   const handleDeleteTrip = (tripId) => {
@@ -208,6 +242,28 @@ export default function AITravelChat({ user, onLogout }) {
     }
   };
 
+  // ===== Stop current request =====
+  const handleStop = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsTyping(false);
+  };
+
+  // ===== Edit message =====
+  const handleEditMessage = (messageId, messageText) => {
+    setEditingMessageId(messageId);
+    setInputText(messageText);
+    inputRef.current?.focus();
+  };
+
+  // ===== Refresh bot message =====
+  const handleRefreshBot = async (userMessageId, userMessageText) => {
+    if (isTyping) return;
+    await regenerateFromUserText(userMessageId, userMessageText);
+  };
+
   // ===== Send message to backend =====
   const sendMessage = async (textToSend) => {
     const trimmed = String(textToSend || '').trim();
@@ -221,6 +277,21 @@ export default function AITravelChat({ user, onLogout }) {
     const tripId = activeTrip?.tripId;
     if (!tripId) return;
 
+    // If editing, remove the old message and its bot response
+    if (editingMessageId) {
+      setTrips(prev =>
+        prev.map(t => {
+          if (t.tripId !== tripId) return t;
+          const msgIndex = t.messages.findIndex(m => m.id === editingMessageId);
+          if (msgIndex === -1) return t;
+          // Remove the user message and all messages after it
+          const newMessages = t.messages.slice(0, msgIndex);
+          return { ...t, messages: newMessages, updatedAt: nowISO() };
+        })
+      );
+      setEditingMessageId(null);
+    }
+
     const userMessage = {
       id: Date.now(),
       type: 'user',
@@ -230,13 +301,20 @@ export default function AITravelChat({ user, onLogout }) {
     appendMessageToTrip(tripId, userMessage);
     setIsTyping(true);
 
+    // Create abort controller for this request
+    abortControllerRef.current = new AbortController();
+
     try {
       const response = await fetch(`${API_BASE_URL}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        signal: abortControllerRef.current.signal,
         body: JSON.stringify({
+          user_id: userId,
           message: trimmed,
-          user_id: userId
+          trigger: 'user_message',
+          client_trip_id: tripId
         })
       });
 
@@ -249,7 +327,10 @@ export default function AITravelChat({ user, onLogout }) {
         id: Date.now() + 1,
         type: 'bot',
         text: data.response,
+        debug: data.debug || null,
+        travelSlots: data.travel_slots || null,
         searchResults: data.search_results || {},
+        // หลังเลือกช้อยส์แล้ว ไม่ต้องแสดง list ช้อยส์ซ้ำ (ให้ไหลไป Trip Summary ต่อเลย)
         planChoices: data.plan_choices || [],
         agentState: data.agent_state || null,
         suggestions: data.suggestions || [],
@@ -259,6 +340,14 @@ export default function AITravelChat({ user, onLogout }) {
 
       appendMessageToTrip(tripId, botMessage);
 
+      // Keep plan/choices in state so cards don't disappear
+      if (data.plan_choices) setLatestPlanChoices(data.plan_choices);
+      if (data.current_plan) {
+        setSelectedPlan(data.current_plan);
+        setSelectedTravelSlots(data.travel_slots || null);
+      }
+
+
       // ✅ ตั้งชื่อทริปโดย Gemini จาก backend
       if (data.trip_title) {
         setTripTitle(tripId, data.trip_title);
@@ -266,23 +355,123 @@ export default function AITravelChat({ user, onLogout }) {
     } catch (error) {
       console.error('Error calling API:', error);
 
-      const errorMessage = {
-        id: Date.now() + 1,
-        type: 'bot',
-        text: `❌ Error: ${error.message}\n\nPlease check:\n1. Backend is running\n2. API Keys are correct`
-      };
+      if (error.name === 'AbortError') {
+        appendMessageToTrip(tripId, {
+          id: Date.now() + 1,
+          type: 'bot',
+          text: '⏹️ หยุดการทำงานแล้วค่ะ'
+        });
+      } else {
+        const errorMessage = {
+          id: Date.now() + 1,
+          type: 'bot',
+          text: `❌ Error: ${error.message}\n\nPlease check:\n1. Backend is running\n2. API Keys are correct`
+        };
 
-      appendMessageToTrip(tripId, errorMessage);
-      setIsConnected(false);
+        appendMessageToTrip(tripId, errorMessage);
+        setIsConnected(false);
+      }
     } finally {
       setIsTyping(false);
+      abortControllerRef.current = null;
     }
   };
+
+  // ===== Regenerate (refresh) last user message like ChatGPT =====
+  const regenerateFromUserText = async (messageId, userText) => {
+    const tripId = activeTrip?.tripId;
+    if (!tripId) return;
+    const trimmed = String(userText || '').trim();
+    if (!trimmed) return;
+
+    const now = Date.now();
+    const lastAt = lastRefreshAtRef.current[messageId] || 0;
+    if (now - lastAt < REFRESH_COOLDOWN_MS) return;
+    lastRefreshAtRef.current[messageId] = now;
+
+    setIsTyping(true);
+    
+    // Create abort controller for this request
+    abortControllerRef.current = new AbortController();
+    
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        signal: abortControllerRef.current.signal,
+        body: JSON.stringify({
+          user_id: userId,
+          message: trimmed,
+          trigger: 'refresh',
+          no_memory: true,
+          client_trip_id: tripId
+        })
+      });
+      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      const data = await response.json();
+
+      const botMessage = {
+        id: Date.now() + 1,
+        type: 'bot',
+        text: data.response,
+        debug: data.debug || null,
+        travelSlots: data.travel_slots || null,
+        searchResults: data.search_results || {},
+        // หลังเลือกช้อยส์แล้ว ให้ไหลไปหน้าสรุปทริป ไม่ต้องแสดง list ช้อยส์ซ้ำอีก
+        planChoices: data.plan_choices || [],
+        agentState: data.agent_state || null,
+        suggestions: data.suggestions || [],
+        currentPlan: data.current_plan || null,
+        tripTitle: data.trip_title || null
+      };
+
+      appendMessageToTrip(tripId, botMessage);
+
+      // Keep plan/choices in state so cards don't disappear
+      if (data.plan_choices) setLatestPlanChoices(data.plan_choices);
+      if (data.current_plan) {
+        setSelectedPlan(data.current_plan);
+        setSelectedTravelSlots(data.travel_slots || null);
+      }
+
+      if (data.trip_title) setTripTitle(tripId, data.trip_title);
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        appendMessageToTrip(tripId, {
+          id: Date.now() + 1,
+          type: 'bot',
+          text: '⏹️ หยุดการทำงานแล้วค่ะ'
+        });
+      } else {
+        appendMessageToTrip(tripId, {
+          id: Date.now() + 1,
+          type: 'bot',
+          text: `❌ Error: ${e.message}`
+        });
+      }
+    } finally {
+      setIsTyping(false);
+      abortControllerRef.current = null;
+    }
+  };
+
+  // ===== Auto-send initial prompt (from Home 'Get Started') =====
+  const didAutoSendRef = useRef(false);
+
+  useEffect(() => {
+    if (didAutoSendRef.current) return;
+    const p = (initialPrompt || '').trim();
+    if (!p) return;
+    didAutoSendRef.current = true;
+    sendMessage(p);
+  }, [initialPrompt]);
 
   const handleSend = () => {
     if (!inputText.trim()) return;
     const currentInput = inputText;
     setInputText('');
+    setEditingMessageId(null);
     sendMessage(currentInput);
   };
 
@@ -349,6 +538,7 @@ export default function AITravelChat({ user, onLogout }) {
       const res = await fetch(`${API_BASE_URL}/api/select_choice`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           user_id: userId,
           choice_id: choiceId
@@ -368,6 +558,8 @@ export default function AITravelChat({ user, onLogout }) {
         id: Date.now() + 1,
         type: 'bot',
         text: data.response,
+        debug: data.debug || null,
+        travelSlots: data.travel_slots || null,
         searchResults: data.search_results || {},
         planChoices: data.plan_choices || [],
         agentState: data.agent_state || null,
@@ -377,6 +569,20 @@ export default function AITravelChat({ user, onLogout }) {
       };
 
       appendMessageToTrip(tripId, botMessage);
+
+      // Keep plan/choices in state so cards don't disappear
+      if (data.plan_choices) setLatestPlanChoices(data.plan_choices);
+      
+      // ✅ Force update selected plan immediately to trigger TripSummaryCard display
+      // ✅ Clear selectedPlan if backend returns null (e.g., no choices available)
+      if (data.current_plan) {
+        setSelectedPlan(data.current_plan);
+        setSelectedTravelSlots(data.travel_slots || null);
+      } else {
+        // ✅ Clear old selectedPlan if no current_plan (prevents showing stale summary cards)
+        setSelectedPlan(null);
+        setSelectedTravelSlots(null);
+      }
 
       if (data.trip_title) {
         setTripTitle(tripId, data.trip_title);
@@ -395,6 +601,72 @@ export default function AITravelChat({ user, onLogout }) {
     sendMessage(suggestionText);
   };
 
+  // ===== Trip summary UI actions (after selecting a choice) =====
+  const handlePickEditSection = (section) => {
+    const map = {
+      flight: 'ขอไฟลต์ใหม่ (เช่น เช้ากว่านี้/เร็วสุด/ถูกสุด)',
+      hotel: 'ขอที่พักใหม่ (เช่น ใกล้รถไฟ/ริมหาด/ถูกลง)',
+      dates: 'ขยับวันเดินทาง/จำนวนคืน (เช่น +1 วัน หรือ เพิ่ม/ลดคืน)',
+      pax: 'เปลี่ยนจำนวนผู้โดยสาร (เช่น ผู้ใหญ่ 2 เด็ก 1)',
+      transport: 'ขอการเดินทาง/รถเช่า (เช่น รถเช่า 3 วัน)',
+    };
+    const text = map[section] || 'ขอแก้ไขแผน';
+    setInputText(text);
+    setTimeout(() => inputRef.current?.focus(), 0);
+  };
+
+  const handleConfirmBooking = async () => {
+    const tripId = activeTrip?.tripId;
+    if (!tripId) return;
+
+    setIsTyping(true);
+    
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/booking/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          user_id: userId,
+          trip_id: tripId,
+          user_profile: userProfile || null,
+        }),
+      });
+      
+      const data = await res.json().catch(() => null);
+      
+      if (!res.ok) {
+        const msg = (data && (data.detail?.message || data.detail?.detail || data.detail || data.message)) || 'Booking failed';
+        const errorMsg = typeof msg === 'string' ? msg : JSON.stringify(msg);
+        appendMessageToTrip(tripId, {
+          id: Date.now() + 1,
+          type: 'bot',
+          text: `❌ จองไม่สำเร็จค่ะ: ${errorMsg}`,
+        });
+        return;
+      }
+      
+      // Success - show booking confirmation
+      const successMessage = data?.message || '✅ จองสำเร็จ';
+      appendMessageToTrip(tripId, {
+        id: Date.now() + 1,
+        type: 'bot',
+        text: successMessage,
+        agentState: { intent: 'booking', step: 'completed', steps: [] },
+      });
+      
+    } catch (e) {
+      appendMessageToTrip(tripId, {
+        id: Date.now() + 1,
+        type: 'bot',
+        text: `❌ จองไม่สำเร็จค่ะ: ${String(e)}`,
+      });
+    } finally {
+      setIsTyping(false);
+    }
+  };
+
+
   // ===== Agent State / Typing Text =====
   const lastBotWithState = [...messages]
     .slice()
@@ -402,6 +674,76 @@ export default function AITravelChat({ user, onLogout }) {
     .find(m => m.type === 'bot' && m.agentState);
 
   const currentAgentState = lastBotWithState?.agentState || null;
+
+  // ===== Latest selected plan (after picking a choice) =====
+  // We keep this in state so the UI doesn't disappear when new messages arrive.
+  // Fallback: if state is empty (e.g., after reload), derive from last bot message with currentPlan.
+  const latestBotWithPlan = useMemo(() => {
+    // If we have selectedPlan in state, prioritize it by creating a virtual message
+    if (selectedPlan) {
+      // Find the most recent bot message that has currentPlan and is not an error message
+      const lastBotWithPlan = [...messages]
+        .slice()
+        .reverse()
+        .find(m => 
+          m.type === 'bot' && 
+          m.currentPlan && 
+          m.agentState?.step !== 'no_previous_choices' &&
+          !m.text?.includes('ยังไม่มีช้อยส์')
+        );
+      
+      // If found, return it with the selectedPlan to ensure it's up to date
+      if (lastBotWithPlan) {
+        return {
+          ...lastBotWithPlan,
+          currentPlan: selectedPlan,
+          travelSlots: selectedTravelSlots || lastBotWithPlan.travelSlots,
+        };
+      }
+      
+      // If not found but we have selectedPlan, create a virtual message
+      return {
+        id: Date.now(),
+        type: 'bot',
+        text: 'แพลนที่เลือก',
+        currentPlan: selectedPlan,
+        travelSlots: selectedTravelSlots,
+      };
+    }
+    
+    // Otherwise, find from messages (excluding error messages)
+    return [...messages]
+      .slice()
+      .reverse()
+      .find(m => 
+        m.type === 'bot' && 
+        m.currentPlan &&
+        m.agentState?.step !== 'no_previous_choices' &&
+        !m.text?.includes('ยังไม่มีช้อยส์')
+      );
+  }, [messages, selectedPlan, selectedTravelSlots]);
+
+  const effectiveSelectedPlan = selectedPlan || latestBotWithPlan?.currentPlan || null;
+  const effectiveSelectedTravelSlots = selectedTravelSlots || latestBotWithPlan?.travelSlots || null;
+  const userProfile = useMemo(() => {
+    if (!user) return null;
+    // Map your app user -> booking profile fields (can be edited later)
+    const fullName = (user.name || '').trim();
+    const parts = fullName.split(/\s+/).filter(Boolean);
+    const first_name = parts[0] || '';
+    const last_name = parts.slice(1).join(' ') || '';
+    return {
+      first_name,
+      last_name,
+      email: user.email || '',
+      phone: user.phone || '',
+      dob: user.dob || '',
+      gender: user.gender || '',
+      passport_no: user.passport_no || '',
+      passport_expiry: user.passport_expiry || '',
+      nationality: user.nationality || '',
+    };
+  }, [user]);
 
   const getTypingText = () => {
     if (!currentAgentState) return 'กำลังคิดคำตอบให้คุณ...';
@@ -537,67 +879,169 @@ export default function AITravelChat({ user, onLogout }) {
                   key={message.id}
                   className={`message-wrapper ${message.type === 'user' ? 'message-right' : 'message-left'}`}
                 >
-                  <div className={`message-bubble ${message.type === 'user' ? 'message-user' : 'message-bot'}`}>
-                    {/* ข้อความหลัก */}
-                    <p className="message-text">{formatMessageText(message.text)}</p>
+                  <div className="message-content-wrapper">
+                    <div className={`message-bubble ${message.type === 'user' ? 'message-user' : 'message-bot'}`}>
+                      {/* ข้อความหลัก */}
+                      <p className="message-text">{formatMessageText(message.text)}</p>
 
-                    {/* แสดงแพลนที่เลือกปัจจุบัน (หลังจากเลือกช้อยส์แล้ว) */}
-                    {message.type === 'bot' && message.currentPlan && (
-                      <div className="current-plan-summary">
-                        <div className="current-plan-title">แพลนที่เลือกปัจจุบัน</div>
-                        <div className="current-plan-body">
-                          {message.currentPlan.trip_meta && (
-                            <div className="current-plan-row">
-                              <span>
-                                {message.currentPlan.trip_meta.origin} → {message.currentPlan.trip_meta.destination}
-                              </span>
-                              {message.currentPlan.trip_meta.check_in && message.currentPlan.trip_meta.check_out && (
+                      {/* Debug (ช่วยตรวจปัญหา Amadeus/Slots) */}
+                      {message.type === 'bot' && message.debug && (
+                        <details className="debug-details">
+                          <summary className="debug-summary">ดูรายละเอียด Debug</summary>
+                          <pre className="debug-pre">{JSON.stringify(message.debug, null, 2)}</pre>
+                        </details>
+                      )}
+
+                      {/* แสดงแพลนที่เลือกปัจจุบัน (ข... สำหรับบอทข้อความเก่า) */}
+                      {message.type === 'bot' && message.currentPlan && message.id !== latestBotWithPlan?.id && (
+                        <div className="current-plan-summary">
+                          <div className="current-plan-title">แพลนที่เลือกปัจจุบัน</div>
+                          <div className="current-plan-body">
+                            {message.currentPlan.trip_meta && (
+                              <div className="current-plan-row">
                                 <span>
-                                  {' '}• {message.currentPlan.trip_meta.check_in} – {message.currentPlan.trip_meta.check_out}
+                                  {message.currentPlan.trip_meta.origin} → {message.currentPlan.trip_meta.destination}
                                 </span>
-                              )}
-                            </div>
-                          )}
-                          {message.currentPlan.summary && (
-                            <div className="current-plan-price">
-                              {message.currentPlan.summary.currency || 'THB'}{' '}
-                              {message.currentPlan.summary.total_price?.toLocaleString('th-TH')}
-                            </div>
-                          )}
+                                {message.currentPlan.trip_meta.check_in && message.currentPlan.trip_meta.check_out && (
+                                  <span>
+                                    {' '}• {message.currentPlan.trip_meta.check_in} – {message.currentPlan.trip_meta.check_out}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                            {message.currentPlan.summary && (
+                              <div className="current-plan-price">
+                                {message.currentPlan.summary.currency || 'THB'}{' '}
+                                {message.currentPlan.summary.total_price?.toLocaleString('th-TH')}
+                              </div>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
 
-                    {/* การ์ดแผนเที่ยวจาก planChoices */}
-                    {message.planChoices && message.planChoices.length > 0 && (
-                      <div className="plan-choices-block">
-                        <div className="plan-choices-header">
-                          แผนเที่ยวที่จัดให้คุณเลือกทั้งหมด {message.planChoices.length} ช้อยส์
+                      {/* ✅ Seamless workflow: หลังเลือกช้อยส์ ให้แสดง Trip Summary + Edit + User + Confirm ต่อเนื่อง */}
+                      {/* Show TripSummaryCard if: 
+                          1. This message has currentPlan and is the latest one with plan, OR
+                          2. We have selectedPlan in state and this is the latest bot message with plan
+                          3. AND it's not an error message (no choices available) */}
+                      {message.type === 'bot' && 
+                       ((selectedPlan && message.id === latestBotWithPlan?.id) ||
+                        (message.currentPlan && message.id === latestBotWithPlan?.id && !selectedPlan)) &&
+                       // ✅ ตรวจสอบว่าไม่ใช่ "ยังไม่มีช้อยส์" message
+                       message.currentPlan &&
+                       // ✅ ตรวจสอบว่า agent_state ไม่ใช่ "no_previous_choices"
+                       message.agentState?.step !== 'no_previous_choices' &&
+                       !message.text?.includes('ยังไม่มีช้อยส์') && (
+                        <div className="summary-flow">
+                          <TripSummaryCard 
+                            plan={selectedPlan || message.currentPlan} 
+                            travelSlots={selectedTravelSlots || message.travelSlots} 
+                          />
+                          <EditSectionCard
+                            onSelectSection={handlePickEditSection}
+                            hints={["ขอไฟลต์เช้ากว่านี้", "ขอที่พักถูกลง", "ขยับวัน +1", "เพิ่มเด็ก 1"]}
+                          />
+                          <UserInfoCard userProfile={userProfile} />
+                          <ConfirmBookingCard
+                            canBook={true}
+                            onConfirm={handleConfirmBooking}
+                            note="ระบบจะจองเฉพาะ Amadeus Sandbox (test) เท่านั้น"
+                          />
                         </div>
-                        <div className="plan-choices-grid">
-                          {message.planChoices.map((choice) => (
-                            <PlanChoiceCard
-                              key={choice.id}
-                              choice={choice}
-                              onSelect={handleSelectPlanChoice}
-                            />
+                      )}
+
+                      {/* การ์ดแผนเที่ยวจาก planChoices */}
+                      {message.planChoices && message.planChoices.length > 0 && (
+                        <div className="plan-choices-block">
+                          <div className="plan-choices-header">
+                            แผนเที่ยวที่จัดให้คุณเลือกทั้งหมด {message.planChoices.length} ช้อยส์
+                          </div>
+                          <div className="plan-choices-grid">
+                            {message.planChoices.map((choice) => (
+                              <PlanChoiceCard
+                                key={choice.id}
+                                choice={choice}
+                                onSelect={handleSelectPlanChoice}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Suggestion chips จากบอท */}
+                      {message.type === 'bot' && message.suggestions && message.suggestions.length > 0 && (
+                        <div className="suggestion-chips">
+                          {message.suggestions.map((s, idx) => (
+                            <button
+                              key={idx}
+                              className="suggestion-chip"
+                              onClick={() => handleSuggestionClick(s)}
+                            >
+                              {s}
+                            </button>
                           ))}
                         </div>
+                      )}
+                    </div>
+
+                    {/* Action buttons under messages (ChatGPT style) */}
+                    {message.type === 'user' && message.id === lastUserMessageId && (
+                      <div className="message-actions message-actions-user">
+                        <button
+                          className="btn-action btn-refresh"
+                          onClick={() => regenerateFromUserText(message.id, message.text)}
+                          disabled={isTyping}
+                          title="รีเฟช"
+                        >
+                          ↻ รีเฟช
+                        </button>
+                        <button
+                          className="btn-action btn-edit"
+                          onClick={() => handleEditMessage(message.id, message.text)}
+                          disabled={isTyping}
+                          title="แก้ไข"
+                        >
+                          ✏️ แก้ไข
+                        </button>
+                        {isTyping && (
+                          <button
+                            className="btn-action btn-stop"
+                            onClick={handleStop}
+                            title="หยุด"
+                          >
+                            ⏹️ หยุด
+                          </button>
+                        )}
                       </div>
                     )}
-
-                    {/* Suggestion chips จากบอท */}
-                    {message.type === 'bot' && message.suggestions && message.suggestions.length > 0 && (
-                      <div className="suggestion-chips">
-                        {message.suggestions.map((s, idx) => (
+                    
+                    {/* Action buttons under bot messages */}
+                    {message.type === 'bot' && (
+                      <div className="message-actions message-actions-bot">
+                        <button
+                          className="btn-action btn-refresh"
+                          onClick={() => {
+                            // Find the user message that triggered this bot response
+                            const tripMessages = activeTrip?.messages || [];
+                            const userMsg = tripMessages.find(m => m.type === 'user' && m.id < message.id);
+                            if (userMsg) {
+                              handleRefreshBot(userMsg.id, userMsg.text);
+                            }
+                          }}
+                          disabled={isTyping}
+                          title="รีเฟช"
+                        >
+                          ↻ รีเฟช
+                        </button>
+                        {isTyping && (
                           <button
-                            key={idx}
-                            className="suggestion-chip"
-                            onClick={() => handleSuggestionClick(s)}
+                            className="btn-action btn-stop"
+                            onClick={handleStop}
+                            title="หยุด"
                           >
-                            {s}
+                            ⏹️ หยุด
                           </button>
-                        ))}
+                        )}
                       </div>
                     )}
                   </div>
@@ -622,10 +1066,13 @@ export default function AITravelChat({ user, onLogout }) {
             </div>
           </div>
 
+          {/* Trip Summary UI จะถูกแสดงแบบ seamless อยู่ใน bubble ของบอท “ข้อความล่าสุดที่มี currentPlan” */}
+
           {/* Input Area */}
           <div className="input-area">
             <div className="input-wrapper">
               <textarea
+                ref={inputRef}
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 onKeyPress={handleKeyPress}

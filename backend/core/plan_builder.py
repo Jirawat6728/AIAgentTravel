@@ -2,7 +2,38 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+
+# Currency conversion rates (approximate, update periodically)
+# Source: Typical exchange rates as of 2024-2025
+CURRENCY_RATES_TO_THB: Dict[str, float] = {
+    "EUR": 38.0,  # 1 EUR ≈ 38 THB
+    "JPY": 0.24,  # 1 JPY ≈ 0.24 THB
+    "USD": 35.0,  # 1 USD ≈ 35 THB
+    "GBP": 44.0,  # 1 GBP ≈ 44 THB
+    "THB": 1.0,   # THB to THB = 1
+}
+
+
+def convert_to_thb(amount: float, from_currency: str) -> Tuple[float, str]:
+    """
+    Convert amount from given currency to THB.
+    Returns (converted_amount, "THB")
+    """
+    if not amount or not from_currency:
+        return amount, from_currency or "THB"
+    
+    from_currency = from_currency.upper().strip()
+    if from_currency == "THB":
+        return amount, "THB"
+    
+    rate = CURRENCY_RATES_TO_THB.get(from_currency)
+    if rate:
+        return round(amount * rate, 2), "THB"
+    
+    # If currency not found, return original (but log warning in production)
+    return amount, from_currency
 
 
 def _airline_name(code: Optional[str]) -> str:
@@ -235,73 +266,240 @@ def build_plan_choices_3(search_results: Dict[str, Any], travel_slots: Dict[str,
 
     choices: List[Dict[str, Any]] = []
 
-    if flights and hotels:
-        f = flight_offer_to_detailed(flights[0])
-        h = pick_hotel_fields(hotels[0], nights=nights)
+    # Process all flights and hotels
+    processed_flights: List[Dict[str, Any]] = []
+    processed_hotels: List[Dict[str, Any]] = []
 
-        currency = h.get("currency") or f.get("currency")
-        total = None
-        if currency and f.get("price_total") and h.get("price_total"):
-            total = round(float(f["price_total"]) + float(h["price_total"]), 2)
+    # Process flights (limit to top 20 for performance)
+    for flight_offer in flights[:20]:
+        f = flight_offer_to_detailed(flight_offer)
+        flight_price_thb = None
+        if f.get("price_total") and f.get("currency"):
+            flight_price_thb, _ = convert_to_thb(float(f["price_total"]), f["currency"])
+        if flight_price_thb is not None:
+            # Calculate total duration and number of stops
+            segments = f.get("segments") or []
+            total_duration_sec = 0
+            num_stops = len(segments) - 1  # Number of stops = segments - 1
+            is_non_stop = len(segments) == 1
+            
+            # Calculate total duration from all segments
+            for seg in segments:
+                duration_str = seg.get("duration") or ""
+                # Parse ISO 8601 duration (e.g., "PT4H25M" = 4 hours 25 minutes)
+                if duration_str and isinstance(duration_str, str) and duration_str.startswith("PT"):
+                    hours = 0
+                    minutes = 0
+                    try:
+                        if "H" in duration_str:
+                            hours_part = duration_str.split("H")[0].replace("PT", "")
+                            hours = int(hours_part) if hours_part else 0
+                            remaining = duration_str.split("H")[1] if "H" in duration_str else ""
+                        else:
+                            remaining = duration_str.replace("PT", "")
+                        if "M" in remaining:
+                            minutes_part = remaining.split("M")[0]
+                            minutes = int(minutes_part) if minutes_part else 0
+                        total_duration_sec += (hours * 3600 + minutes * 60)
+                    except (ValueError, AttributeError):
+                        pass
+            
+            processed_flights.append({
+                "flight": f,
+                "flight_price_thb": flight_price_thb,
+                "total_duration_sec": total_duration_sec,
+                "num_stops": num_stops,
+                "is_non_stop": is_non_stop,
+            })
 
-        c1 = {
-            "id": 1,
-            "label": "ช้อยส์ 1",
-            "title": "🟢 ช้อยส์ 1 (แนะนำ) – คลาสสิก คุ้มค่า",
-            "recommended": True,
-            "flight": f,
-            "hotel": h,
-            "ground_transport": (
+    # Process hotels (limit to top 20 for performance)
+    for hotel_item in hotels[:20]:
+        h = pick_hotel_fields(hotel_item, nights=nights)
+        hotel_price_thb = None
+        if h.get("price_total") and h.get("currency"):
+            hotel_price_thb, _ = convert_to_thb(float(h["price_total"]), h["currency"])
+        if hotel_price_thb is not None:
+            processed_hotels.append({
+                "hotel": h,
+                "hotel_price_thb": hotel_price_thb,
+            })
+
+    # Create combinations: Flight + Hotel
+    for flight_data in processed_flights:
+        for hotel_data in processed_hotels:
+            total_thb = round(flight_data["flight_price_thb"] + hotel_data["hotel_price_thb"], 2)
+            choices.append({
+                "flight": flight_data["flight"],
+                "hotel": hotel_data["hotel"],
+                "flight_price_thb": flight_data["flight_price_thb"],
+                "hotel_price_thb": hotel_data["hotel_price_thb"],
+                "total_price": total_thb,
+            })
+
+    # Add Flight-only options
+    for flight_data in processed_flights:
+        choices.append({
+            "flight": flight_data["flight"],
+            "hotel": None,
+            "flight_price_thb": flight_data["flight_price_thb"],
+            "hotel_price_thb": None,
+            "total_price": flight_data["flight_price_thb"],
+        })
+
+    # Add Hotel-only options
+    for hotel_data in processed_hotels:
+        choices.append({
+            "flight": None,
+            "hotel": hotel_data["hotel"],
+            "flight_price_thb": None,
+            "hotel_price_thb": hotel_data["hotel_price_thb"],
+            "total_price": hotel_data["hotel_price_thb"],
+        })
+
+    # Find fastest non-stop flight for "เร็วสุดสะดวกสุด" choice
+    fastest_non_stop_flight = None
+    fastest_duration = float('inf')
+    
+    # Separate non-stop and stop flights
+    non_stop_flights = [f for f in processed_flights if f.get("is_non_stop")]
+    stop_flights = [f for f in processed_flights if not f.get("is_non_stop")]
+    
+    # Find fastest non-stop for special "เร็วสุดสะดวกสุด" choice
+    for flight_data in non_stop_flights:
+        if flight_data.get("total_duration_sec", float('inf')) < fastest_duration:
+            fastest_duration = flight_data.get("total_duration_sec", float('inf'))
+            fastest_non_stop_flight = flight_data
+    
+    # Add "เร็วสุดสะดวกสุด" choice if we found a non-stop flight
+    if fastest_non_stop_flight and fastest_non_stop_flight.get("flight"):
+        fastest_choice = {
+            "flight": fastest_non_stop_flight["flight"],
+            "hotel": None,  # Day trip, no hotel needed
+            "flight_price_thb": fastest_non_stop_flight["flight_price_thb"],
+            "hotel_price_thb": None,
+            "total_price": fastest_non_stop_flight["flight_price_thb"],
+            "is_fastest": True,
+            "is_day_trip": True,
+            "is_non_stop": True,
+        }
+        # Insert at the beginning (will be choice 0 or special handling)
+        choices.insert(0, fastest_choice)
+    
+    # Add more non-stop flight-only choices (up to 3 additional)
+    non_stop_count = 0
+    for flight_data in non_stop_flights:
+        # Skip if already added as fastest_choice
+        if flight_data == fastest_non_stop_flight:
+            continue
+        if non_stop_count >= 3:  # Limit to 3 additional non-stop choices
+            break
+        
+        # Add non-stop flight-only choice
+        choices.append({
+            "flight": flight_data["flight"],
+            "hotel": None,
+            "flight_price_thb": flight_data["flight_price_thb"],
+            "hotel_price_thb": None,
+            "total_price": flight_data["flight_price_thb"],
+            "is_non_stop": True,
+        })
+        non_stop_count += 1
+
+    # Sort by total_price (cheapest first)
+    choices.sort(key=lambda x: x.get("total_price") or float('inf'))
+
+    # Take top 10 choices (excluding fastest if it's already included)
+    # If fastest is in top 10, keep it; otherwise add it separately
+    regular_choices = [c for c in choices if not c.get("is_fastest")][:10]
+    
+    # Add fastest choice separately if it's not in top 10
+    if fastest_non_stop_flight and fastest_choice not in regular_choices[:10]:
+        # Insert fastest at position 0
+        regular_choices.insert(0, fastest_choice)
+        # Limit to 10 total
+        regular_choices = regular_choices[:10]
+    elif fastest_non_stop_flight:
+        # Fastest is already in the list, move it to front
+        fastest_idx = next((i for i, c in enumerate(regular_choices) if c.get("is_fastest")), None)
+        if fastest_idx is not None and fastest_idx > 0:
+            regular_choices.insert(0, regular_choices.pop(fastest_idx))
+    
+    choices = regular_choices if fastest_non_stop_flight else choices[:10]
+
+    # Build final choice objects with labels and titles
+    labels = ["เร็วสุดสะดวกสุด", "ถูกสุด", "ประหยัด", "คุ้มค่า", "สมดุล", "สะดวก", "สบาย", "พรีเมียม", "หรูหรา", "สุดพิเศษ", "VIP"]
+    emojis = ["⚡", "💰", "💵", "💸", "💳", "⭐", "✨", "🌟", "💎", "👑", "🏆"]
+
+    final_choices: List[Dict[str, Any]] = []
+    for idx, choice_data in enumerate(choices):
+        choice_id = idx + 1
+        is_fastest = choice_data.get("is_fastest", False)
+        is_day_trip = choice_data.get("is_day_trip", False)
+        
+        if is_fastest:
+            label = "เร็วสุดสะดวกสุด"
+            emoji = "⚡"
+        else:
+            label = labels[min(idx, len(labels) - 1)]
+            emoji = emojis[min(idx, len(emojis) - 1)]
+        
+        # Determine title based on what's included
+        if is_fastest and is_day_trip:
+            title = f"{emoji} ช้อยส์ {choice_id} – {label} (1 วันไปกลับ, ไม่มีต่อเครื่อง)"
+        elif choice_data.get("flight") and choice_data.get("hotel"):
+            title = f"{emoji} ช้อยส์ {choice_id} – {label} (ไฟลต์ + ที่พัก)"
+        elif choice_data.get("flight"):
+            title = f"{emoji} ช้อยส์ {choice_id} – {label} (ไฟลต์เท่านั้น)"
+        elif choice_data.get("hotel"):
+            title = f"{emoji} ช้อยส์ {choice_id} – {label} (ที่พักเท่านั้น)"
+        else:
+            title = f"{emoji} ช้อยส์ {choice_id} – {label}"
+
+        # Build ground transport message
+        if is_fastest and is_day_trip:
+            ground_transport = "⚡ โหมดเร็วสุด: 1 วันไปกลับ ไม่มีต่อเครื่อง ระยะเวลาสั้นที่สุด เหมาะสำหรับทริปสั้นๆ"
+        elif choice_data.get("flight") and choice_data.get("hotel"):
+            ground_transport = (
                 "ยังไม่ดึงราคาขนส่ง (รถไฟ/รถบัส/เรือ/รถไฟความเร็วสูง) จาก Amadeus self-service\n"
                 "คุณสามารถพิมพ์ให้ฉันเพิ่มเส้นทางระหว่างเมืองได้ (แต่จะไม่ใส่ราคา ถ้าไม่มี API จริง)\n"
                 + (hotel_note if hotel_note else "")
-            ).strip(),
-            "itinerary": build_day_by_day(nights=nights, dest_label=dest_label),
-            "currency": currency,
-            "total_price": total,
+            ).strip()
+        elif choice_data.get("flight"):
+            ground_transport = "โหมดประหยัด: เลือกที่พักทีหลัง / หรือให้ฉันหาเพิ่ม (ขึ้นกับ sandbox inventory)"
+        elif choice_data.get("hotel"):
+            ground_transport = "โหมดสบาย: เน้นที่พักก่อน แล้วค่อยจัดไฟลต์ทีหลัง (หรือให้ฉันหาไฟลต์เพิ่ม)"
+        else:
+            ground_transport = ""
+
+        # For day trip, use nights=0
+        trip_nights = 0 if is_day_trip else nights
+        
+        # Build itinerary
+        if is_day_trip:
+            itinerary_text = "🗓 1 วันไปกลับ\n- เดินทางไป: เช้า/เที่ยง\n- เที่ยว/ทำกิจกรรม\n- เดินทางกลับ: เย็น/ค่ำ\n\n⚡ ไม่มีต่อเครื่อง ระยะเวลาสั้นที่สุด"
+        else:
+            itinerary_text = build_day_by_day(nights=trip_nights, dest_label=dest_label)
+        
+        final_choice = {
+            "id": choice_id,
+            "label": label,
+            "title": title,
+            "recommended": (choice_id == 1) or is_fastest,  # First choice or fastest is recommended
+            "flight": choice_data.get("flight"),
+            "hotel": choice_data.get("hotel"),
+            "ground_transport": ground_transport,
+            "itinerary": itinerary_text,
+            "currency": "THB",
+            "total_price": choice_data.get("total_price"),
             "price_breakdown": {
-                "flight_total": round(float(f["price_total"]), 2) if f.get("price_total") else None,
-                "hotel_total": round(float(h["price_total"]), 2) if h.get("price_total") else None,
-                "currency": currency,
+                "flight_total": choice_data.get("flight_price_thb"),
+                "hotel_total": choice_data.get("hotel_price_thb"),
+                "currency": "THB",
             },
+            "is_fastest": is_fastest,
+            "is_day_trip": is_day_trip,
         }
-        c1["display_text"] = render_choice_text(c1)
-        choices.append(c1)
+        final_choice["display_text"] = render_choice_text(final_choice)
+        final_choices.append(final_choice)
 
-    if flights:
-        f2 = flight_offer_to_detailed(flights[min(1, len(flights) - 1)])
-        c2 = {
-            "id": len(choices) + 1,
-            "label": "ช้อยส์ 2",
-            "title": "🔵 ช้อยส์ 2 – ประหยัด",
-            "recommended": False,
-            "flight": f2,
-            "hotel": None,
-            "ground_transport": "โหมดประหยัด: เลือกที่พักทีหลัง / หรือให้ฉันหาเพิ่ม (ขึ้นกับ sandbox inventory)",
-            "itinerary": build_day_by_day(nights=nights, dest_label=dest_label),
-            "currency": f2.get("currency"),
-            "total_price": round(float(f2["price_total"]), 2) if f2.get("price_total") else None,
-            "price_breakdown": {"flight_total": round(float(f2["price_total"]), 2) if f2.get("price_total") else None, "hotel_total": None, "currency": f2.get("currency")},
-        }
-        c2["display_text"] = render_choice_text(c2)
-        choices.append(c2)
-
-    if hotels:
-        h3 = pick_hotel_fields(hotels[min(1, len(hotels) - 1)], nights=nights)
-        c3 = {
-            "id": len(choices) + 1,
-            "label": "ช้อยส์ 3",
-            "title": "🟣 ช้อยส์ 3 – สบาย พรีเมียม",
-            "recommended": False,
-            "flight": None,
-            "hotel": h3,
-            "ground_transport": "โหมดสบาย: เน้นที่พักก่อน แล้วค่อยจัดไฟลต์ทีหลัง (หรือให้ฉันหาไฟลต์เพิ่ม)",
-            "itinerary": build_day_by_day(nights=nights, dest_label=dest_label),
-            "currency": h3.get("currency"),
-            "total_price": round(float(h3["price_total"]), 2) if h3.get("price_total") else None,
-            "price_breakdown": {"flight_total": None, "hotel_total": round(float(h3["price_total"]), 2) if h3.get("price_total") else None, "currency": h3.get("currency")},
-        }
-        c3["display_text"] = render_choice_text(c3)
-        choices.append(c3)
-
-    return choices[:3]
+    return final_choices

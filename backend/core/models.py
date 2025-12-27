@@ -7,6 +7,12 @@ class ChatRequest(BaseModel):
     message: str
     user_id: Optional[str] = "demo_user"
     existing_travel_slots: Optional[Dict[str, Any]] = None
+    client_trip_id: Optional[str] = None
+    # Agent brake control
+    # - user_message: run agent
+    # - refresh: regenerate (should not write memory)
+    # - chat_init / chat_reset: do not run agent
+    trigger: Optional[str] = "user_message"
 
 class SelectChoiceRequest(BaseModel):
     user_id: Optional[str] = "demo_user"
