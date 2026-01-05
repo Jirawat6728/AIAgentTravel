@@ -5,6 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes.chat import router as chat_router
 from api.routes.health import router as health_router
+from api.routes.maps import router as maps_router
+from api.routes.memory import router as memory_router
 from db import connect_to_mongo, close_mongo
 
 app = FastAPI(title="AI Travel Agent – Fast but Modular")
@@ -20,6 +22,8 @@ app.add_middleware(
 
 app.include_router(health_router)
 app.include_router(chat_router)
+app.include_router(maps_router)  # ✅ Google Maps API endpoints
+app.include_router(memory_router)  # ✅ Level 3: Memory API endpoints
 
 @app.on_event("startup")
 async def _startup():

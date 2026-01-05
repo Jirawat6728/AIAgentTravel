@@ -13,8 +13,8 @@ from core.auth import (
     get_current_user,
 )
 from db import get_db
-from db.repos.sessions_repo import SessionsRepo
-from db.repos.users_repo import UsersRepo
+from db.mongo.repos.sessions_repo import SessionsRepo
+from db.mongo.repos.users_repo import UsersRepo
 from services.google_auth import verify_google_id_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -85,6 +85,93 @@ async def me(user: Dict[str, Any] = Depends(get_current_user)):
             "email": user.get("email"),
             "name": user.get("name"),
             "picture": user.get("picture"),
+            # Profile fields
+            "first_name": user.get("first_name"),
+            "last_name": user.get("last_name"),
+            "phone": user.get("phone"),
+            "dob": user.get("dob"),
+            "gender": user.get("gender"),
+            "passport_no": user.get("passport_no"),
+            "passport_expiry": user.get("passport_expiry"),
+            "nationality": user.get("nationality"),
+            "address_line1": user.get("address_line1"),
+            "address_line2": user.get("address_line2"),
+            "city": user.get("city"),
+            "province": user.get("province"),
+            "postal_code": user.get("postal_code"),
+            "country": user.get("country"),
+        },
+    }
+
+
+class UpdateProfileRequest(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    dob: Optional[str] = None
+    gender: Optional[str] = None
+    passport_no: Optional[str] = None
+    passport_expiry: Optional[str] = None
+    nationality: Optional[str] = None
+    address_line1: Optional[str] = None
+    address_line2: Optional[str] = None
+    city: Optional[str] = None
+    province: Optional[str] = None
+    postal_code: Optional[str] = None
+    country: Optional[str] = None
+
+
+@router.put("/profile")
+async def update_profile(
+    payload: UpdateProfileRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Update user profile information."""
+    db = get_db()
+    users = UsersRepo(db)
+    
+    updated = await users.update_profile(
+        user_id=user["_id"],
+        first_name=payload.first_name,
+        last_name=payload.last_name,
+        phone=payload.phone,
+        dob=payload.dob,
+        gender=payload.gender,
+        passport_no=payload.passport_no,
+        passport_expiry=payload.passport_expiry,
+        nationality=payload.nationality,
+        address_line1=payload.address_line1,
+        address_line2=payload.address_line2,
+        city=payload.city,
+        province=payload.province,
+        postal_code=payload.postal_code,
+        country=payload.country,
+    )
+    
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return {
+        "ok": True,
+        "user": {
+            "id": str(updated["_id"]),
+            "email": updated.get("email"),
+            "name": updated.get("name"),
+            "picture": updated.get("picture"),
+            "first_name": updated.get("first_name"),
+            "last_name": updated.get("last_name"),
+            "phone": updated.get("phone"),
+            "dob": updated.get("dob"),
+            "gender": updated.get("gender"),
+            "passport_no": updated.get("passport_no"),
+            "passport_expiry": updated.get("passport_expiry"),
+            "nationality": updated.get("nationality"),
+            "address_line1": updated.get("address_line1"),
+            "address_line2": updated.get("address_line2"),
+            "city": updated.get("city"),
+            "province": updated.get("province"),
+            "postal_code": updated.get("postal_code"),
+            "country": updated.get("country"),
         },
     }
 

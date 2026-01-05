@@ -17,3 +17,4 @@ class ChatRequest(BaseModel):
 class SelectChoiceRequest(BaseModel):
     user_id: Optional[str] = "demo_user"
     choice_id: int
+    trip_id: Optional[str] = None  # ✅ เพิ่ม trip_id สำหรับ slot workflow

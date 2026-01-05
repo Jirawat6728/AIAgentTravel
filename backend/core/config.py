@@ -139,6 +139,13 @@ def get_amadeus_booking_client() -> Optional[AmadeusClient]:
 def get_amadeus_client() -> Optional[AmadeusClient]:
     return get_amadeus_search_client()
 
+
+# ----------------------------
+# MongoDB
+# ----------------------------
+MONGODB_URL = (os.getenv("MONGODB_URL") or "").strip()
+MONGODB_DB_NAME = (os.getenv("MONGODB_DB_NAME") or "travel_agent").strip()
+
 def env_status() -> dict:
     """For /health: do not throw, just report."""
     # Backward-compatible keys (amadeus_ok/env/host) represent SEARCH side.

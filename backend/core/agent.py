@@ -1,7 +1,21 @@
 from __future__ import annotations
 from typing import Any, Dict, List
 import random
-from core.badges import pick_label
+
+# ===== Badges/Labels =====
+LABELS = [
+    ("ถูกสุด", "green"),
+    ("เร็วสุด", "blue"),
+    ("ประหยัด", "teal"),
+    ("สมดุล", "purple"),
+    ("สบาย", "orange"),
+    ("พรีเมี่ยม", "gold"),
+]
+
+def pick_label(idx: int) -> tuple[str, str]:
+    return LABELS[idx % len(LABELS)]
+
+# ===== Plan Choices Builder =====
 
 def _thb(amount: float) -> int:
     return int(round(amount))

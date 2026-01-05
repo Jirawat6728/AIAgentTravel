@@ -9,8 +9,8 @@ from fastapi import Cookie, Depends, HTTPException, Request
 from jwt import PyJWTError
 
 from db import get_db
-from db.repos.sessions_repo import SessionsRepo
-from db.repos.users_repo import UsersRepo
+from db.mongo.repos.sessions_repo import SessionsRepo
+from db.mongo.repos.users_repo import UsersRepo
 
 AUTH_JWT_SECRET = (os.getenv("AUTH_JWT_SECRET") or "dev-change-me").strip()
 AUTH_JWT_ALG = (os.getenv("AUTH_JWT_ALG") or "HS256").strip()

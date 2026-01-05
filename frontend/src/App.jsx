@@ -2,19 +2,35 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import LoginPage from "./components/LoginPage.jsx";
 import AITravelChat from "./components/AITravelChat.jsx";
 import HomePage from "./components/HomePage.jsx";
+import UserProfileEditPage from "./components/UserProfileEditPage.jsx";
+import MyBookingsPage from "./components/MyBookingsPage.jsx";
+import FlightsPage from "./components/FlightsPage.jsx";
+import HotelsPage from "./components/HotelsPage.jsx";
+import CarRentalsPage from "./components/CarRentalsPage.jsx";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
-// Temporary: bypass auth (guest mode). Set VITE_AUTH_BYPASS=0 to re-enable real auth.
-const AUTH_BYPASS = (import.meta.env.VITE_AUTH_BYPASS || "1").toString() === "1";
+// Set VITE_AUTH_BYPASS=1 to enable guest mode (bypass auth)
+const AUTH_BYPASS = (import.meta.env.VITE_AUTH_BYPASS || "0").toString() === "1";
 
 function App() {
-  const [view, setView] = useState("home"); // 'home' | 'login' | 'chat'
+  const [view, setView] = useState("home"); // 'home' | 'login' | 'chat' | 'profile' | 'bookings' | 'profile'
   const [isLoggedIn, setIsLoggedIn] = useState(AUTH_BYPASS);
   const [user, setUser] = useState(AUTH_BYPASS ? { id: "guest", name: "Guest" } : null);
   const [pendingPrompt, setPendingPrompt] = useState("");
 
   const googleInitRef = useRef(false);
+
+  // Check if user has required profile information
+  const hasRequiredProfileInfo = useCallback((userData) => {
+    if (!userData || AUTH_BYPASS) return true; // Guest mode always passes
+    return !!(
+      userData.first_name &&
+      userData.last_name &&
+      userData.email &&
+      userData.phone
+    );
+  }, []);
 
   const refreshMe = useCallback(async () => {
     if (AUTH_BYPASS) {
@@ -28,6 +44,10 @@ function App() {
       if (data?.user) {
         setIsLoggedIn(true);
         setUser(data.user);
+        // Check if profile is complete, if not redirect to profile edit
+        if (!hasRequiredProfileInfo(data.user) && view !== "profile") {
+          setView("profile");
+        }
       } else {
         setIsLoggedIn(false);
         setUser(null);
@@ -37,7 +57,7 @@ function App() {
       setIsLoggedIn(false);
       setUser(null);
     }
-  }, []);
+  }, [hasRequiredProfileInfo, view]);
 
   useEffect(() => {
     refreshMe();
@@ -87,8 +107,15 @@ function App() {
       throw new Error(data?.detail || "Login failed");
     }
     setIsLoggedIn(true);
-    setUser({ ...data.user, id: data.user.id });
-    setView("chat");
+    const userData = { ...data.user, id: data.user.id };
+    setUser(userData);
+    
+    // Check if profile is complete, if not redirect to profile edit
+    if (!hasRequiredProfileInfo(userData)) {
+      setView("profile");
+    } else {
+      setView("chat");
+    }
   };
 
   // ---- Google Login (GIS) ----
@@ -193,7 +220,39 @@ function App() {
 
   const handleLoginSuccess = async () => {
     await refreshMe();
-    setView("chat");
+    // refreshMe will check profile and redirect if needed
+  };
+
+  const handleSaveProfile = async (profileData) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/auth/profile`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(profileData),
+      });
+      const data = await res.json();
+      if (!data?.ok) {
+        throw new Error(data?.detail || "Failed to save profile");
+      }
+      // Update user state
+      setUser({ ...user, ...data.user });
+      // Redirect to chat
+      setView("chat");
+    } catch (error) {
+      throw error;
+    }
+  };
+
+  const handleCancelProfile = () => {
+    // If user cancels and doesn't have required info, they can't proceed
+    // But we'll let them go to chat anyway (they can edit later)
+    if (hasRequiredProfileInfo(user)) {
+      setView("chat");
+    } else {
+      // Still allow them to proceed, but warn them
+      setView("chat");
+    }
   };
 
   return (
@@ -209,18 +268,83 @@ function App() {
 
       {view === "login" && (
         <LoginPage
-          onBack={goHome}
+          onLogin={handleSignIn}
           onGoogleLogin={handleGoogleLoginClick}
-          onLoginSuccess={handleLoginSuccess}
         />
       )}
 
       {view === "chat" && isLoggedIn && (
-        <AITravelChat user={user} onLogout={handleSignOut} initialPrompt={pendingPrompt} />
+        <AITravelChat 
+          user={user} 
+          onLogout={handleSignOut} 
+          initialPrompt={pendingPrompt}
+          onNavigateToBookings={() => setView("bookings")}
+          onNavigateToFlights={() => setView("flights")}
+          onNavigateToHotels={() => setView("hotels")}
+          onNavigateToCarRentals={() => setView("car-rentals")}
+        />
       )}
 
       {view === "chat" && !isLoggedIn && AUTH_BYPASS && (
-        <AITravelChat user={{ id: "guest", name: "Guest" }} onLogout={handleSignOut} initialPrompt={pendingPrompt} />
+        <AITravelChat 
+          user={{ id: "guest", name: "Guest" }} 
+          onLogout={handleSignOut} 
+          initialPrompt={pendingPrompt}
+          onNavigateToBookings={() => setView("bookings")}
+          onNavigateToFlights={() => setView("flights")}
+          onNavigateToHotels={() => setView("hotels")}
+          onNavigateToCarRentals={() => setView("car-rentals")}
+        />
+      )}
+
+      {view === "profile" && isLoggedIn && (
+        <UserProfileEditPage
+          user={user}
+          onSave={handleSaveProfile}
+          onCancel={handleCancelProfile}
+        />
+      )}
+
+      {view === "bookings" && (isLoggedIn || AUTH_BYPASS) && (
+        <MyBookingsPage
+          user={user || { id: "guest", name: "Guest" }}
+          onBack={() => setView("chat")}
+          onLogout={handleSignOut}
+        />
+      )}
+
+      {view === "flights" && (isLoggedIn || AUTH_BYPASS) && (
+        <FlightsPage
+          user={user || { id: "guest", name: "Guest" }}
+          onLogout={handleSignOut}
+          onNavigateToBookings={() => setView("bookings")}
+          onNavigateToAI={() => setView("chat")}
+          onNavigateToFlights={() => setView("flights")}
+          onNavigateToHotels={() => setView("hotels")}
+          onNavigateToCarRentals={() => setView("car-rentals")}
+        />
+      )}
+
+      {view === "hotels" && (isLoggedIn || AUTH_BYPASS) && (
+        <HotelsPage
+          user={user || { id: "guest", name: "Guest" }}
+          onLogout={handleSignOut}
+          onNavigateToBookings={() => setView("bookings")}
+          onNavigateToAI={() => setView("chat")}
+          onNavigateToFlights={() => setView("flights")}
+          onNavigateToCarRentals={() => setView("car-rentals")}
+        />
+      )}
+
+      {view === "car-rentals" && (isLoggedIn || AUTH_BYPASS) && (
+        <CarRentalsPage
+          user={user || { id: "guest", name: "Guest" }}
+          onLogout={handleSignOut}
+          onNavigateToBookings={() => setView("bookings")}
+          onNavigateToAI={() => setView("chat")}
+          onNavigateToFlights={() => setView("flights")}
+          onNavigateToHotels={() => setView("hotels")}
+        />
       )}
     </div>
   );
