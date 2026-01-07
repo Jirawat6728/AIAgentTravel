@@ -11,7 +11,7 @@ import CarRentalsPage from "./components/CarRentalsPage.jsx";
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
 // Set VITE_AUTH_BYPASS=1 to enable guest mode (bypass auth)
-const AUTH_BYPASS = (import.meta.env.VITE_AUTH_BYPASS || "0").toString() === "1";
+const AUTH_BYPASS = (import.meta.env.VITE_AUTH_BYPASS || "1").toString() === "1";
 
 function App() {
   const [view, setView] = useState("home"); // 'home' | 'login' | 'chat' | 'profile' | 'bookings' | 'profile'
@@ -65,19 +65,64 @@ function App() {
 
   const goHome = () => setView("home");
 
-  const handleSignIn = () => {
+  const handleSignIn = async (email, password) => {
     if (AUTH_BYPASS) {
       setIsLoggedIn(true);
       setUser({ id: "guest", name: "Guest" });
       setView("chat");
       return;
     }
-    setView("login");
+    // 1. If it's a dev bypass from the dashed button
+    if (email === "dev_user" && window.location.hostname === 'localhost') {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/auth/dev-login`, { 
+          method: "POST",
+          credentials: "include" 
+        });
+        const data = await res.json();
+        if (data.ok) {
+          setIsLoggedIn(true);
+          setUser(data.user);
+          setView("chat");
+          return;
+        }
+      } catch (e) {
+        console.error("Dev login failed", e);
+      }
+    }
+
+    // 2. Standard Email login
+    if (email && email.includes('@')) {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/auth/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ email, password })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          setIsLoggedIn(true);
+          setUser(data.user);
+          setView("chat");
+          return;
+        } else {
+          alert(data.detail || "Login failed");
+        }
+      } catch (e) {
+        console.error("Login failed", e);
+        alert("Could not connect to server");
+      }
+    }
+
+    // Default: just show login screen
+    if (view !== "login") setView("login");
   };
 
   const handleSignOut = async () => {
     if (AUTH_BYPASS) {
-      // In guest mode, "sign out" just returns home.
+      setIsLoggedIn(false);
+      setUser(null);
       setView("home");
       return;
     }
@@ -133,7 +178,7 @@ function App() {
       client_id: GOOGLE_CLIENT_ID,
       callback: () => {}, // we attach callback per-prompt to get a fresh Promise
       auto_select: false,
-      cancel_on_tap_outside: true,
+      cancel_on_tap_outside: false,
     });
     googleInitRef.current = true;
   };
@@ -150,7 +195,7 @@ function App() {
           return reject(new Error("No credential returned from Google"));
         },
         auto_select: false,
-        cancel_on_tap_outside: true,
+        cancel_on_tap_outside: false,
       });
 
       window.google.accounts.id.prompt((notification) => {
@@ -183,7 +228,6 @@ function App() {
   // This is what LoginPage's "Login with Google" button calls (no args)
   const handleGoogleLoginClick = async () => {
     if (AUTH_BYPASS) {
-      // No Google login for now: bypass straight to chat.
       setIsLoggedIn(true);
       setUser({ id: "guest", name: "Guest" });
       setView("chat");
@@ -260,6 +304,7 @@ function App() {
       {view === "home" && (
         <HomePage
           isLoggedIn={isLoggedIn}
+          user={user}
           onSignIn={handleSignIn}
           onSignOut={handleSignOut}
           onGetStarted={handleGetStarted}
@@ -277,6 +322,7 @@ function App() {
         <AITravelChat 
           user={user} 
           onLogout={handleSignOut} 
+          onSignIn={handleSignIn}
           initialPrompt={pendingPrompt}
           onNavigateToBookings={() => setView("bookings")}
           onNavigateToFlights={() => setView("flights")}
@@ -289,6 +335,7 @@ function App() {
         <AITravelChat 
           user={{ id: "guest", name: "Guest" }} 
           onLogout={handleSignOut} 
+          onSignIn={handleSignIn}
           initialPrompt={pendingPrompt}
           onNavigateToBookings={() => setView("bookings")}
           onNavigateToFlights={() => setView("flights")}
@@ -310,6 +357,7 @@ function App() {
           user={user || { id: "guest", name: "Guest" }}
           onBack={() => setView("chat")}
           onLogout={handleSignOut}
+          onSignIn={handleSignIn}
         />
       )}
 
@@ -317,6 +365,7 @@ function App() {
         <FlightsPage
           user={user || { id: "guest", name: "Guest" }}
           onLogout={handleSignOut}
+          onSignIn={handleSignIn}
           onNavigateToBookings={() => setView("bookings")}
           onNavigateToAI={() => setView("chat")}
           onNavigateToFlights={() => setView("flights")}
@@ -329,6 +378,7 @@ function App() {
         <HotelsPage
           user={user || { id: "guest", name: "Guest" }}
           onLogout={handleSignOut}
+          onSignIn={handleSignIn}
           onNavigateToBookings={() => setView("bookings")}
           onNavigateToAI={() => setView("chat")}
           onNavigateToFlights={() => setView("flights")}
@@ -340,6 +390,7 @@ function App() {
         <CarRentalsPage
           user={user || { id: "guest", name: "Guest" }}
           onLogout={handleSignOut}
+          onSignIn={handleSignIn}
           onNavigateToBookings={() => setView("bookings")}
           onNavigateToAI={() => setView("chat")}
           onNavigateToFlights={() => setView("flights")}

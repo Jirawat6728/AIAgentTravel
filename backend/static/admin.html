@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Travel Agent - Backend Admin Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@2.6.14/dist/vue.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        .status-ok { color: #10b981; }
+        .status-error { color: #ef4444; }
+        .log-container { 
+            background: #1e293b; 
+            color: #e2e8f0; 
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.85rem;
+            max-height: 400px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div id="app" class="container mx-auto px-4 py-8">
+        <header class="flex justify-between items-center mb-8 border-b pb-4">
+            <h1 class="text-3xl font-bold text-gray-800">🛠️ AI Travel Agent Admin Dashboard</h1>
+            <div class="flex items-center gap-4">
+                <div v-if="isRealtime" class="flex items-center gap-2 px-3 py-1 bg-green-50 text-green-700 rounded-full text-xs font-bold border border-green-200">
+                    <span class="relative flex h-2 w-2">
+                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                        <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                    </span>
+                    LIVE REALTIME
+                </div>
+                <span class="text-sm text-gray-500">Last update: {{ lastUpdate }}</span>
+                <button @click="fetchData" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded shadow transition">
+                    Refresh
+                </button>
+            </div>
+        </header>
+
+        <!-- 1. Connection & Service Status -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+            <div v-for="(service, name) in status.services" :key="name" class="bg-white p-6 rounded-lg shadow">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="text-lg font-semibold uppercase text-gray-600">{{ name.replace('_', ' ') }}</h3>
+                    <div :class="service.status === 'ok' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'" class="px-2 py-1 rounded text-xs font-bold">
+                        {{ service.status.toUpperCase() }}
+                    </div>
+                </div>
+                <p class="text-sm text-gray-500 truncate" :title="service.message">{{ service.message }}</p>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
+            <!-- 2. System Info (FastAPI Process) -->
+            <div class="bg-white p-6 rounded-lg shadow col-span-1">
+                <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+                    🚀 System Process
+                </h2>
+                <div class="space-y-3">
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="text-gray-600">Uptime</span>
+                        <span class="font-mono text-blue-600">{{ formatUptime(status.system.uptime_seconds) }}</span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="text-gray-600">Memory Usage</span>
+                        <span class="font-mono">{{ status.system.memory_usage_mb }} MB</span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="text-gray-600">CPU Usage</span>
+                        <span class="font-mono">{{ status.system.cpu_usage_percent }}%</span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="text-gray-600">Active Threads</span>
+                        <span class="font-mono">{{ status.system.active_threads }}</span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="text-gray-600">FastAPI Version</span>
+                        <span class="font-mono">0.100+</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3. AI Agent & Workflow -->
+            <div class="bg-white p-6 rounded-lg shadow col-span-1">
+                <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+                    🧠 AI Agent Status
+                </h2>
+                <div class="space-y-3">
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="text-gray-600">Gemini Model</span>
+                        <span class="text-xs font-mono bg-gray-100 px-1 rounded">{{ status.config.gemini_model }}</span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="text-gray-600">Workflow Mode</span>
+                        <span class="text-sm font-semibold">Two-Pass ReAct</span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="text-gray-600">Max Iterations</span>
+                        <span class="font-mono">{{ status.config.max_controller_iterations || 3 }}</span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="text-gray-600">Memory Recall</span>
+                        <span class="text-green-600 text-sm font-bold">Enabled</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 4. Safety Guard & API Config -->
+            <div class="bg-white p-6 rounded-lg shadow col-span-1">
+                <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+                    🛡️ Safety & API
+                </h2>
+                <div class="space-y-3">
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="text-gray-600">Amadeus Guard</span>
+                        <span :class="status.config.amadeus_safety_guard ? 'text-green-600 font-bold' : 'text-red-600 font-bold'">
+                            {{ status.config.amadeus_safety_guard ? 'ACTIVE (Sandbox)' : 'OFF (PROD)' }}
+                        </span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="text-gray-600">Environment</span>
+                        <span class="uppercase text-xs bg-purple-100 text-purple-800 px-2 py-1 rounded font-bold">
+                            {{ status.config.amadeus_env }}
+                        </span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="text-gray-600">Amadeus Search</span>
+                        <span class="uppercase text-xs font-bold" :class="status.config.amadeus_search_env === 'production' ? 'bg-red-100 text-red-800 px-2 py-1 rounded' : 'bg-green-100 text-green-800 px-2 py-1 rounded'">
+                            {{ status.config.amadeus_search_env }}
+                        </span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="text-gray-600">Amadeus Booking</span>
+                        <span class="uppercase text-xs font-bold" :class="status.config.amadeus_booking_env === 'production' ? 'bg-red-100 text-red-800 px-2 py-1 rounded' : 'bg-green-100 text-green-800 px-2 py-1 rounded'">
+                            {{ status.config.amadeus_booking_env }}
+                        </span>
+                    </div>
+                    <div class="flex justify-between border-b pb-2">
+                        <span class="text-gray-600">Google Maps</span>
+                        <span class="text-green-600 text-sm font-bold">Key Valid</span>
+                    </div>
+                    <div class="mt-4">
+                        <div class="text-xs text-gray-400 italic">
+                            * Amadeus Guard ensures no real bookings are made in test environment.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 5. Recent Sessions / Bookings -->
+        <div class="bg-white p-6 rounded-lg shadow mb-8">
+            <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+                🗂️ Recent Sessions & Trip Plans
+            </h2>
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Session ID</th>
+                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Title</th>
+                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-gray-200 text-sm">
+                        <tr v-for="sess in sessions" :key="sess._id">
+                            <td class="px-4 py-2 font-mono text-xs">{{ sess.session_id }}</td>
+                            <td class="px-4 py-2">{{ sess.title || 'Untitled' }}</td>
+                            <td class="px-4 py-2">
+                                <span v-if="sess.trip_plan" class="px-2 py-0.5 rounded-full text-xs font-semibold"
+                                      :class="sess.trip_plan.flights?.length ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'">
+                                    Plan Active
+                                </span>
+                            </td>
+                            <td class="px-4 py-2 text-gray-500 text-xs">{{ sess.last_updated }}</td>
+                        </tr>
+                        <tr v-if="sessions.length === 0">
+                            <td colspan="4" class="px-4 py-8 text-center text-gray-400 italic">No active sessions found in MongoDB</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 6. Agent Activity Feed -->
+        <div class="bg-white p-6 rounded-lg shadow mb-8">
+            <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+                🤖 Live Agent Activity Feed
+            </h2>
+            <div class="overflow-y-auto max-h-80 space-y-2">
+                <div v-for="(activity, index) in status.agent_activities" :key="index" class="p-3 rounded-lg border-l-4" 
+                     :class="getActivityClass(activity.type)">
+                    <div class="flex justify-between items-start mb-1">
+                        <span class="text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded" :class="getTypeBadgeClass(activity.type)">
+                            {{ activity.type }}
+                        </span>
+                        <span class="text-xs text-gray-400 font-mono">{{ formatTime(activity.timestamp) }}</span>
+                    </div>
+                    <p class="text-sm font-medium text-gray-800">{{ activity.message }}</p>
+                    <div class="mt-2 text-xs text-gray-500 font-mono">
+                        Session: {{ activity.session_id.split('::')[1]?.substring(0,8) }}... | User: {{ activity.user_id }}
+                    </div>
+                </div>
+                <div v-if="!status.agent_activities || status.agent_activities.length === 0" class="text-center py-8 text-gray-400 italic">
+                    No agent activity recorded yet. Start a chat to see logs.
+                </div>
+            </div>
+        </div>
+
+        <!-- 7. Debug Logs -->
+        <div class="bg-white p-6 rounded-lg shadow mb-8">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold flex items-center gap-2">
+                    📋 System Logs (Last 100 lines)
+                </h2>
+                <div class="flex gap-2">
+                    <button @click="fetchLogs" class="text-xs bg-gray-200 hover:bg-gray-300 px-3 py-1 rounded">Refresh Logs</button>
+                </div>
+            </div>
+            <div class="log-container p-4 rounded border border-gray-700">
+                <div v-if="logs.content && logs.content.length > 0">
+                    <div v-for="(line, idx) in logs.content" :key="idx" class="mb-1">
+                        {{ line }}
+                    </div>
+                </div>
+                <div v-else class="text-gray-500 italic">
+                    Loading logs or log file is empty...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        new Vue({
+            el: '#app',
+            data: {
+                status: {
+                    services: {},
+                    system: {},
+                    config: {},
+                    agent_activities: []
+                },
+                sessions: [],
+                logs: { content: [] },
+                lastUpdate: '',
+                loading: false,
+                eventSource: null,
+                isRealtime: true
+            },
+            mounted() {
+                this.initRealtime();
+                this.fetchLogs();
+                this.fetchSessions();
+                
+                // Refresh static parts every 10s
+                setInterval(() => {
+                    this.fetchLogs();
+                    this.fetchSessions();
+                }, 10000);
+            },
+            beforeDestroy() {
+                if (this.eventSource) {
+                    this.eventSource.close();
+                }
+            },
+            methods: {
+                initRealtime() {
+                    if (this.eventSource) this.eventSource.close();
+                    
+                    this.eventSource = new EventSource('/api/admin/stream');
+                    this.eventSource.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        if (data.error) {
+                            console.error('Stream error:', data.error);
+                            this.isRealtime = false;
+                            return;
+                        }
+                        this.status = data;
+                        this.lastUpdate = new Date().toLocaleTimeString();
+                        this.isRealtime = true;
+                    };
+                    
+                    this.eventSource.onerror = (err) => {
+                        console.error('EventSource failed:', err);
+                        this.isRealtime = false;
+                        this.eventSource.close();
+                        // Retry after 5s
+                        setTimeout(() => this.initRealtime(), 5000);
+                    };
+                },
+                async fetchData() {
+                    // Fallback for manual refresh
+                    try {
+                        const res = await axios.get('/api/admin/status');
+                        this.status = res.data;
+                        this.lastUpdate = new Date().toLocaleTimeString();
+                    } catch (err) {
+                        console.error('Error fetching status:', err);
+                    }
+                },
+                async fetchLogs() {
+                    try {
+                        const res = await axios.get('/api/admin/logs?lines=100');
+                        this.logs = res.data;
+                    } catch (err) {
+                        console.error('Error fetching logs:', err);
+                    }
+                },
+                async fetchSessions() {
+                    try {
+                        const res = await axios.get('/api/admin/sessions?limit=10');
+                        this.sessions = Array.isArray(res.data) ? res.data : [];
+                    } catch (err) {
+                        console.error('Error fetching sessions:', err);
+                    }
+                },
+                formatUptime(seconds) {
+                    const h = Math.floor(seconds / 3600);
+                    const m = Math.floor((seconds % 3600) / 60);
+                    const s = seconds % 60;
+                    return `${h}h ${m}m ${s}s`;
+                },
+                formatTime(isoString) {
+                    return new Date(isoString).toLocaleTimeString();
+                },
+                getActivityClass(type) {
+                    switch(type) {
+                        case 'thought': return 'bg-purple-50 border-purple-400';
+                        case 'action': return 'bg-blue-50 border-blue-400';
+                        case 'response': return 'bg-green-50 border-green-400';
+                        case 'error': return 'bg-red-50 border-red-400';
+                        case 'start': return 'bg-yellow-50 border-yellow-400';
+                        default: return 'bg-gray-50 border-gray-400';
+                    }
+                },
+                getTypeBadgeClass(type) {
+                    switch(type) {
+                        case 'thought': return 'bg-purple-100 text-purple-700';
+                        case 'action': return 'bg-blue-100 text-blue-700';
+                        case 'response': return 'bg-green-100 text-green-700';
+                        case 'error': return 'bg-red-100 text-red-700';
+                        case 'start': return 'bg-yellow-100 text-yellow-700';
+                        default: return 'bg-gray-100 text-gray-700';
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
+

@@ -1,5 +1,6 @@
 // AITravelChat.jsx
 import React, { useState, useRef, useEffect, useMemo } from 'react';
+import Swal from 'sweetalert2';
 import './AITravelChat.css';
 import AppHeader from './AppHeader';
 import PlanChoiceCard from './PlanChoiceCard';
@@ -26,6 +27,14 @@ function nowISO() {
   return new Date().toISOString();
 }
 
+const GREETINGS = [
+  "สวัสดีค่ะคุณ {name} ดิฉันคือ AI Travel Agent 💙 เล่าไอเดียทริปของคุณได้เลย หรือจะให้ช่วยคิดทริปให้ตั้งแต่ศูนย์ก็ได้นะคะ",
+  "ยินดีต้อนรับค่ะคุณ {name} ✈️ วันนี้อยากให้ดิฉันช่วยแพลนทริปในฝันที่ไหนดีคะ? บอกมาได้เลยค่ะ!",
+  "สวัสดีค่ะคุณ {name}! พร้อมจะออกเดินทางหรือยังคะ? 🌍 จะไปทะเล ภูเขา หรือต่างประเทศ ให้ดิฉันช่วยจัดการให้นะคะ",
+  "สวัสดีค่ะคุณ {name} 💙 วันนี้มีแพลนจะไปเที่ยวที่ไหนในใจหรือยังคะ? ให้ดิฉันช่วยหาไฟลต์หรือที่พักดีๆ ให้ไหมคะ?",
+  "ยินดีที่ได้พบกันค่ะคุณ {name} ✨ วันนี้อยากไปพักผ่อนแบบไหนดีคะ? เล่าความต้องการของคุณให้ดิฉันฟังได้เลยค่ะ"
+];
+
 function shortDate(iso) {
   try {
     const d = new Date(iso);
@@ -39,27 +48,30 @@ function makeId(prefix = 'trip') {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
-function defaultWelcomeMessage() {
+function defaultWelcomeMessage(userName = "คุณ") {
+  const randomGreeting = GREETINGS[Math.floor(Math.random() * GREETINGS.length)];
+  const personalizedGreeting = randomGreeting.replace("{name}", userName);
+  
   return {
     id: 1,
     type: 'bot',
-    text: "สวัสดีค่ะ ดิฉันคือ AI Travel Agent 💙 เล่าไอเดียทริปของคุณได้เลย หรือจะให้ช่วยคิดทริปให้ตั้งแต่ศูนย์ก็ได้นะคะ"
+    text: personalizedGreeting
   };
 }
 
-function createNewTrip(title = 'ทริปใหม่') {
+function createNewTrip(title = 'ทริปใหม่', userName = "คุณ") {
   const tripId = makeId('trip');
   return {
     tripId,
     title,
     createdAt: nowISO(),
     updatedAt: nowISO(),
-    messages: [defaultWelcomeMessage()],
+    messages: [defaultWelcomeMessage(userName)],
     pinned: false // เพิ่ม field สำหรับปักหมุด
   };
 }
 
-export default function AITravelChat({ user, onLogout, initialPrompt = '', onNavigateToBookings, onNavigateToFlights, onNavigateToHotels, onNavigateToCarRentals }) {
+export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt = '', onNavigateToBookings, onNavigateToFlights, onNavigateToHotels, onNavigateToCarRentals }) {
   const userId = user?.id || 'demo_user';
 
   // ✅ Active tab state for navigation (switch/tab indicator)
@@ -74,6 +86,7 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
 
   // ===== Trips state (sidebar history) =====
   const [trips, setTrips] = useState(() => {
+    const displayName = user?.first_name || user?.name || "คุณ";
     try {
       const raw = localStorage.getItem(LS_TRIPS_KEY);
       if (raw) {
@@ -81,7 +94,7 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
     } catch (_) {}
-    return [createNewTrip('ทริปใหม่')];
+    return [createNewTrip('ทริปใหม่', displayName)];
   });
 
   const [activeTripId, setActiveTripId] = useState(() => {
@@ -208,15 +221,18 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTripId, messages.length]);
 
-  // ===== API health =====
+  // ===== API health & Auto-reconnect =====
   useEffect(() => {
     checkApiConnection();
+    // ตั้งเวลาตรวจสอบการเชื่อมต่อทุก 10 วินาที เพื่อ Reconnect อัตโนมัติ
+    const interval = setInterval(checkApiConnection, 10000);
+    return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const checkApiConnection = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/health`);
+      const response = await fetch(`${API_BASE_URL}/health`, { cache: 'no-cache' });
       const data = await response.json();
       setIsConnected(data.status === 'ok');
     } catch (error) {
@@ -328,7 +344,8 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
 
   // ===== Create/Delete trip =====
   const handleNewTrip = () => {
-    const nt = createNewTrip('ทริปใหม่');
+    const displayName = user?.first_name || user?.name || "คุณ";
+    const nt = createNewTrip('ทริปใหม่', displayName);
     setTrips(prev => [nt, ...prev]);
     setActiveTripId(nt.tripId);
     setInputText('');
@@ -345,9 +362,20 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
     }).catch(() => {});
   };
 
-  const handleDeleteTrip = (tripId) => {
-    const ok = window.confirm('ลบทริปนี้ออกจากประวัติใช่ไหม?');
-    if (!ok) return;
+  const handleDeleteTrip = async (tripId) => {
+    const result = await Swal.fire({
+      title: "ลบทริป?",
+      text: "คุณต้องการลบทริปนี้ออกจากประวัติใช่ไหม?",
+      icon: "question",
+      showCancelButton: true,
+      confirmButtonColor: "#dc2626",
+      cancelButtonColor: "#6b7280",
+      confirmButtonText: "ลบ",
+      cancelButtonText: "ยกเลิก",
+      reverseButtons: true
+    });
+
+    if (!result.isConfirmed) return;
 
     setTrips(prev => {
       const next = prev.filter(t => t.tripId !== tripId);
@@ -504,9 +532,17 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
         buffer = lines.pop() || ''; // Keep incomplete line in buffer
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
+          const trimmedLine = line.trim();
+          if (!trimmedLine) continue;
+
+          if (trimmedLine.startsWith('data: ')) {
             try {
-              const data = JSON.parse(line.slice(6));
+              const data = JSON.parse(trimmedLine.slice(6));
+              
+              // ✅ จัดการ error จาก stream
+              if (data.status === 'error') {
+                throw new Error(data.message || 'Unknown stream error');
+              }
               
               // ✅ อัปเดตสถานะการทำงานแบบ realtime
               if (data.status && data.message) {
@@ -520,7 +556,7 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
               // ✅ เมื่อเสร็จสิ้น ให้ใช้ข้อมูลผลลัพธ์
               if (data.status === 'completed' && data.data) {
                 const finalData = data.data;
-                console.log('API data >>>', finalData);
+                console.log('API data (completed) >>>', finalData);
 
                 const botMessage = {
                   id: Date.now() + 1,
@@ -543,8 +579,6 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
                 // Debug: log plan choices
                 if (botMessage.planChoices && botMessage.planChoices.length > 0) {
                   console.log('📋 Plan choices received:', botMessage.planChoices.length, 'choices');
-                  console.log('📋 Current plan:', botMessage.currentPlan ? 'has' : 'none');
-                  console.log('📋 Agent state step:', botMessage.agentState?.step);
                 }
 
                 appendMessageToTrip(tripId, botMessage);
@@ -591,13 +625,8 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
                   setTripTitle(tripId, finalData.trip_title);
                 }
               }
-              
-              // ✅ จัดการ error
-              if (data.status === 'error') {
-                throw new Error(data.message || 'Unknown error');
-              }
-            } catch (e) {
-              console.error('Error parsing SSE data:', e);
+            } catch (err) {
+              console.error('Error parsing SSE data line:', trimmedLine, err);
             }
           }
         }
@@ -642,11 +671,25 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
 
     setIsTyping(true);
     
+    // ✅ Revert chat: ลบข้อความหลังจากข้อความที่กดรีเฟรชออกให้หมด
+    setTrips(prev =>
+      prev.map(t => {
+        if (t.tripId !== tripId) return t;
+        const msgIndex = t.messages.findIndex(m => m.id === messageId);
+        if (msgIndex === -1) return t;
+        // เก็บไว้เฉพาะข้อความจนถึงข้อความ user ที่เรากำลังรีเฟรช
+        const newMessages = t.messages.slice(0, msgIndex + 1);
+        return { ...t, messages: newMessages, updatedAt: nowISO() };
+      })
+    );
+    
     // Create abort controller for this request
     abortControllerRef.current = new AbortController();
+    setAgentStatus(null); // Reset status
     
     try {
-      const response = await fetch(`${API_BASE_URL}/api/chat`, {
+      // ✅ ใช้ SSE endpoint เพื่อให้แสดงการทำงานแบบ realtime
+      const response = await fetch(`${API_BASE_URL}/api/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -655,40 +698,111 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
           user_id: userId,
           message: trimmed,
           trigger: 'refresh',
-          no_memory: false,  // ✅ Keep memory to continue workflow
           client_trip_id: tripId
         })
       });
+
       if (!response.ok) throw new Error(`API Error: ${response.status}`);
-      const data = await response.json();
+
+      // ✅ อ่าน SSE stream
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmedLine = line.trim();
+          if (!trimmedLine) continue;
+          
+          if (trimmedLine.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(trimmedLine.slice(6));
+              
+              // ✅ Handle error from stream
+              if (data.status === 'error') {
+                throw new Error(data.message || 'Unknown stream error');
+              }
+
+              // ✅ อัปเดตสถานะการทำงานแบบ realtime
+              if (data.status && data.message) {
+                setAgentStatus({
+                  status: data.status,
+                  message: data.message,
+                  step: data.step
+                });
+              }
+              
+              // ✅ เมื่อเสร็จสิ้น ให้ใช้ข้อมูลผลลัพธ์
+              if (data.status === 'completed' && data.data) {
+                const finalData = data.data;
+                console.log('Refresh API data (completed) >>>', finalData);
 
       const botMessage = {
         id: Date.now() + 1,
         type: 'bot',
-        text: typeof data.response === 'string' ? data.response : String(data.response || ''),
-        debug: data.debug || null,
-        travelSlots: data.travel_slots || null,
-        searchResults: data.search_results || {},
-        // หลังเลือกช้อยส์แล้ว ให้ไหลไปหน้าสรุปทริป ไม่ต้องแสดง list ช้อยส์ซ้ำอีก
-        planChoices: data.plan_choices || [],
-        agentState: data.agent_state || null,
-        suggestions: data.suggestions || [],
-        currentPlan: data.current_plan || null,
-        tripTitle: data.trip_title || null,
-        reasoning: data.reasoning || null,  // Level 3: Reasoning light
-        memorySuggestions: data.memory_suggestions || null,  // Level 3: Memory toggle
+                  text: typeof finalData.response === 'string' ? finalData.response : String(finalData.response || ''),
+                  debug: finalData.debug || null,
+                  travelSlots: finalData.travel_slots || null,
+                  searchResults: finalData.search_results || {},
+                  planChoices: Array.isArray(finalData.plan_choices) ? finalData.plan_choices : (finalData.plan_choices ? [finalData.plan_choices] : []),
+                  agentState: finalData.agent_state || null,
+                  suggestions: finalData.suggestions || [],
+                  currentPlan: finalData.current_plan || null,
+                  tripTitle: finalData.trip_title || null,
+                  slotIntent: finalData.slot_intent || null,
+                  slotChoices: finalData.slot_choices || [],
+                  reasoning: finalData.reasoning || null,
+                  memorySuggestions: finalData.memory_suggestions || null,
       };
 
       appendMessageToTrip(tripId, botMessage);
 
-      // Keep plan/choices in state so cards don't disappear
-      if (data.plan_choices) setLatestPlanChoices(data.plan_choices);
-      if (data.current_plan) {
-        setSelectedPlan(data.current_plan);
-        setSelectedTravelSlots(data.travel_slots || null);
+                // ✅ ถ้าอยู่ในโหมดเสียง ให้ Agent พูดตอบกลับ
+                if (isVoiceMode && botMessage.text) {
+                  const cleanText = botMessage.text
+                    .replace(/[🎯💡📋✅❌⏹️💙]/g, '')
+                    .replace(/\*\*(.*?)\*\*/g, '$1')
+                    .replace(/\*(.*?)\*/g, '$1')
+                    .replace(/```[\s\S]*?```/g, '')
+                    .replace(/`(.*?)`/g, '$1')
+                    .trim();
+                  
+                  if (cleanText) speakText(cleanText);
+                }
+
+                // Keep plan/choices in state
+                if (finalData.plan_choices) setLatestPlanChoices(finalData.plan_choices);
+                
+                const agentState = finalData.agent_state || {};
+                const slotWorkflow = agentState.slot_workflow || {};
+                const isSlotWorkflowComplete = (
+                  slotWorkflow.current_slot === "summary" || 
+                  agentState.step === "trip_summary" ||
+                  (!slotWorkflow.current_slot && !finalData.slot_choices && !finalData.slot_intent)
+                );
+                
+                if (finalData.current_plan && isSlotWorkflowComplete) {
+                  setSelectedPlan(finalData.current_plan);
+                  setSelectedTravelSlots(finalData.travel_slots || null);
+                } else {
+                  setSelectedPlan(null);
       }
 
-      if (data.trip_title) setTripTitle(tripId, data.trip_title);
+                if (finalData.trip_title) setTripTitle(tripId, finalData.trip_title);
+              }
+            } catch (err) {
+              console.error('Error parsing SSE data line:', trimmedLine, err);
+            }
+          }
+        }
+      }
     } catch (e) {
       if (e.name === 'AbortError') {
         appendMessageToTrip(tripId, {
@@ -1635,6 +1749,7 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
           }
         }}
         onLogout={onLogout}
+        onSignIn={onSignIn}
         onAIClick={() => {
           // Scroll to chat input or focus on input
           const chatInput = document.querySelector('.chat-input-textarea');
@@ -1789,6 +1904,24 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
                 </div>
               </div>
             </div>
+            {/* Live Status Indicator */}
+            <div className="agent-live-status" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              {agentStatus ? (
+                <>
+                  <span className="agent-live-status-dot" style={{ width: 8, height: 8, borderRadius: '50%', background: '#4ade80', display: 'inline-block', boxShadow: '0 0 8px #4ade80' }} />
+                  <span className="agent-live-status-text" style={{ fontSize: '12px', color: '#64748b', fontWeight: '500' }}>
+                    {agentStatus.status === 'completed' ? 'พร้อมตอบแล้ว' : agentStatus.message || 'กำลังประมวลผล...'}
+                  </span>
+                </>
+              ) : isTyping && (
+                <>
+                  <span className="agent-live-status-dot" style={{ width: 8, height: 8, borderRadius: '50%', background: '#fbbf24', display: 'inline-block', boxShadow: '0 0 8px #fbbf24' }} />
+                  <span className="agent-live-status-text" style={{ fontSize: '12px', color: '#64748b', fontWeight: '500' }}>
+                    กำลังประมวลผลแบบ Real-time...
+                  </span>
+                </>
+              )}
+            </div>
           </div>
 
           {/* Messages Area */}
@@ -1800,7 +1933,19 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
                   className={`message-wrapper ${message.type === 'user' ? 'message-right' : 'message-left'}`}
                 >
                   <div className="message-content-wrapper">
-                    <div className={`message-bubble ${message.type === 'user' ? 'message-user' : 'message-bot'}`}>
+                    <div className={`message-bubble ${message.type === 'user' ? 'message-user' : 'message-bot'} ${
+                      message.type === 'bot' && (
+                        formatMessageText(message.text)?.includes('❌') || 
+                        formatMessageText(message.text)?.includes('ไม่สำเร็จ') ||
+                        formatMessageText(message.text)?.includes('Error:')
+                      ) ? 'message-error' : ''
+                    } ${
+                      message.type === 'bot' && (
+                        formatMessageText(message.text)?.includes('ยังไม่มีซ้อยส์') ||
+                        formatMessageText(message.text)?.includes('ไม่มีช้อยส์') ||
+                        formatMessageText(message.text)?.includes('ลองพิมพ์ทริป')
+                      ) ? 'message-empty-state' : ''
+                    }`}>
                       {/* ข้อความหลัก */}
                       <p className="message-text">{formatMessageText(message.text)}</p>
 
@@ -1899,16 +2044,28 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
                         const hasSlotChoices = message.slotChoices && message.slotChoices.length > 0;
                         const hasSlotIntent = message.slotIntent;
                         
+                        // ✅ ตรวจสอบว่าทริปเสร็จสมบูรณ์จริงหรือไม่ (ทุก segment ต้อง confirmed)
+                        const plan = selectedPlan || message.currentPlan;
+                        const isPlanComplete = plan && (
+                          (plan.flights || []).length > 0 || 
+                          (plan.accommodations || []).length > 0 || 
+                          (plan.ground_transport || []).length > 0
+                        ) && [
+                          ...(plan.flights || []),
+                          ...(plan.accommodations || []),
+                          ...(plan.ground_transport || [])
+                        ].every(seg => seg.status === 'confirmed');
+                        
                         // ✅ ตรวจสอบว่า slot workflow เสร็จแล้วหรือยัง
                         // แสดง TripSummary เฉพาะเมื่อ:
-                        // 1. slot workflow เสร็จแล้ว (current_slot === "summary" หรือ step === "trip_summary")
-                        // 2. หรือไม่มี slot workflow (ใช้ full plan workflow)
+                        // 1. แผนเสร็จสมบูรณ์ (isPlanComplete)
+                        // 2. หรือ backend บอกว่าเป็น trip_summary
                         // 3. และไม่มี slot choices ที่กำลังแสดงอยู่
                         const isSlotWorkflowComplete = (
+                          isPlanComplete ||
                           currentSlot === "summary" || 
-                          agentStep === "trip_summary" ||
-                          (!currentSlot && !hasSlotChoices && !hasSlotIntent)
-                        );
+                          agentStep === "trip_summary"
+                        ) && (!hasSlotChoices && !hasSlotIntent);
                         
                         // ✅ ไม่แสดง TripSummary ถ้ายังอยู่ใน slot workflow (กำลังเลือก slot)
                         const isInSlotWorkflow = (
@@ -2038,7 +2195,10 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
                           Array.isArray(message.planChoices) && 
                           message.planChoices.length > 0;
                         const hasSlotChoices = message.slotChoices && message.slotChoices.length > 0;
-                        const hasCurrentPlan = message.currentPlan;
+                        // ✅ ตรวจสอบ currentPlan อย่างถูกต้อง (ต้องเป็น object ที่มีข้อมูล ไม่ใช่ null, undefined, หรือ object ว่าง)
+                        const hasCurrentPlan = message.currentPlan && 
+                          typeof message.currentPlan === 'object' && 
+                          Object.keys(message.currentPlan).length > 0;
                         const agentStep = message.agentState?.step;
                         
                         // Debug log
@@ -2057,9 +2217,24 @@ export default function AITravelChat({ user, onLogout, initialPrompt = '', onNav
                         // 2. ไม่มี slotChoices หรือไม่มี slotIntent (เพื่อให้แสดง slotChoices ก่อน) และ
                         // 3. ไม่มี currentPlan (ถ้ามี currentPlan แสดงว่าเลือกแล้ว ไม่ต้องแสดง planChoices)
                         // ✅ สำคัญ: ถ้ามี slotChoices และ slotIntent ให้แสดง slotChoices เท่านั้น ไม่แสดง planChoices
-                        return hasPlanChoices && 
+                        const shouldShowPlanChoices = hasPlanChoices && 
                                (!hasSlotChoices || !message.slotIntent) && 
-                               !hasCurrentPlan ? (
+                               !hasCurrentPlan;
+                        
+                        // Debug log
+                        if (hasPlanChoices) {
+                          console.log('🔍 PlanChoices display decision:', {
+                            hasPlanChoices,
+                            hasSlotChoices,
+                            hasSlotIntent: !!message.slotIntent,
+                            hasCurrentPlan,
+                            shouldShowPlanChoices,
+                            agentStep,
+                            planChoicesCount: message.planChoices.length
+                          });
+                        }
+                        
+                        return shouldShowPlanChoices ? (
                           <div className="plan-choices-block">
                             <div className="plan-choices-header">
                               แผนเที่ยวที่จัดให้คุณเลือกทั้งหมด {message.planChoices.length} ช้อยส์

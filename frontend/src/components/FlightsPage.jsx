@@ -2,7 +2,7 @@ import React from 'react';
 import AppHeader from './AppHeader';
 import './FlightsPage.css';
 
-export default function FlightsPage({ user, onLogout, onNavigateToBookings, onNavigateToAI, onNavigateToFlights, onNavigateToHotels, onNavigateToCarRentals }) {
+export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBookings, onNavigateToAI, onNavigateToFlights, onNavigateToHotels, onNavigateToCarRentals }) {
   const handleTabChange = (tab) => {
     // Handle navigation to other tabs
     if (tab === 'ai' && onNavigateToAI) {
@@ -30,6 +30,7 @@ export default function FlightsPage({ user, onLogout, onNavigateToBookings, onNa
         onNavigateToHotels={onNavigateToHotels}
         onNavigateToCarRentals={onNavigateToCarRentals}
         onLogout={onLogout}
+        onSignIn={onSignIn}
         notificationCount={0}
         isConnected={true}
       />

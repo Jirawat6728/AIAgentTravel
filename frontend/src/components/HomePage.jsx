@@ -1,8 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import './HomePage.css';
 
-export default function HomePage({ onGetStarted, onSignIn, onSignOut, isLoggedIn }) {
+export default function HomePage({ onGetStarted, onSignIn, onSignOut, isLoggedIn, user }) {
   const [searchQuery, setSearchQuery] = useState('');
+  const [showUserPopup, setShowUserPopup] = useState(false);
+  const userPopupRef = useRef(null);
 
   const handleSearch = (e) => {
     e.preventDefault();
@@ -10,6 +12,23 @@ export default function HomePage({ onGetStarted, onSignIn, onSignOut, isLoggedIn
       onGetStarted(searchQuery);
     }
   };
+
+  // Close popup when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (userPopupRef.current && !userPopupRef.current.contains(event.target)) {
+        setShowUserPopup(false);
+      }
+    };
+
+    if (showUserPopup) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showUserPopup]);
 
   return (
     <div className="home-container">
@@ -24,18 +43,93 @@ export default function HomePage({ onGetStarted, onSignIn, onSignOut, isLoggedIn
             </div>
             <span className="logo-text">AI Travel Agent</span>
           </div>
-          <nav className="nav-links">
-            <a href="#features" className="nav-link">Features</a>
-            <a href="#how-it-works" className="nav-link">How it Works</a>
-            <a href="#destinations" className="nav-link">Destinations</a>
-            <a href="#about" className="nav-link">About</a>
-          </nav>
           <div className="header-buttons">
-            {isLoggedIn ? (
-              <button onClick={onSignOut} className="btn-header">Sign Out</button>
-            ) : (
-              <button onClick={onSignIn} className="btn-header">Sign In</button>
-            )}
+            <div className="user-menu-container" ref={userPopupRef}>
+              {isLoggedIn && user ? (
+                <>
+                  <div 
+                    className="user-name-display user-clickable"
+                    onClick={() => setShowUserPopup(!showUserPopup)}
+                  >
+                    <span className="user-greeting">สวัสดี,</span>
+                    <span className="user-name-text">
+                      {user.first_name && user.last_name 
+                        ? `${user.first_name} ${user.last_name}`
+                        : user.name || 'ผู้ใช้'}
+                    </span>
+                    <svg className="user-dropdown-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
+                  {showUserPopup && (
+                    <div className="user-popup">
+                      <div className="user-popup-header">
+                        <div className="user-popup-avatar">
+                          {user.first_name && user.last_name 
+                            ? `${user.first_name.charAt(0)}${user.last_name.charAt(0)}`
+                            : (user.name || 'U').charAt(0).toUpperCase()}
+                        </div>
+                        <div className="user-popup-info">
+                          <div className="user-popup-name">
+                            {user.first_name && user.last_name 
+                              ? `${user.first_name} ${user.last_name}`
+                              : user.name || 'ผู้ใช้'}
+                          </div>
+                          {user.email && (
+                            <div className="user-popup-email">{user.email}</div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="user-popup-divider"></div>
+                      <div className="user-popup-actions">
+                        <button onClick={onSignOut} className="user-popup-button user-popup-button-signout">
+                          <svg className="user-popup-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                          </svg>
+                          Sign Out
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <button 
+                    onClick={() => setShowUserPopup(!showUserPopup)} 
+                    className="btn-header btn-header-signin"
+                  >
+                    Sign In
+                    <svg className="user-dropdown-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  {showUserPopup && (
+                    <div className="user-popup">
+                      <div className="user-popup-header">
+                        <div className="user-popup-guest-icon">
+                          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                          </svg>
+                        </div>
+                        <div className="user-popup-info">
+                          <div className="user-popup-name">Guest</div>
+                          <div className="user-popup-email">Sign in to access your account</div>
+                        </div>
+                      </div>
+                      <div className="user-popup-divider"></div>
+                      <div className="user-popup-actions">
+                        <button onClick={onSignIn} className="user-popup-button user-popup-button-signin">
+                          <svg className="user-popup-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
+                          </svg>
+                          Sign In
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
             <button onClick={onGetStarted} className="btn-header-primary">Get Started</button>
           </div>
         </div>
@@ -207,35 +301,6 @@ export default function HomePage({ onGetStarted, onSignIn, onSignOut, isLoggedIn
         </div>
       </section>
 
-      {/* Popular Destinations */}
-      <section id="destinations" className="destinations-section">
-        <div className="destinations-content">
-          <div className="section-header">
-            <h2 className="section-title">Popular Destinations</h2>
-            <p className="section-subtitle">Discover amazing places around the world</p>
-          </div>
-
-          <div className="destinations-grid">
-            {[
-              { name: 'Tokyo', country: 'Japan', image: '🗼', color: '#ff6b9d' },
-              { name: 'Paris', country: 'France', image: '🗼', color: '#c084fc' },
-              { name: 'New York', country: 'USA', image: '🗽', color: '#60a5fa' },
-              { name: 'London', country: 'UK', image: '🎡', color: '#34d399' },
-              { name: 'Dubai', country: 'UAE', image: '🏙️', color: '#fbbf24' },
-              { name: 'Singapore', country: 'Singapore', image: '🦁', color: '#f87171' }
-            ].map((dest, idx) => (
-              <div key={idx} className="destination-card" style={{ '--dest-color': dest.color }}>
-                <div className="destination-image">{dest.image}</div>
-                <h3 className="destination-name">{dest.name}</h3>
-                <p className="destination-country">{dest.country}</p>
-                <button onClick={() => onGetStarted(dest.name)} className="destination-button">
-                  Explore →
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
 
       {/* CTA Section */}
       <section className="cta-section">
@@ -289,7 +354,7 @@ export default function HomePage({ onGetStarted, onSignIn, onSignOut, isLoggedIn
         </div>
 
         <div className="footer-bottom">
-          <p>© 2024 AI Travel Agent. Powered by Google Gemini & Amadeus API</p>
+          <p>© 2025 AI Travel Agent. Powered by Gemini & Amadeus </p>
         </div>
       </footer>
     </div>

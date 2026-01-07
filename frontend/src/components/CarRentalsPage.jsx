@@ -2,7 +2,7 @@ import React from 'react';
 import AppHeader from './AppHeader';
 import './CarRentalsPage.css';
 
-export default function CarRentalsPage({ user, onLogout, onNavigateToBookings, onNavigateToAI, onNavigateToFlights, onNavigateToHotels, onNavigateToCarRentals }) {
+export default function CarRentalsPage({ user, onLogout, onSignIn, onNavigateToBookings, onNavigateToAI, onNavigateToFlights, onNavigateToHotels, onNavigateToCarRentals }) {
   const handleTabChange = (tab) => {
     if (tab === 'ai' && onNavigateToAI) {
       onNavigateToAI();
@@ -29,6 +29,7 @@ export default function CarRentalsPage({ user, onLogout, onNavigateToBookings, o
         onNavigateToHotels={onNavigateToHotels}
         onNavigateToCarRentals={onNavigateToCarRentals}
         onLogout={onLogout}
+        onSignIn={onSignIn}
         notificationCount={0}
         isConnected={true}
       />

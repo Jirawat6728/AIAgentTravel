@@ -37,7 +37,7 @@ function getStatusBadge(status) {
   return badges[status] || { text: status, class: 'status-unknown' };
 }
 
-export default function MyBookingsPage({ user, onBack, onLogout }) {
+export default function MyBookingsPage({ user, onBack, onLogout, onSignIn }) {
   const [bookings, setBookings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -59,7 +59,10 @@ export default function MyBookingsPage({ user, onBack, onLogout }) {
       if (data?.ok) {
         setBookings(data.bookings || []);
       } else {
-        setError('ไม่สามารถโหลดข้อมูลการจองได้');
+        const errorMsg = data?.detail 
+          ? (typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail))
+          : 'ไม่สามารถโหลดข้อมูลการจองได้';
+        setError(errorMsg);
       }
     } catch (err) {
       setError('เกิดข้อผิดพลาด: ' + (err.message || 'Unknown error'));
@@ -84,7 +87,10 @@ export default function MyBookingsPage({ user, onBack, onLogout }) {
         alert(data.message || 'ยกเลิกการจองสำเร็จ');
         await loadBookings(); // Reload bookings
       } else {
-        alert('เกิดข้อผิดพลาด: ' + (data.detail || 'Unknown error'));
+        const errorMsg = data.detail 
+          ? (typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail))
+          : 'Unknown error';
+        alert('เกิดข้อผิดพลาด: ' + errorMsg);
       }
     } catch (err) {
       alert('เกิดข้อผิดพลาด: ' + (err.message || 'Unknown error'));
@@ -109,7 +115,17 @@ export default function MyBookingsPage({ user, onBack, onLogout }) {
         alert(data.message || 'ชำระเงินสำเร็จ');
         await loadBookings(); // Reload bookings
       } else {
-        alert('เกิดข้อผิดพลาด: ' + (data.detail?.message || data.detail || 'Unknown error'));
+        let errorMsg = 'Unknown error';
+        if (data.detail) {
+          if (typeof data.detail === 'string') {
+            errorMsg = data.detail;
+          } else if (data.detail.message && typeof data.detail.message === 'string') {
+            errorMsg = data.detail.message;
+          } else {
+            errorMsg = JSON.stringify(data.detail);
+          }
+        }
+        alert('เกิดข้อผิดพลาด: ' + errorMsg);
       }
     } catch (err) {
       alert('เกิดข้อผิดพลาด: ' + (err.message || 'Unknown error'));
@@ -134,6 +150,7 @@ export default function MyBookingsPage({ user, onBack, onLogout }) {
         onTabChange={handleTabChange}
         onNavigateToBookings={null}
         onLogout={onLogout}
+        onSignIn={onSignIn}
         notificationCount={0}
       />
 

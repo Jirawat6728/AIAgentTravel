@@ -158,6 +158,27 @@ export default function LoginPage({ onLogin, onGoogleLogin }) {
                 </svg>
                 {text[lang].google}
               </button>
+
+              {/* Dev Bypass Button */}
+              {window.location.hostname === 'localhost' && (
+                <button 
+                  onClick={() => onLogin("dev_user", "password")} 
+                  className="btn-dev-skip"
+                  style={{
+                    marginTop: '10px',
+                    background: 'none',
+                    border: '1px dashed #ccc',
+                    color: '#666',
+                    padding: '8px',
+                    borderRadius: '5px',
+                    cursor: 'pointer',
+                    fontSize: '12px',
+                    width: '100%'
+                  }}
+                >
+                  [Dev Only] Skip Login (Guest Mode)
+                </button>
+              )}
             </div>
           </div>
         </div>

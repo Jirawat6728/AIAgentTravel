@@ -16,10 +16,13 @@ export default function AppHeader({
   onNotificationClick = null,
   notificationCount = 0,
   isConnected = true,
-  notifications = []
+  notifications = [],
+  onSignIn = null
 }) {
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
+  const [showUserPopup, setShowUserPopup] = useState(false);
   const notificationButtonRef = useRef(null);
+  const userPopupRef = useRef(null);
   const [notificationPosition, setNotificationPosition] = useState({ right: 0, top: 0 });
 
   useEffect(() => {
@@ -35,6 +38,23 @@ export default function AppHeader({
       }
     }
   }, [isNotificationOpen]);
+
+  // Close user popup when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (userPopupRef.current && !userPopupRef.current.contains(event.target)) {
+        setShowUserPopup(false);
+      }
+    };
+
+    if (showUserPopup) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showUserPopup]);
   const handleTabClick = (tab, e) => {
     e.preventDefault();
     if (tab === 'bookings' && onNavigateToBookings) {
@@ -121,7 +141,7 @@ export default function AppHeader({
             <svg className="app-nav-icon" fill="currentColor" viewBox="0 0 24 24">
               <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
             </svg>
-            <span className="app-ai-nav-text">AI</span>
+            <span className="app-ai-nav-text">Agent</span>
             <div className={`app-connection-status-dot ${isConnected ? 'app-status-connected' : 'app-status-disconnected'}`}></div>
           </button>
           <a 
@@ -162,19 +182,112 @@ export default function AppHeader({
               <span className="app-notification-badge">{notificationCount}</span>
             )}
           </button>
-          {user && (
-            <div className="app-user-info">
-              <div className="app-user-avatar">
-                <span className="app-user-initial">{user.name?.[0]?.toUpperCase() || 'U'}</span>
-              </div>
-              <span className="app-user-name">{user.name || 'User'}</span>
-            </div>
-          )}
-          {onLogout && (
-            <button onClick={onLogout} className="app-btn-logout">
-              Logout
-            </button>
-          )}
+          
+          <div className="app-user-menu-container" ref={userPopupRef}>
+            {user ? (
+              <>
+                <div 
+                  className="app-user-info app-user-clickable"
+                  onClick={() => setShowUserPopup(!showUserPopup)}
+                >
+                  <div className="app-user-avatar">
+                    <span className="app-user-initial">
+                      {user.first_name && user.last_name 
+                        ? `${user.first_name.charAt(0)}${user.last_name.charAt(0)}`
+                        : (user.name || 'U').charAt(0).toUpperCase()}
+                    </span>
+                  </div>
+                  <span className="app-user-name">
+                    {user.first_name && user.last_name 
+                      ? `${user.first_name} ${user.last_name}`
+                      : user.name || 'User'}
+                  </span>
+                  <svg className="app-user-dropdown-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </div>
+                {showUserPopup && (
+                  <div className="app-user-popup">
+                    <div className="app-user-popup-header">
+                      <div className="app-user-popup-avatar">
+                        {user.first_name && user.last_name 
+                          ? `${user.first_name.charAt(0)}${user.last_name.charAt(0)}`
+                          : (user.name || 'U').charAt(0).toUpperCase()}
+                      </div>
+                      <div className="app-user-popup-info">
+                        <div className="app-user-popup-name">
+                          {user.first_name && user.last_name 
+                            ? `${user.first_name} ${user.last_name}`
+                            : user.name || 'User'}
+                        </div>
+                        {user.email && (
+                          <div className="app-user-popup-email">{user.email}</div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="app-user-popup-divider"></div>
+                    <div className="app-user-popup-actions">
+                      {onLogout && (
+                        <button onClick={onLogout} className="app-user-popup-button app-user-popup-button-signout">
+                          <svg className="app-user-popup-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                          </svg>
+                          Logout
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                {onSignIn ? (
+                  <>
+                    <button 
+                      onClick={() => setShowUserPopup(!showUserPopup)} 
+                      className="app-btn-signin"
+                    >
+                      Sign In
+                      <svg className="app-user-dropdown-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                    {showUserPopup && (
+                      <div className="app-user-popup">
+                        <div className="app-user-popup-header">
+                          <div className="app-user-popup-guest-icon">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                            </svg>
+                          </div>
+                          <div className="app-user-popup-info">
+                            <div className="app-user-popup-name">Guest</div>
+                            <div className="app-user-popup-email">Sign in to access your account</div>
+                          </div>
+                        </div>
+                        <div className="app-user-popup-divider"></div>
+                        <div className="app-user-popup-actions">
+                          <button onClick={onSignIn} className="app-user-popup-button app-user-popup-button-signin">
+                            <svg className="app-user-popup-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
+                            </svg>
+                            Sign In
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="app-user-info">
+                    <div className="app-user-avatar">
+                      <span className="app-user-initial">G</span>
+                    </div>
+                    <span className="app-user-name">Guest</span>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
       </div>
 
