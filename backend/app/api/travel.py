@@ -15,9 +15,9 @@ router = APIRouter(prefix="/api/travel", tags=["travel"])
 @router.post("/smart-search", response_model=UnifiedTravelResponse)
 async def smart_search(request: TravelSearchRequest):
     """
-    One Endpoint for All: Detects intent and aggregates travel data
-    - Input: Natural language query (e.g., "จองตั๋วบินไปโตเกียว")
-    - Output: Aggregated data (Flights, Hotels, Activities, Transfers)
+    One Endpoint for All: Detects intent and aggregates travel data.
+    Request: {query: string, user_id?: string, context?: object}. Use natural-language query only.
+    Output: intent, flights, hotels, transfers, activities, summary (lists may be null/empty).
     """
     set_logging_context(user_id=request.user_id)
     try:
@@ -37,4 +37,3 @@ async def smart_search(request: TravelSearchRequest):
 async def shutdown_event():
     """Cleanup httpx client on shutdown"""
     await orchestrator.close()
-

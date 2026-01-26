@@ -160,3 +160,18 @@ class JsonFileStorage(StorageInterface):
         except Exception as e:
             logger.error(f"Error updating title for session {session_id}: {e}", exc_info=True)
             raise StorageException(f"Failed to update title for session {session_id}: {e}") from e
+
+    async def save_message(self, session_id: str, message: dict) -> bool:
+        """
+        Save message to JSON storage (Not implemented properly for JSON storage yet)
+        This is a placeholder since we primarily use MongoDB/Redis for message persistence.
+        """
+        # For full implementation, we'd need a separate history file or append to session
+        # But since we're migrating to DB, this is just to satisfy interface.
+        return True
+
+    async def get_chat_history(self, session_id: str, limit: int = 50) -> list[dict]:
+        """
+        Get chat history from JSON storage (Placeholder)
+        """
+        return []

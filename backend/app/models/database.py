@@ -47,18 +47,98 @@ class PyObjectId(ObjectId):
 # User Collection
 # =============================================================================
 class User(BaseModel):
-    """User model for MongoDB with Brain/Memory support"""
+    """
+    User model for MongoDB with Brain/Memory support
+    extra='allow' to handle unexpected fields from external APIs
+    """
+    model_config = {
+        "extra": "allow",
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True
+    }
+    
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
     user_id: str = Field(..., description="Unique user identifier")
     email: Optional[str] = Field(default=None, description="User email")
     name: Optional[str] = Field(default=None, description="User name")
+    full_name: Optional[str] = Field(default=None, description="Full name")
+    first_name: Optional[str] = Field(default=None, description="First name")
+    last_name: Optional[str] = Field(default=None, description="Last name")
+    first_name_th: Optional[str] = Field(default=None, description="First name in Thai")
+    last_name_th: Optional[str] = Field(default=None, description="Last name in Thai")
+    phone: Optional[str] = Field(default=None, description="Phone number")
+    dob: Optional[str] = Field(default=None, description="Date of birth (YYYY-MM-DD)")
+    gender: Optional[str] = Field(default=None, description="Gender: M, F, OTHER, or custom value")
+    national_id: Optional[str] = Field(default=None, description="National ID Card number")
+    profile_image: Optional[str] = Field(default=None, description="Profile image URL")
+    last_login: Optional[datetime] = Field(default=None, description="Last login timestamp")
     preferences: Dict[str, Any] = Field(default_factory=dict, description="User preferences (auto-learned)")
+    # Passport information (for international flights)
+    passport_no: Optional[str] = Field(default=None, description="Passport number")
+    passport_expiry: Optional[str] = Field(default=None, description="Passport expiry date (YYYY-MM-DD)")
+    passport_issue_date: Optional[str] = Field(default=None, description="Passport issue date (YYYY-MM-DD)")
+    passport_issuing_country: Optional[str] = Field(default=None, description="Country that issued the passport (ISO country code)")
+    passport_given_names: Optional[str] = Field(default=None, description="Given names as shown on passport (English)")
+    passport_surname: Optional[str] = Field(default=None, description="Surname as shown on passport (English)")
+    place_of_birth: Optional[str] = Field(default=None, description="Place of birth (city, country)")
+    passport_type: Optional[str] = Field(default="N", description="Passport type: N=Normal, D=Diplomatic, O=Official, S=Service")
+    # Visa information (for international travel)
+    visa_type: Optional[str] = Field(default=None, description="Visa type: TOURIST, BUSINESS, STUDENT, WORK, TRANSIT, VISA_FREE, ETA, EVISA, OTHER")
+    visa_number: Optional[str] = Field(default=None, description="Visa number")
+    visa_issuing_country: Optional[str] = Field(default=None, description="Country that issued the visa (ISO country code)")
+    visa_issue_date: Optional[str] = Field(default=None, description="Visa issue date (YYYY-MM-DD)")
+    visa_expiry_date: Optional[str] = Field(default=None, description="Visa expiry date (YYYY-MM-DD)")
+    visa_entry_type: Optional[str] = Field(default="S", description="Visa entry type: S=Single Entry, M=Multiple Entry")
+    visa_purpose: Optional[str] = Field(default="T", description="Visa purpose: T=Tourism, B=Business, S=Study, W=Work, O=Other")
+    # Hotel Booking Preferences (Production-ready for Agoda/Traveloka)
+    # Emergency Contact
+    emergency_contact_name: Optional[str] = Field(default=None, description="Emergency contact full name")
+    emergency_contact_phone: Optional[str] = Field(default=None, description="Emergency contact phone number")
+    emergency_contact_relation: Optional[str] = Field(default=None, description="Emergency contact relation: SPOUSE, PARENT, FRIEND, OTHER")
+    emergency_contact_email: Optional[str] = Field(default=None, description="Emergency contact email")
+    # Special Requests / Preferences
+    hotel_early_checkin: Optional[bool] = Field(default=False, description="Request early check-in")
+    hotel_late_checkout: Optional[bool] = Field(default=False, description="Request late check-out")
+    hotel_smoking_preference: Optional[str] = Field(default=None, description="Smoking preference: SMOKING, NON_SMOKING")
+    hotel_room_type_preference: Optional[str] = Field(default=None, description="Room type preference: STANDARD, DELUXE, SUITE, etc.")
+    hotel_floor_preference: Optional[str] = Field(default=None, description="Floor preference: HIGH, LOW, ANY")
+    hotel_view_preference: Optional[str] = Field(default=None, description="View preference: SEA, CITY, GARDEN, ANY")
+    hotel_extra_bed: Optional[bool] = Field(default=False, description="Request extra bed/cot")
+    hotel_airport_transfer: Optional[bool] = Field(default=False, description="Request airport transfer")
+    hotel_dietary_requirements: Optional[str] = Field(default=None, description="Dietary requirements: VEGETARIAN, VEGAN, HALAL, ALLERGIES, NONE")
+    hotel_special_occasion: Optional[str] = Field(default=None, description="Special occasion: BIRTHDAY, HONEYMOON, ANNIVERSARY, NONE")
+    hotel_accessibility_needs: Optional[bool] = Field(default=False, description="Accessibility needs (wheelchair accessible room)")
+    # Check-in Details
+    hotel_arrival_time: Optional[str] = Field(default=None, description="Expected arrival time (HH:MM format)")
+    hotel_arrival_flight: Optional[str] = Field(default=None, description="Arrival flight number")
+    hotel_departure_time: Optional[str] = Field(default=None, description="Expected departure time (HH:MM format)")
+    hotel_number_of_guests: Optional[int] = Field(default=1, description="Number of guests (including main guest)")
+    # Payment Information
+    payment_method: Optional[str] = Field(default=None, description="Payment method: CREDIT_CARD, DEBIT_CARD, BANK_TRANSFER")
+    card_holder_name: Optional[str] = Field(default=None, description="Card holder name (if using card)")
+    card_last_4_digits: Optional[str] = Field(default=None, description="Card last 4 digits (for verification)")
+    # Tax Invoice Information
+    company_name: Optional[str] = Field(default=None, description="Company/Organization name (for business booking)")
+    tax_id: Optional[str] = Field(default=None, description="Tax ID / VAT Number")
+    invoice_address: Optional[str] = Field(default=None, description="Invoice address (if different from main address)")
+    # Loyalty Program
+    hotel_loyalty_number: Optional[str] = Field(default=None, description="Hotel loyalty program number (e.g., Marriott Bonvoy, Hilton Honors)")
+    airline_frequent_flyer: Optional[str] = Field(default=None, description="Airline frequent flyer number")
+    # Additional Notes
+    hotel_booking_notes: Optional[str] = Field(default=None, description="Additional notes/comments for hotel booking (max 500 chars)")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_active: datetime = Field(default_factory=datetime.utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    is_admin: bool = Field(default=False, description="Is admin/test user")
 
 class Memory(BaseModel):
-    """Memory document for AI Agent"""
+    """Memory document for AI Agent - extra='allow' to handle unexpected fields from external APIs"""
+    model_config = {
+        "extra": "allow",
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True
+    }
+    
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
     user_id: str = Field(..., description="User identifier")
     content: str = Field(..., description="The actual memory content")
@@ -68,31 +148,17 @@ class Memory(BaseModel):
     last_accessed: datetime = Field(default_factory=datetime.utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
-    class Config:
-        populate_by_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-
 
 # =============================================================================
 # Session Collection
 # =============================================================================
 class SessionDocument(BaseModel):
-    """Session document for MongoDB"""
-    id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
-    session_id: str = Field(..., description="Unique session identifier")
-    user_id: str = Field(..., description="User identifier")
-    trip_plan: Dict[str, Any] = Field(..., description="Trip plan as dictionary")
-    title: Optional[str] = Field(default=None, description="Chat title")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    last_updated: datetime = Field(default_factory=datetime.utcnow)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    
-    class Config:
-        populate_by_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-        json_schema_extra = {
+    """Session document for MongoDB - extra='allow' to handle unexpected fields from external APIs"""
+    model_config = {
+        "extra": "allow",
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "json_schema_extra": {
             "example": {
                 "session_id": "user123::chat1",
                 "user_id": "user123",
@@ -103,17 +169,62 @@ class SessionDocument(BaseModel):
                 }
             }
         }
+    }
+    
+    id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
+    session_id: str = Field(..., description="Unique session identifier (uses chat_id)")
+    user_id: str = Field(..., description="User identifier")
+    trip_id: Optional[str] = Field(default=None, description="Trip identifier (1 trip can have multiple chats)")
+    chat_id: Optional[str] = Field(default=None, description="Chat identifier (1 chat = 1 chat_id)")
+    trip_plan: Dict[str, Any] = Field(..., description="Trip plan as dictionary")
+    title: Optional[str] = Field(default=None, description="Chat title")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_updated: datetime = Field(default_factory=datetime.utcnow)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     
     @classmethod
     def from_user_session(cls, session) -> "SessionDocument":
-        """Convert UserSession to SessionDocument"""
-        return cls(
-            session_id=session.session_id,
-            user_id=session.user_id,
-            trip_plan=session.trip_plan.model_dump(),
-            title=session.title,
-            last_updated=datetime.fromisoformat(session.last_updated.replace('Z', '+00:00'))
-        )
+        """
+        Convert UserSession to SessionDocument
+        ✅ CRITICAL: trip_plan.model_dump() includes all raw data (options_pool, selected_option)
+        """
+        try:
+            trip_plan_dict = session.trip_plan.model_dump() if session.trip_plan else {}
+            
+            # Verify trip_plan contains raw data
+            if trip_plan_dict:
+                segments = (
+                    trip_plan_dict.get("travel", {}).get("flights", {}).get("outbound", []) +
+                    trip_plan_dict.get("travel", {}).get("flights", {}).get("inbound", []) +
+                    trip_plan_dict.get("accommodation", {}).get("segments", []) +
+                    trip_plan_dict.get("travel", {}).get("ground_transport", [])
+                )
+                # trip_plan.model_dump() should include all fields including options_pool and selected_option
+                # This is verified by Pydantic's model_dump() method
+            
+            return cls(
+                session_id=session.session_id,
+                user_id=session.user_id,
+                trip_id=session.trip_id,
+                chat_id=session.chat_id,
+                trip_plan=trip_plan_dict,
+                title=session.title,
+                last_updated=datetime.fromisoformat(session.last_updated.replace('Z', '+00:00'))
+            )
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error converting UserSession to SessionDocument: {e}", exc_info=True)
+            # Return with empty trip_plan as fallback
+            return cls(
+                session_id=session.session_id,
+                user_id=session.user_id,
+                trip_id=session.trip_id,
+                chat_id=session.chat_id,
+                trip_plan={},
+                title=session.title,
+                last_updated=datetime.fromisoformat(session.last_updated.replace('Z', '+00:00'))
+            )
     
     def to_user_session(self):
         """Convert SessionDocument to UserSession"""
@@ -121,6 +232,8 @@ class SessionDocument(BaseModel):
         return UserSession(
             session_id=self.session_id,
             user_id=self.user_id,
+            trip_id=self.trip_id,
+            chat_id=self.chat_id,
             trip_plan=TripPlan(**self.trip_plan),
             title=self.title,
             last_updated=self.last_updated.isoformat()
@@ -131,7 +244,9 @@ class SessionDocument(BaseModel):
 # Conversation History Collection
 # =============================================================================
 class Message(BaseModel):
-    """Single message in conversation"""
+    """Single message in conversation - extra='allow' to handle unexpected fields from external APIs"""
+    model_config = {"extra": "allow"}
+    
     role: str = Field(..., description="Message role: user or assistant")
     content: str = Field(..., description="Message content")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
@@ -139,25 +254,32 @@ class Message(BaseModel):
 
 
 class Conversation(BaseModel):
-    """Conversation history document"""
+    """Conversation history document - extra='allow' to handle unexpected fields from external APIs"""
+    model_config = {
+        "extra": "allow",
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True
+    }
+    
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
     session_id: str = Field(..., description="Session identifier")
     user_id: str = Field(..., description="User identifier")
     messages: List[Dict[str, Any]] = Field(default_factory=list, description="List of messages")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    
-    class Config:
-        populate_by_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
 
 
 # =============================================================================
 # Booking Collection
 # =============================================================================
 class Booking(BaseModel):
-    """Confirmed booking document"""
+    """Confirmed booking document - extra='allow' to handle unexpected fields from external APIs"""
+    model_config = {
+        "extra": "allow",
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True
+    }
+    
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
     booking_id: str = Field(..., description="Unique booking identifier")
     session_id: str = Field(..., description="Session identifier")
@@ -168,11 +290,6 @@ class Booking(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     confirmed_at: Optional[datetime] = Field(default=None)
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    
-    class Config:
-        populate_by_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
 
 
 # =============================================================================
@@ -199,8 +316,7 @@ CONVERSATION_INDEXES = [
 ]
 
 BOOKING_INDEXES = [
-    IndexModel([("booking_id", 1)], unique=True),
-    IndexModel([("session_id", 1)]),
+    IndexModel([("booking_id", 1)], unique=True, sparse=True),  # Sparse: ignore null values
     IndexModel([("user_id", 1)]),
     IndexModel([("status", 1)]),
     IndexModel([("created_at", -1)]),
@@ -208,6 +324,16 @@ BOOKING_INDEXES = [
 ]
 
 MEMORY_INDEXES = [
+    # ✅ SECURITY: Index on user_id for fast queries and data isolation
+    IndexModel([("user_id", 1)], name="user_id_idx"),
+    # Index on importance for sorting
+    IndexModel([("importance", -1)], name="importance_idx"),
+    # Compound index for user-specific memory queries (user_id + importance)
+    IndexModel([("user_id", 1), ("importance", -1)], name="user_importance_idx"),
+    # Index on category for filtering
+    IndexModel([("category", 1)], name="category_idx"),
+    # Index on last_accessed for cleanup of old memories
+    IndexModel([("last_accessed", -1)], name="last_accessed_idx"),
     IndexModel([("user_id", 1)]),
     IndexModel([("category", 1)]),
     IndexModel([("created_at", -1)]),

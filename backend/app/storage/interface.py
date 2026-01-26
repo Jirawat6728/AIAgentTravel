@@ -64,3 +64,31 @@ class StorageInterface(ABC):
             StorageException: If storage operation fails
         """
         pass
+
+    @abstractmethod
+    async def save_message(self, session_id: str, message: dict) -> bool:
+        """
+        Save a chat message to conversation history
+        
+        Args:
+            session_id: Session identifier
+            message: Message dictionary (role, content, timestamp, etc.)
+            
+        Returns:
+            True if successful
+        """
+        pass
+
+    @abstractmethod
+    async def get_chat_history(self, session_id: str, limit: int = 50) -> list[dict]:
+        """
+        Get chat history for a session
+        
+        Args:
+            session_id: Session identifier
+            limit: Max number of messages to return
+            
+        Returns:
+            List of message dictionaries
+        """
+        pass

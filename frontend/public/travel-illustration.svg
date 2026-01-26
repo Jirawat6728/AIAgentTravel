@@ -1,0 +1,191 @@
+<svg width="600" height="400" viewBox="0 0 600 400" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background Sky -->
+  <rect width="600" height="400" fill="#e0f2fe"/>
+  
+  <!-- Sun -->
+  <circle cx="300" cy="80" r="40" fill="#fbbf24"/>
+  <g stroke="#fbbf24" stroke-width="3" opacity="0.6">
+    <line x1="300" y1="30" x2="300" y2="20"/>
+    <line x1="300" y1="130" x2="300" y2="140"/>
+    <line x1="250" y1="80" x2="240" y2="80"/>
+    <line x1="350" y1="80" x2="360" y2="80"/>
+    <line x1="265" y1="45" x2="258" y2="35"/>
+    <line x1="335" y1="45" x2="342" y2="35"/>
+    <line x1="265" y1="115" x2="258" y2="125"/>
+    <line x1="335" y1="115" x2="342" y2="125"/>
+  </g>
+  
+  <!-- Clouds -->
+  <ellipse cx="450" cy="100" rx="35" ry="20" fill="white" opacity="0.9"/>
+  <ellipse cx="470" cy="100" rx="30" ry="25" fill="white" opacity="0.9"/>
+  <ellipse cx="490" cy="100" rx="25" ry="20" fill="white" opacity="0.9"/>
+  
+  <ellipse cx="500" cy="60" rx="30" ry="18" fill="white" opacity="0.9"/>
+  <ellipse cx="520" cy="60" rx="25" ry="20" fill="white" opacity="0.9"/>
+  <ellipse cx="540" cy="60" rx="20" ry="15" fill="white" opacity="0.9"/>
+  
+  <!-- Airplane -->
+  <g transform="translate(480, 50)">
+    <path d="M 0 0 L 20 5 L 15 8 L 5 5 L 0 0 Z" fill="#94a3b8"/>
+    <path d="M 5 5 L 15 5 L 12 7 L 8 7 Z" fill="#cbd5e1"/>
+    <circle cx="8" cy="6" r="1.5" fill="#64748b"/>
+  </g>
+  
+  <!-- Palm Trees (Left) -->
+  <g transform="translate(50, 200)">
+    <!-- Trunk -->
+    <rect x="0" y="0" width="8" height="80" fill="#92400e"/>
+    <!-- Leaves -->
+    <ellipse cx="-15" cy="-5" rx="12" ry="25" fill="#10b981" transform="rotate(-30)"/>
+    <ellipse cx="15" cy="-5" rx="12" ry="25" fill="#10b981" transform="rotate(30)"/>
+    <ellipse cx="0" cy="-10" rx="12" ry="25" fill="#10b981"/>
+    <ellipse cx="-10" cy="5" rx="10" ry="20" fill="#059669" transform="rotate(-20)"/>
+    <ellipse cx="10" cy="5" rx="10" ry="20" fill="#059669" transform="rotate(20)"/>
+  </g>
+  
+  <!-- Palm Trees (Right) -->
+  <g transform="translate(550, 180)">
+    <!-- Trunk -->
+    <rect x="0" y="0" width="8" height="100" fill="#92400e"/>
+    <!-- Leaves -->
+    <ellipse cx="-18" cy="-8" rx="14" ry="28" fill="#10b981" transform="rotate(-25)"/>
+    <ellipse cx="18" cy="-8" rx="14" ry="28" fill="#10b981" transform="rotate(25)"/>
+    <ellipse cx="0" cy="-12" rx="14" ry="28" fill="#10b981"/>
+    <ellipse cx="-12" cy="8" rx="12" ry="22" fill="#059669" transform="rotate(-15)"/>
+    <ellipse cx="12" cy="8" rx="12" ry="22" fill="#059669" transform="rotate(15)"/>
+  </g>
+  
+  <!-- Beach/Sand Ground -->
+  <rect x="0" y="280" width="600" height="120" fill="#fef3c7"/>
+  
+  <!-- Left Character (Male with sunglasses and camera) -->
+  <g transform="translate(120, 180)">
+    <!-- Head -->
+    <circle cx="20" cy="25" r="18" fill="#fdbcb4"/>
+    <!-- Hair -->
+    <path d="M 8 20 Q 5 10 8 5 Q 12 2 20 5 Q 28 2 32 5 Q 35 10 32 20" fill="#92400e"/>
+    <!-- Sunglasses on head -->
+    <rect x="12" y="12" width="16" height="4" rx="2" fill="#1f2937"/>
+    <!-- Body (White shirt) -->
+    <rect x="12" y="40" width="16" height="35" rx="2" fill="white"/>
+    <!-- Arms -->
+    <ellipse cx="8" cy="50" rx="4" ry="15" fill="#fdbcb4"/>
+    <ellipse cx="32" cy="50" rx="4" ry="15" fill="#fdbcb4"/>
+    <!-- Hand with camera -->
+    <circle cx="35" cy="48" r="5" fill="#fdbcb4"/>
+    <rect x="30" y="45" width="10" height="7" rx="1" fill="#1f2937"/>
+    <circle cx="35" cy="48.5" r="2" fill="#374151"/>
+    <!-- Shorts -->
+    <rect x="14" y="70" width="12" height="25" rx="2" fill="#60a5fa"/>
+    <!-- Legs -->
+    <rect x="16" y="90" width="5" height="30" fill="#fdbcb4"/>
+    <rect x="25" y="90" width="5" height="30" fill="#fdbcb4"/>
+    <!-- Shoes -->
+    <ellipse cx="18" cy="123" rx="4" ry="2" fill="#1f2937"/>
+    <ellipse cx="27" cy="123" rx="4" ry="2" fill="#1f2937"/>
+    <!-- Backpack -->
+    <rect x="10" y="55" width="8" height="12" rx="1" fill="#1f2937"/>
+    <rect x="11" y="57" width="6" height="8" rx="0.5" fill="#374151"/>
+    <!-- Beach ball behind -->
+    <circle cx="5" cy="30" r="12" fill="#ef4444"/>
+    <path d="M 5 18 Q 5 24 5 30 Q 5 36 5 42" stroke="white" stroke-width="2" fill="none"/>
+    <path d="M -7 30 Q 5 30 17 30" stroke="white" stroke-width="2" fill="none"/>
+  </g>
+  
+  <!-- Middle Character (Female with hat and parasol) -->
+  <g transform="translate(260, 160)">
+    <!-- Head -->
+    <circle cx="20" cy="30" r="18" fill="#fdbcb4"/>
+    <!-- Hair -->
+    <path d="M 8 25 Q 5 15 8 8 Q 12 5 20 8 Q 28 5 32 8 Q 35 15 32 25" fill="#1f2937"/>
+    <!-- Hat -->
+    <ellipse cx="20" cy="20" rx="22" ry="6" fill="#fbbf24"/>
+    <ellipse cx="20" cy="24" rx="20" ry="5" fill="#f59e0b"/>
+    <!-- Body (Striped yellow-white top) -->
+    <rect x="12" y="45" width="16" height="20" rx="2" fill="#fbbf24"/>
+    <line x1="12" y1="50" x2="28" y2="50" stroke="white" stroke-width="1.5"/>
+    <line x1="12" y1="55" x2="28" y2="55" stroke="white" stroke-width="1.5"/>
+    <line x1="12" y1="60" x2="28" y2="60" stroke="white" stroke-width="1.5"/>
+    <!-- Arms -->
+    <ellipse cx="8" cy="55" rx="4" ry="15" fill="#fdbcb4"/>
+    <ellipse cx="32" cy="55" rx="4" ry="15" fill="#fdbcb4"/>
+    <!-- Hand with parasol -->
+    <circle cx="35" cy="53" r="5" fill="#fdbcb4"/>
+    <line x1="35" y1="53" x2="35" y2="40" stroke="#92400e" stroke-width="2"/>
+    <circle cx="35" cy="38" r="8" fill="#92400e"/>
+    <circle cx="35" cy="38" r="6" fill="#fef3c7"/>
+    <!-- Shorts -->
+    <rect x="14" y="60" width="12" height="20" rx="2" fill="#60a5fa"/>
+    <!-- Legs -->
+    <rect x="16" y="75" width="5" height="30" fill="#fdbcb4"/>
+    <rect x="25" y="75" width="5" height="30" fill="#fdbcb4"/>
+    <!-- Shoes -->
+    <ellipse cx="18" cy="108" rx="4" ry="2" fill="#1f2937"/>
+    <ellipse cx="27" cy="108" rx="4" ry="2" fill="#1f2937"/>
+    <!-- Camera around neck -->
+    <line x1="20" y1="45" x2="20" y2="60" stroke="#1f2937" stroke-width="1"/>
+    <rect x="17" y="58" width="6" height="4" rx="0.5" fill="#1f2937"/>
+  </g>
+  
+  <!-- Right Character (Male with floral shirt) -->
+  <g transform="translate(400, 175)">
+    <!-- Head -->
+    <circle cx="20" cy="25" r="18" fill="#fdbcb4"/>
+    <!-- Hair -->
+    <path d="M 8 20 Q 5 10 8 5 Q 12 2 20 5 Q 28 2 32 5 Q 35 10 32 20" fill="#1f2937"/>
+    <!-- Body (White shirt with floral pattern) -->
+    <rect x="12" y="40" width="16" height="35" rx="2" fill="white"/>
+    <!-- Floral pattern -->
+    <circle cx="18" cy="50" r="3" fill="#f59e0b"/>
+    <circle cx="22" cy="50" r="3" fill="#ef4444"/>
+    <circle cx="20" cy="53" r="2" fill="#10b981"/>
+    <circle cx="18" cy="60" r="2.5" fill="#ef4444"/>
+    <circle cx="22" cy="60" r="2.5" fill="#f59e0b"/>
+    <!-- Arms raised -->
+    <ellipse cx="8" cy="45" rx="4" ry="12" fill="#fdbcb4" transform="rotate(-20 8 45)"/>
+    <ellipse cx="32" cy="45" rx="4" ry="12" fill="#fdbcb4" transform="rotate(20 32 45)"/>
+    <!-- Shorts -->
+    <rect x="14" y="70" width="12" height="25" rx="2" fill="#60a5fa"/>
+    <!-- Legs -->
+    <rect x="16" y="90" width="5" height="30" fill="#fdbcb4"/>
+    <rect x="25" y="90" width="5" height="30" fill="#fdbcb4"/>
+    <!-- Shoes -->
+    <ellipse cx="18" cy="123" rx="4" ry="2" fill="#1f2937"/>
+    <ellipse cx="27" cy="123" rx="4" ry="2" fill="#1f2937"/>
+    <!-- Yellow backpack -->
+    <rect x="10" y="50" width="8" height="15" rx="1" fill="#fbbf24"/>
+    <rect x="11" y="52" width="6" height="11" rx="0.5" fill="#f59e0b"/>
+  </g>
+  
+  <!-- Luggage (Left) -->
+  <g transform="translate(80, 250)">
+    <rect x="0" y="0" width="25" height="18" rx="2" fill="#f97316"/>
+    <rect x="2" y="2" width="21" height="14" rx="1" fill="#ea580c"/>
+    <line x1="12" y1="2" x2="12" y2="16" stroke="#dc2626" stroke-width="0.5"/>
+    <circle cx="6" cy="18" r="2" fill="#1f2937"/>
+    <circle cx="19" cy="18" r="2" fill="#1f2937"/>
+  </g>
+  
+  <!-- Luggage (Right) -->
+  <g transform="translate(450, 240)">
+    <rect x="0" y="0" width="30" height="20" rx="2" fill="#f97316"/>
+    <rect x="2" y="2" width="26" height="16" rx="1" fill="#ea580c"/>
+    <line x1="15" y1="2" x2="15" y2="18" stroke="#dc2626" stroke-width="0.5"/>
+    <rect x="4" y="4" width="22" height="12" rx="0.5" fill="#f97316"/>
+    <circle cx="8" cy="20" r="2.5" fill="#1f2937"/>
+    <circle cx="22" cy="20" r="2.5" fill="#1f2937"/>
+  </g>
+  
+  <!-- Smile faces -->
+  <circle cx="130" cy="200" r="2" fill="#1f2937"/>
+  <circle cx="138" cy="200" r="2" fill="#1f2937"/>
+  <path d="M 128 205 Q 134 210 140 205" stroke="#1f2937" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+  
+  <circle cx="280" cy="185" r="2" fill="#1f2937"/>
+  <circle cx="288" cy="185" r="2" fill="#1f2937"/>
+  <path d="M 278 190 Q 284 195 290 190" stroke="#1f2937" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+  
+  <circle cx="420" cy="190" r="2" fill="#1f2937"/>
+  <circle cx="428" cy="190" r="2" fill="#1f2937"/>
+  <path d="M 418 195 Q 424 200 430 195" stroke="#1f2937" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+</svg>

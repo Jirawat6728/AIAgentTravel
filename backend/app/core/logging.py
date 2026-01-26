@@ -9,8 +9,6 @@ from pathlib import Path
 from typing import Optional
 from contextvars import ContextVar
 
-from app.core.config import settings
-
 # Context variables for request-scoped logging
 _session_id: ContextVar[Optional[str]] = ContextVar('session_id', default=None)
 _user_id: ContextVar[Optional[str]] = ContextVar('user_id', default=None)
@@ -42,6 +40,9 @@ def setup_logging(
     Returns:
         Configured logger
     """
+    # Lazy import to avoid circular dependency
+    from app.core.config import settings
+    
     log_level = getattr(logging, (level or settings.log_level).upper(), logging.INFO)
     logger = logging.getLogger(name)
     logger.setLevel(log_level)
@@ -88,7 +89,22 @@ def get_logger(name: str = "travel_agent") -> logging.Logger:
     """
     logger = logging.getLogger(name)
     if not logger.handlers:
-        setup_logging(name)
+        # Try to setup logging with settings, but fallback to basic setup
+        # if settings are not available yet (during config initialization)
+        try:
+            setup_logging(name)
+        except (ImportError, AttributeError):
+            # Fallback to basic logger setup when settings are not available
+            logger.setLevel(logging.INFO)
+            if not logger.handlers:
+                console_handler = logging.StreamHandler(sys.stdout)
+                console_handler.setLevel(logging.INFO)
+                basic_format = logging.Formatter(
+                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S'
+                )
+                console_handler.setFormatter(basic_format)
+                logger.addHandler(console_handler)
     return logger
 
 

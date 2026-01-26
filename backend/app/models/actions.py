@@ -15,14 +15,17 @@ class ActionType(str, Enum):
     CALL_SEARCH = "CALL_SEARCH"
     SELECT_OPTION = "SELECT_OPTION"
     ASK_USER = "ASK_USER"
-    BATCH = "BATCH"  # Added BATCH action type
+    BATCH = "BATCH"
+    CREATE_ITINERARY = "CREATE_ITINERARY"  # Added BATCH action type
 
 
 class ControllerAction(BaseModel):
     """
     Action returned by Controller
     Supports single action or batch actions (optimized for speed)
+    extra='allow' to handle unexpected fields from external APIs
     """
+    model_config = {"extra": "allow"}
     thought: str = Field(..., min_length=1, description="Reasoning for this action")
     action: ActionType = Field(..., description="Primary action to take")
     payload: Dict[str, Any] = Field(
@@ -59,7 +62,8 @@ class ControllerAction(BaseModel):
 
 
 class ActionLogEntry(BaseModel):
-    """Single action log entry"""
+    """Single action log entry - extra='allow' to handle unexpected fields from external APIs"""
+    model_config = {"extra": "allow"}
     action: str = Field(..., description="Action name")
     payload: Dict[str, Any] = Field(default_factory=dict, description="Action payload")
     result: Optional[str] = Field(default=None, description="Action result")
@@ -69,12 +73,19 @@ class ActionLogEntry(BaseModel):
     )
     success: bool = Field(default=True, description="Whether action succeeded")
 
+    @property
+    def action_type(self) -> str:
+        """Alias for the stored action name (needed for intelligence warnings)."""
+        return self.action
+
 
 class ActionLog(BaseModel):
     """
     Log of actions taken in Controller Loop
     Used by Responder to generate response
+    extra='allow' to handle unexpected fields from external APIs
     """
+    model_config = {"extra": "allow"}
     actions: List[ActionLogEntry] = Field(
         default_factory=list,
         description="List of actions executed"

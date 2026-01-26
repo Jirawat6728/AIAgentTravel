@@ -98,16 +98,25 @@ class AmadeusTransferService:
     
     def __init__(self):
         """Initialize Amadeus client"""
-        if not settings.amadeus_api_key or not settings.amadeus_api_secret:
-            logger.warning("Amadeus API credentials not configured")
+        # ✅ Use separate booking API keys for security
+        if not settings.amadeus_booking_api_key or not settings.amadeus_booking_api_secret:
+            logger.warning("Amadeus Booking API credentials not configured")
             self.amadeus = None
         else:
             try:
+                # ✅ Booking: ใช้ sandbox เท่านั้น (ห้ามใช้ production)
+                booking_env = settings.amadeus_booking_env.lower()
+                if booking_env == "production":
+                    logger.error("🚨 SECURITY: AMADEUS_BOOKING_ENV=production is NOT ALLOWED! Using sandbox instead.")
+                    booking_env = "test"
+                
                 self.amadeus = Client(
-                    client_id=settings.amadeus_api_key,
-                    client_secret=settings.amadeus_api_secret,
-                    hostname=settings.amadeus_env
+                    client_id=settings.amadeus_booking_api_key,
+                    client_secret=settings.amadeus_booking_api_secret,
+                    hostname=booking_env  # Always use sandbox for booking
                 )
+                key_preview = f"{settings.amadeus_booking_api_key[:6]}...{settings.amadeus_booking_api_key[-4:]}" if len(settings.amadeus_booking_api_key) > 10 else "***"
+                logger.info(f"AmadeusTransferService initialized with booking environment: {booking_env} (sandbox only, key: {key_preview})")
                 logger.info("AmadeusTransferService initialized successfully")
             except Exception as e:
                 logger.error(f"Failed to initialize Amadeus client: {e}")
@@ -119,18 +128,17 @@ class AmadeusTransferService:
     ) -> TransferSearchResponse:
         """
         Search for ground transfer options (Private, Taxi, Rail)
+        ✅ SAFETY FIRST: Returns empty response on error instead of raising
         
         Args:
             request: GroundTransferRequest with IATA code, address, datetime, passengers
             
         Returns:
-            TransferSearchResponse with categorized transfer options
-            
-        Raises:
-            AmadeusException: If API call fails
+            TransferSearchResponse with categorized transfer options (empty on error)
         """
         if not self.amadeus:
-            raise AmadeusException("Amadeus API not configured")
+            logger.error("Amadeus API not configured")
+            return TransferSearchResponse()  # Return empty instead of raising
         
         try:
             # Run Amadeus API call in thread pool
@@ -147,16 +155,21 @@ class AmadeusTransferService:
                     )
                     return response.data if hasattr(response, 'data') else []
                 except ResponseError as e:
+                    # ✅ SAFETY FIRST: Log error and return empty list instead of raising
                     logger.error(f"Amadeus Transfer API error: {e}")
-                    # Check error type
+                    # Check error type for logging
                     if e.response and hasattr(e.response, 'status_code'):
                         if e.response.status_code == 400:
-                            raise AmadeusException(f"Bad Request: {e.description}")
+                            logger.warning(f"Bad Request: {e.description}")
                         elif e.response.status_code == 401:
-                            raise AmadeusException("Unauthorized: Invalid API credentials")
+                            logger.error("Unauthorized: Invalid API credentials")
                         elif e.response.status_code == 404:
-                            raise AmadeusException("Transfer options not found")
-                    raise AmadeusException(f"Amadeus API error: {e.description}")
+                            logger.info("Transfer options not found")
+                    return []  # Return empty list instead of raising
+                except Exception as e:
+                    # ✅ SAFETY FIRST: Catch ALL exceptions in inner function
+                    logger.error(f"Unexpected error in Amadeus Transfer API call: {e}", exc_info=True)
+                    return []  # Return empty list instead of raising
             
             transfer_data = await loop.run_in_executor(None, _search)
             
@@ -167,11 +180,16 @@ class AmadeusTransferService:
             # Format and categorize transfers
             return self._format_transfer_response(transfer_data)
         
-        except AmadeusException:
-            raise
+        except AmadeusException as e:
+            # ✅ SAFETY FIRST: Log and return graceful error instead of raising
+            logger.error(f"AmadeusException in ground transfer search: {e}", exc_info=True)
+            # Return empty response instead of raising - let caller handle gracefully
+            return TransferSearchResponse()
         except Exception as e:
+            # ✅ SAFETY FIRST: Catch ALL exceptions and return graceful error
             logger.error(f"Ground transfer search error: {e}", exc_info=True)
-            raise AmadeusException(f"Failed to search ground transfers: {str(e)}") from e
+            # Return empty response instead of raising - workflow must continue
+            return TransferSearchResponse()
     
     async def search_water_activities(
         self,
@@ -179,18 +197,17 @@ class AmadeusTransferService:
     ) -> WaterActivityResponse:
         """
         Search for water activities (Boat Tours, Cruises, Ferries)
+        ✅ SAFETY FIRST: Returns empty response on error instead of raising
         
         Args:
             request: WaterActivityRequest with latitude, longitude, radius
             
         Returns:
-            WaterActivityResponse with filtered water activities
-            
-        Raises:
-            AmadeusException: If API call fails
+            WaterActivityResponse with filtered water activities (empty on error)
         """
         if not self.amadeus:
-            raise AmadeusException("Amadeus API not configured")
+            logger.error("Amadeus API not configured")
+            return WaterActivityResponse()  # Return empty instead of raising
         
         try:
             # Run Amadeus API call in thread pool
@@ -206,13 +223,18 @@ class AmadeusTransferService:
                     )
                     return response.data if hasattr(response, 'data') else []
                 except ResponseError as e:
+                    # ✅ SAFETY FIRST: Log error and return empty list instead of raising
                     logger.error(f"Amadeus Activities API error: {e}")
                     if e.response and hasattr(e.response, 'status_code'):
                         if e.response.status_code == 400:
-                            raise AmadeusException(f"Bad Request: {e.description}")
+                            logger.warning(f"Bad Request: {e.description}")
                         elif e.response.status_code == 401:
-                            raise AmadeusException("Unauthorized: Invalid API credentials")
-                    raise AmadeusException(f"Amadeus API error: {e.description}")
+                            logger.error("Unauthorized: Invalid API credentials")
+                    return []  # Return empty list instead of raising
+                except Exception as e:
+                    # ✅ SAFETY FIRST: Catch ALL exceptions in inner function
+                    logger.error(f"Unexpected error in Amadeus Activities API call: {e}", exc_info=True)
+                    return []  # Return empty list instead of raising
             
             activities_data = await loop.run_in_executor(None, _search)
             
@@ -249,11 +271,16 @@ class AmadeusTransferService:
             logger.info(f"Found {len(results)} water activities")
             return WaterActivityResponse(activities=results, total_count=len(results))
         
-        except AmadeusException:
-            raise
+        except AmadeusException as e:
+            # ✅ SAFETY FIRST: Log and return graceful error instead of raising
+            logger.error(f"AmadeusException in water activity search: {e}", exc_info=True)
+            # Return empty response instead of raising - let caller handle gracefully
+            return WaterActivityResponse()
         except Exception as e:
+            # ✅ SAFETY FIRST: Catch ALL exceptions and return graceful error
             logger.error(f"Water activity search error: {e}", exc_info=True)
-            raise AmadeusException(f"Failed to search water activities: {str(e)}") from e
+            # Return empty response instead of raising - workflow must continue
+            return WaterActivityResponse()
     
     def _filter_water_activities(self, activities: List[Any]) -> List[Any]:
         """

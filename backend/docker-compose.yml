@@ -1,0 +1,124 @@
+version: '3.8'
+
+services:
+  # MongoDB Service
+  mongodb:
+    image: mongo:7.0
+    container_name: travel_agent_mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: travel_agent
+    volumes:
+      - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+    networks:
+      - travel_agent_network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  # Redis Service
+  redis:
+    image: redis:7-alpine
+    container_name: travel_agent_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - travel_agent_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    command: redis-server --appendonly yes
+
+  # Backend API Service
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: travel_agent_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env  # Load environment variables from .env file
+    environment:
+      # MongoDB Configuration
+      MONGODB_URI: mongodb://mongodb:27017
+      MONGODB_DATABASE: travel_agent
+      
+      # Redis Configuration
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      REDIS_DB: 0
+      
+      # LLM Configuration (Gemini)
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL_NAME: ${GEMINI_MODEL_NAME:-gemini-1.5-flash}
+      ENABLE_GEMINI: ${ENABLE_GEMINI:-true}
+      
+      # Google Maps Configuration
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+      
+      # Amadeus Configuration
+      AMADEUS_API_KEY: ${AMADEUS_API_KEY:-}
+      AMADEUS_API_SECRET: ${AMADEUS_API_SECRET:-}
+      AMADEUS_ENV: ${AMADEUS_ENV:-test}
+      
+      # Authentication Configuration
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      SECRET_KEY: ${SECRET_KEY:-super-secret-key-for-travel-agent-123}
+      SESSION_COOKIE_NAME: session_id
+      SESSION_EXPIRY_DAYS: 30
+      
+      # Omise Payment Configuration
+      OMISE_SECRET_KEY: ${OMISE_SECRET_KEY:-}
+      OMISE_PUBLIC_KEY: ${OMISE_PUBLIC_KEY:-}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      
+      # Logging Configuration
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      
+      # Agent Configuration
+      CONTROLLER_MAX_ITERATIONS: ${CONTROLLER_MAX_ITERATIONS:-3}
+      CONTROLLER_TEMPERATURE: ${CONTROLLER_TEMPERATURE:-0.3}
+      RESPONDER_TEMPERATURE: ${RESPONDER_TEMPERATURE:-0.7}
+    volumes:
+      - ./data/sessions:/app/data/sessions
+      - ./logs:/app/logs
+    networks:
+      - travel_agent_network
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  mongodb_data:
+    driver: local
+  mongodb_config:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  travel_agent_network:
+    driver: bridge

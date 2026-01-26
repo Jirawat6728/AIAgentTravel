@@ -5,28 +5,62 @@ Provides system status, logs, and service health checks
 
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse
-from typing import Dict, Any, List
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from typing import Dict, Any, List, Optional
 import os
 import psutil
 import asyncio
 import json
 import time
+import hashlib
+import secrets
 from datetime import datetime
 from pathlib import Path
+from starlette.requests import Request
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.storage.mongodb_connection import MongoConnectionManager
+from app.storage.connection_manager import MongoConnectionManager
 from app.services.llm import LLMService
 from app.services.agent_monitor import agent_monitor
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+security = HTTPBasic()
 
 START_TIME = time.time()
 
+# 🔒 Admin Authentication Helper
+def verify_admin_auth(credentials: HTTPBasicCredentials = Depends(security)) -> bool:
+    """
+    Verify admin password authentication
+    In production, use ADMIN_PASSWORD env var
+    """
+    if not settings.admin_require_auth:
+        return True  # Auth disabled
+    
+    if not settings.admin_password:
+        logger.warning("Admin authentication required but ADMIN_PASSWORD not set. Allowing access.")
+        return True  # Allow if password not set (warning only)
+    
+    # Compare password (using constant-time comparison to prevent timing attacks)
+    provided = credentials.password.encode('utf-8')
+    expected = settings.admin_password.encode('utf-8')
+    
+    # Use secrets.compare_digest for constant-time comparison
+    if not secrets.compare_digest(provided, expected):
+        logger.warning(f"Admin authentication failed from {credentials.username}")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid admin credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    
+    logger.info(f"Admin authentication successful: {credentials.username}")
+    return True
+
 @router.get("/status")
-async def get_system_status():
+async def get_system_status(_auth: bool = Depends(verify_admin_auth)):
     """
     Check status of all services and system resources
     """
@@ -49,9 +83,15 @@ async def get_system_status():
     # 3. Amadeus Status
     amadeus_ok = False
     amadeus_details = "API Key missing"
-    if settings.amadeus_api_key and settings.amadeus_api_secret:
+    # ✅ Check both search and booking keys for admin dashboard
+    has_search_keys = settings.amadeus_search_api_key and settings.amadeus_search_api_secret
+    has_booking_keys = settings.amadeus_booking_api_key and settings.amadeus_booking_api_secret
+    if has_search_keys or has_booking_keys:
         amadeus_ok = True
-        amadeus_details = f"Env: {settings.amadeus_env} (Ready)"
+        # ✅ Show separate keys status
+        search_key_status = "✅" if has_search_keys else "❌"
+        booking_key_status = "✅" if has_booking_keys else "❌"
+        amadeus_details = f"Search: {settings.amadeus_search_env} ({search_key_status}) | Booking: {settings.amadeus_booking_env} ({booking_key_status})"
     
     # 4. Google Maps Status
     gmaps_ok = False
@@ -88,7 +128,7 @@ async def get_system_status():
     }
 
 @router.get("/logs")
-async def get_logs(lines: int = 100):
+async def get_logs(lines: int = 100, _auth: bool = Depends(verify_admin_auth)):
     """
     Read the last N lines of the log file
     """
@@ -113,24 +153,58 @@ async def get_logs(lines: int = 100):
         raise HTTPException(status_code=500, detail=f"Failed to read logs: {e}")
 
 @router.get("/sessions")
-async def get_recent_sessions(limit: int = 10):
+async def get_recent_sessions(
+    limit: int = 10, 
+    user_id: Optional[str] = None,
+    _auth: bool = Depends(verify_admin_auth)
+):
     """
     Get summary of recent sessions from MongoDB
+    ✅ SECURITY: If user_id is provided, only return sessions for that user
+    If user_id is not provided, return all sessions (admin only)
     """
     try:
         db = MongoConnectionManager.get_instance().get_database()
-        cursor = db.sessions.find().sort("last_updated", -1).limit(limit)
+        
+        # ✅ SECURITY: If user_id is specified, only query that user's sessions
+        query_filter = {}
+        if user_id:
+            query_filter["user_id"] = user_id
+            logger.info(f"Admin query: Getting sessions for user_id={user_id}")
+        else:
+            logger.warning(f"Admin query: Getting ALL sessions (no user_id filter - admin access only)")
+        
+        cursor = db.sessions.find(query_filter).sort("last_updated", -1).limit(limit)
         sessions = []
         async for doc in cursor:
+            # ✅ SECURITY: Verify user_id matches if filter was applied
+            if user_id:
+                doc_user_id = doc.get("user_id")
+                if doc_user_id != user_id:
+                    logger.warning(f"Admin query found session with mismatched user_id: expected {user_id}, found {doc_user_id}, skipping")
+                    continue
+            
             # Clean up ObjectId for JSON
             doc["_id"] = str(doc["_id"])
+            # ✅ PRIVACY: Remove sensitive trip_plan data from admin view
+            if "trip_plan" in doc:
+                # Only include summary info, not full plan data
+                doc["trip_plan_summary"] = {
+                    "has_flights": bool(doc["trip_plan"].get("travel", {}).get("flights", {}).get("outbound")),
+                    "has_hotels": bool(doc["trip_plan"].get("accommodation", {}).get("segments")),
+                    "has_transport": bool(doc["trip_plan"].get("travel", {}).get("ground_transport"))
+                }
+                # Remove full trip_plan to protect privacy
+                del doc["trip_plan"]
+            
             sessions.append(doc)
         return sessions
     except Exception as e:
+        logger.error(f"Admin query error: {e}", exc_info=True)
         return {"error": str(e)}
 
 @router.get("/workflows")
-async def get_workflow_stats():
+async def get_workflow_stats(_auth: bool = Depends(verify_admin_auth)):
     """
     Stats about the agent workflows (if tracked)
     """
@@ -142,7 +216,7 @@ async def get_workflow_stats():
     }
 
 @router.get("/stream")
-async def admin_stream(request: Request):
+async def admin_stream(request: Request, _auth: bool = Depends(verify_admin_auth)):
     """
     SSE stream for real-time system monitoring
     """
@@ -183,26 +257,29 @@ async def admin_stream(request: Request):
                         except Exception as e:
                             service_cache["gemini"] = {"status": "error", "message": f"API Error: {str(e)}"}
                     
-                    # Amadeus Check
-                    if not settings.amadeus_api_key or not settings.amadeus_api_secret:
-                        service_cache["amadeus"] = {"status": "error", "message": "Credentials missing"}
+                    # ✅ Amadeus Check (using search keys for testing)
+                    if not settings.amadeus_search_api_key or not settings.amadeus_search_api_secret:
+                        service_cache["amadeus"] = {"status": "error", "message": "Search API credentials missing"}
                     else:
                         try:
-                            # Try a simple auth token request
+                            # Try a simple auth token request using search keys
                             import httpx
-                            auth_url = "https://test.api.amadeus.com/v1/security/oauth2/token" if settings.amadeus_env == "test" else "https://api.amadeus.com/v1/security/oauth2/token"
+                            search_env = settings.amadeus_search_env.lower()
+                            auth_url = "https://test.api.amadeus.com/v1/security/oauth2/token" if search_env == "test" else "https://api.amadeus.com/v1/security/oauth2/token"
                             async with httpx.AsyncClient() as client:
                                 resp = await client.post(
                                     auth_url,
                                     data={
                                         "grant_type": "client_credentials",
-                                        "client_id": settings.amadeus_api_key,
-                                        "client_secret": settings.amadeus_api_secret
+                                        "client_id": settings.amadeus_search_api_key,
+                                        "client_secret": settings.amadeus_search_api_secret
                                     },
                                     timeout=5.0
                                 )
                                 if resp.status_code == 200:
-                                    service_cache["amadeus"] = {"status": "ok", "message": f"Env: {settings.amadeus_env} (Authenticated)"}
+                                    search_key_status = "✅"
+                                    booking_key_status = "✅" if (settings.amadeus_booking_api_key and settings.amadeus_booking_api_secret) else "❌"
+                                    service_cache["amadeus"] = {"status": "ok", "message": f"Search: {settings.amadeus_search_env} ({search_key_status}) | Booking: {settings.amadeus_booking_env} ({booking_key_status}) (Authenticated)"}
                                 else:
                                     service_cache["amadeus"] = {"status": "error", "message": f"Auth failed: {resp.status_code}"}
                         except Exception as e:

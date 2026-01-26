@@ -1,0 +1,361 @@
+/* TripSummaryUI.css */
+
+/* ===== Trip summary UI (after selecting a choice) ===== */
+.trip-summary-ui-wrap {
+  margin: 16px auto 20px;
+  padding: clamp(20px, 3vw, 24px);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: clamp(16px, 2.5vw, 20px);
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  max-width: clamp(500px, 65vw, 700px);
+  width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.trip-summary-ui-wrap * {
+  box-sizing: border-box;
+  max-width: 100%;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* ✅ Responsive margins for TripSummary */
+@media (max-width: 768px) {
+  .trip-summary-ui-wrap {
+    margin: 12px 12px 16px;
+    padding: 16px;
+    border-radius: 14px;
+    max-width: 100%;
+  }
+}
+
+@media (min-width: 769px) and (max-width: 1024px) {
+  .trip-summary-ui-wrap {
+    margin: 16px auto 20px;
+    padding: 20px;
+    border-radius: 18px;
+    max-width: clamp(480px, 70vw, 650px);
+  }
+}
+
+@media (min-width: 1025px) {
+  .trip-summary-ui-wrap {
+    margin: 20px auto 24px;
+    padding: 24px;
+    border-radius: 20px;
+    max-width: clamp(500px, 65vw, 700px);
+  }
+}
+
+/* ===== Slot Cards (Flight, Hotel, Transport) ===== */
+.slots-container {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(14px, 2vw, 18px);
+  margin: clamp(16px, 2.5vw, 20px) 0;
+}
+
+.slot-card {
+  background: white;
+  border-radius: clamp(12px, 2vw, 16px);
+  border: 2px solid #e2e8f0;
+  padding: clamp(16px, 2.5vw, 24px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  max-width: 100%;
+  width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.slot-card:hover {
+  border-color: #667eea;
+  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.15);
+  transform: translateY(-2px);
+}
+
+.slot-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: clamp(14px, 2vw, 18px);
+  padding-bottom: clamp(10px, 1.5vw, 14px);
+  border-bottom: 2px solid #e2e8f0;
+}
+
+.slot-card-title {
+  font-size: clamp(18px, 2.8vw, 22px);
+  font-weight: 700;
+  color: #2d3748;
+  line-height: 1.4;
+}
+
+.slot-card-status {
+  padding: clamp(5px, 1vw, 7px) clamp(12px, 2vw, 16px);
+  border-radius: clamp(10px, 1.5vw, 12px);
+  font-size: clamp(13px, 1.8vw, 15px);
+  font-weight: 600;
+  background: #e2e8f0;
+  color: #4a5568;
+  white-space: nowrap;
+}
+
+.slot-card-status.selected {
+  background: #d1fae5;
+  color: #065f46;
+  border: 1px solid #10b981;
+}
+
+.slot-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(10px, 1.5vw, 14px);
+}
+
+.slot-card-empty {
+  padding: clamp(20px, 3vw, 28px);
+  text-align: center;
+  color: #718096;
+  font-size: clamp(15px, 2.2vw, 17px);
+  background: #f7fafc;
+  border-radius: clamp(8px, 1.5vw, 12px);
+  border: 2px dashed #cbd5e0;
+}
+
+.slot-card-segments {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(10px, 1.5vw, 14px);
+  margin-top: clamp(8px, 1.2vw, 12px);
+}
+
+.slot-card-segments-title {
+  font-weight: 600;
+  color: #4a5568;
+  font-size: clamp(15px, 2.2vw, 17px);
+  margin-bottom: clamp(8px, 1.2vw, 12px);
+  line-height: 1.5;
+}
+
+.slot-card-segment {
+  padding: clamp(12px, 2vw, 16px);
+  background: #f7fafc;
+  border-radius: clamp(8px, 1.5vw, 12px);
+  border-left: 3px solid #667eea;
+  transition: all 0.2s;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.slot-card-segment:hover {
+  background: #edf2f7;
+  border-left-color: #4c51bf;
+}
+
+.segment-number {
+  font-weight: 600;
+  color: #667eea;
+  font-size: clamp(14px, 2.1vw, 16px);
+  margin-bottom: 8px;
+}
+
+.slot-card-edit-hint {
+  margin-top: 12px;
+  padding: 12px;
+  background: #fef3c7;
+  border-radius: 8px;
+  color: #92400e;
+  font-size: clamp(14px, 2.1vw, 16px);
+  border-left: 3px solid #f59e0b;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .slots-container {
+    gap: 12px;
+  }
+  
+  .slot-card {
+    padding: 16px;
+  }
+}
+
+.trip-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(102, 126, 234, 0.2);
+  border-top-color: #667eea;
+  border-radius: 50%;
+  animation: tripSpinner 0.8s linear infinite;
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes tripSpinner {
+  to { transform: rotate(360deg); }
+}
+
+/* =========================
+   Trip Summary UI (matches PlanChoiceCard look)
+   ========================= */
+
+.plan-card-summary {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+  padding: clamp(20px, 3vw, 28px) !important;
+  border-radius: clamp(16px, 2.5vw, 20px) !important;
+  box-shadow: 0 8px 32px rgba(102, 126, 234, 0.25) !important;
+  margin: 0;
+  max-width: 100%;
+  width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+/* ✅ Larger label for summary card */
+.plan-card-summary .plan-card-label {
+  font-size: clamp(20px, 3vw, 26px);
+}
+
+/* ✅ Larger section title for summary card */
+.plan-card-summary .plan-card-section-title {
+  font-size: clamp(18px, 2.5vw, 22px);
+}
+
+.summary-note {
+  font-size: 11px;
+  opacity: 0.85;
+  text-align: right;
+}
+
+.summary-kv {
+  display: flex;
+  justify-content: space-between;
+  gap: clamp(10px, 1.5vw, 16px);
+  padding: clamp(4px, 0.8vw, 6px) 0;
+  align-items: flex-start;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.summary-k {
+  font-size: clamp(14px, 1.9vw, 16px);
+  opacity: 0.85;
+  flex-shrink: 0;
+  line-height: 1.5;
+}
+
+.summary-v {
+  font-size: clamp(15px, 2.1vw, 17px);
+  font-weight: 600;
+  text-align: right;
+  max-width: 60%;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  line-height: 1.5;
+  flex-shrink: 1;
+}
+
+/* ✅ Larger summary text for summary card */
+.plan-card-summary .summary-k {
+  font-size: clamp(15px, 2.1vw, 17px);
+}
+
+.plan-card-summary .summary-v {
+  font-size: clamp(16px, 2.3vw, 18px);
+}
+
+.summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.summary-action {
+  font-size: 12px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.14);
+  cursor: pointer;
+  transition: all 0.18s ease;
+  font-weight: 700;
+}
+
+.summary-action:hover {
+  background: #ffffff;
+  color: #111111 !important;
+  /* Removed transform to reduce GPU usage */
+}
+
+.summary-hints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.summary-footer {
+  justify-content: flex-end;
+}
+
+.summary-disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.summary-flow {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Final Trip Summary Styles */
+.plan-card-final-summary {
+  border: 2px solid #1e40af;
+  background: linear-gradient(to bottom, #ffffff, #f0f9ff) !important;
+}
+
+/* ✅ Override global .plan-card white text rule for Final Summary */
+.plan-card-final-summary,
+.plan-card-final-summary * {
+  color: #1f2937 !important;
+}
+
+.final-summary-tag {
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: white !important; /* Keep tag text white */
+  font-weight: 700;
+  padding: 0.25rem 0.75rem;
+  border-radius: 0.5rem;
+}
+
+.plan-card-price-final {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1rem 0;
+}
+
+.plan-card-price-label {
+  font-size: 0.875rem;
+  color: #6b7280 !important;
+  font-weight: 500;
+}
+
+.plan-card-price-value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: #1e40af !important;
+}

@@ -66,16 +66,20 @@ class LocationService:
         self.gmaps = googlemaps.Client(key=settings.google_maps_api_key) if settings.google_maps_api_key else None
         
         # Amadeus Client
-        if not settings.amadeus_api_key or not settings.amadeus_api_secret:
-            logger.warning("AMADEUS_API_KEY or AMADEUS_API_SECRET not set, Amadeus features will fail")
+        # ✅ Use separate search API keys for security
+        if not settings.amadeus_search_api_key or not settings.amadeus_search_api_secret:
+            logger.warning("AMADEUS_SEARCH_API_KEY or AMADEUS_SEARCH_API_SECRET not set, Amadeus features will fail")
             self.amadeus = None
         else:
             try:
+                # ✅ Search: ใช้ production environment
+                search_env = settings.amadeus_search_env.lower()
                 self.amadeus = Client(
-                    client_id=settings.amadeus_api_key,
-                    client_secret=settings.amadeus_api_secret,
-                    hostname=settings.amadeus_env
+                    client_id=settings.amadeus_search_api_key,
+                    client_secret=settings.amadeus_search_api_secret,
+                    hostname=search_env  # Use search environment (production)
                 )
+                logger.info(f"LocationService initialized with search environment: {search_env}")
                 logger.info("LocationService initialized with Google Maps and Amadeus")
             except Exception as e:
                 logger.error(f"Failed to initialize Amadeus client: {e}")

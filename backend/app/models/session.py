@@ -14,9 +14,25 @@ class UserSession(BaseModel):
     """
     User session with trip plan state
     Strict validation ensures session integrity
+    extra='allow' to handle unexpected fields from external APIs
+    
+    Structure:
+    - trip_id: สำหรับ 1 ทริป (1 trip = หลาย chat ได้)
+    - chat_id: สำหรับแต่ละแชท (1 chat = 1 chat_id)
+    - session_id: ใช้ chat_id เป็น session_id (backward compatible)
     """
-    session_id: str = Field(..., min_length=1, description="Unique session identifier")
+    model_config = {"extra": "allow"}
+    
+    session_id: str = Field(..., min_length=1, description="Unique session identifier (uses chat_id)")
     user_id: str = Field(..., min_length=1, description="User identifier")
+    trip_id: Optional[str] = Field(
+        default=None,
+        description="Trip identifier (1 trip can have multiple chats)"
+    )
+    chat_id: Optional[str] = Field(
+        default=None,
+        description="Chat identifier (1 chat = 1 chat_id)"
+    )
     trip_plan: TripPlan = Field(
         default_factory=TripPlan,
         description="Current trip plan state"
@@ -30,10 +46,12 @@ class UserSession(BaseModel):
         description="Last update timestamp (ISO format)"
     )
     
-    @field_validator('session_id', 'user_id')
+    @field_validator('session_id', 'user_id', 'trip_id', 'chat_id')
     @classmethod
     def validate_id(cls, v: str) -> str:
         """Validate ID fields"""
+        if v is None:
+            return v  # Allow None for optional fields
         if not v or not v.strip():
             raise ValueError("ID cannot be empty")
         return v.strip()

@@ -49,6 +49,23 @@ async def list_tools():
     }
 
 
+@router.get("/health")
+async def health_check():
+    """
+    Health check for MCP service
+    """
+    try:
+        health = mcp_executor.health_check()
+        status_code = 200 if health.get("status") == "healthy" else 503
+        return health
+    except Exception as e:
+        logger.error(f"MCP health check failed: {e}", exc_info=True)
+        return {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+
+
 @router.post("/execute", response_model=ToolExecutionResponse)
 async def execute_tool(request: ToolExecutionRequest):
     """
@@ -73,16 +90,33 @@ async def execute_tool(request: ToolExecutionRequest):
             parameters=request.parameters
         )
         
+        # Check if execution was successful
+        if not result.get("success", False):
+            error_msg = result.get("error", "Unknown error")
+            logger.warning(f"Tool {request.tool_name} returned error: {error_msg}")
+            # Return 200 with error in response (not HTTP error)
+            return {
+                "success": False,
+                "tool": request.tool_name,
+                "result": result,
+                "error": error_msg
+            }
+        
         return {
-            "success": result.get("success", False),
+            "success": True,
             "tool": request.tool_name,
             "result": result,
-            "error": result.get("error")
+            "error": None
         }
     
     except Exception as e:
         logger.error(f"Tool execution failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "success": False,
+            "tool": request.tool_name,
+            "result": {},
+            "error": str(e)
+        }
 
 
 @router.post("/search/flights")
