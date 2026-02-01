@@ -1,4 +1,4 @@
 """
-Services Module
-External API integrations and utilities
+โมดูลเซอร์วิส
+การเชื่อมต่อ API ภายนอกและยูทิลิตี้
 """

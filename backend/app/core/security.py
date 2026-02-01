@@ -1,6 +1,5 @@
 """
-Security utilities for password hashing, validation, and user authentication
-รวม security.py และ security_helpers.py เป็นไฟล์เดียว
+ยูทิลิตี้ความปลอดภัย: การแฮชรหัสผ่าน การตรวจสอบ และการยืนยันตัวตนผู้ใช้
 """
 import re
 import hashlib

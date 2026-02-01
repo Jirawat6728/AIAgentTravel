@@ -1,6 +1,6 @@
 """
-Strict Pydantic V2 Models
-Type-safe state management
+โมเดล Pydantic V2 แบบเข้มงวด
+จัดการ state แบบ type-safe
 """
 
 from app.models.trip_plan import TripPlan, Segment, SegmentStatus

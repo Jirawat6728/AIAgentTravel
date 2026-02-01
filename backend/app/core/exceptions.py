@@ -1,5 +1,5 @@
 """
-Custom Exceptions for Production-Grade Error Handling
+ข้อยกเว้นกำหนดเอง สำหรับการจัดการข้อผิดพลาดระดับ production
 """
 
 

@@ -1,3 +1,4 @@
+"""โมดูล storage: อินเทอร์เฟซและตัวจัดเก็บ (JSON, MongoDB, Redis, Hybrid)."""
 from app.storage.interface import StorageInterface
 from app.storage.json_storage import JsonFileStorage
 from app.storage.mongodb_storage import MongoStorage

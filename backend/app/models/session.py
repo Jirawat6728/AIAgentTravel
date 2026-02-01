@@ -1,9 +1,9 @@
 """
-User Session Model with Strict Validation
+โมเดลเซสชันผู้ใช้ พร้อมการตรวจสอบข้อมูลอย่างเข้มงวด
 """
 
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
 
@@ -44,6 +44,11 @@ class UserSession(BaseModel):
     last_updated: str = Field(
         default_factory=lambda: datetime.utcnow().isoformat(),
         description="Last update timestamp (ISO format)"
+    )
+    # จุดหมายยอดนิยม (เมื่อผู้ใช้ค้นหา "ทั้งหมด" / "all" ในปลายทาง)
+    popular_destinations: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Popular destinations list when user searches 'all' in destination"
     )
     
     @field_validator('session_id', 'user_id', 'trip_id', 'chat_id')

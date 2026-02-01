@@ -1,7 +1,6 @@
 """
-Resilience Patterns for Fault Tolerance
-Combines Circuit Breaker, Rate Limiting, Retry Logic, and Health Monitoring
-รวม resilience.py และ crash_recovery.py เป็นไฟล์เดียว
+แพตเทิร์นความทนทานต่อข้อผิดพลาด (Resilience)
+รวม Circuit Breaker การจำกัดอัตรา Retry และการตรวจสอบสุขภาพระบบ
 """
 
 import asyncio
@@ -127,6 +126,7 @@ class CircuitBreaker:
 class RateLimiter:
     """
     Simple in-memory rate limiter using sliding window
+    Kept for backward compatibility and as fallback
     """
     
     def __init__(self, max_requests: int = 100, window_seconds: int = 60):
@@ -172,12 +172,20 @@ class RateLimiter:
         remaining = self.max_requests - len(self.requests[identifier])
         return True, remaining
     
+    async def is_allowed_async(self, identifier: str) -> Tuple[bool, int]:
+        """Async wrapper for is_allowed (for compatibility with RedisRateLimiter)"""
+        return self.is_allowed(identifier)
+    
     def reset(self, identifier: str = None):
         """Reset rate limit for identifier or all"""
         if identifier:
             self.requests.pop(identifier, None)
         else:
             self.requests.clear()
+    
+    async def reset_async(self, identifier: str = None):
+        """Async wrapper for reset (for compatibility with RedisRateLimiter)"""
+        self.reset(identifier)
 
 
 # =============================================================================
@@ -263,10 +271,20 @@ amadeus_circuit_breaker = CircuitBreaker(
     expected_exception=Exception
 )
 
-# Rate Limiters
-chat_rate_limiter = RateLimiter(max_requests=30, window_seconds=60)  # 30 requests per minute
-api_rate_limiter = RateLimiter(max_requests=100, window_seconds=60)  # 100 requests per minute
-payment_rate_limiter = RateLimiter(max_requests=10, window_seconds=60)  # 10 payment attempts per minute
+# Rate Limiters - Use Redis-based rate limiting with memory fallback
+try:
+    from app.core.redis_rate_limiter import RedisRateLimiter
+    # Use Redis for distributed rate limiting (falls back to memory if Redis unavailable)
+    chat_rate_limiter = RedisRateLimiter(max_requests=30, window_seconds=60, fallback_to_memory=True)
+    api_rate_limiter = RedisRateLimiter(max_requests=100, window_seconds=60, fallback_to_memory=True)
+    payment_rate_limiter = RedisRateLimiter(max_requests=10, window_seconds=60, fallback_to_memory=True)
+    logger.info("Using Redis-based rate limiting (with memory fallback)")
+except Exception as e:
+    logger.warning(f"Failed to initialize Redis rate limiters, using in-memory: {e}")
+    # Fallback to in-memory rate limiters
+    chat_rate_limiter = RateLimiter(max_requests=30, window_seconds=60)  # 30 requests per minute
+    api_rate_limiter = RateLimiter(max_requests=100, window_seconds=60)  # 100 requests per minute
+    payment_rate_limiter = RateLimiter(max_requests=10, window_seconds=60)  # 10 payment attempts per minute
 
 
 # =============================================================================

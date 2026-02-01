@@ -1,7 +1,7 @@
 """
-Unified Travel Service - TravelOrchestrator
-Integrates Amadeus and Google Maps APIs for a seamless travel planning experience.
-Production-grade with OAuth2 management, async HTTP, and caching.
+เซอร์วิสการเดินทางแบบรวม - TravelOrchestrator
+รวม Amadeus และ Google Maps APIs สำหรับการวางแผนการเดินทาง
+ระดับ production พร้อม OAuth2 การเรียก HTTP แบบ async และแคช
 """
 
 from __future__ import annotations
@@ -35,13 +35,15 @@ class TravelSearchRequest(BaseModel):
     context: Optional[Dict[str, Any]] = None
 
 class UnifiedTravelResponse(BaseModel):
-    """Test-validated: intent, flights, hotels, transfers, activities, summary; lists may be null/empty."""
+    """Test-validated: intent, flights, hotels, rentals, transfers, activities, popular_destinations, summary; lists may be null/empty."""
     intent: str
     location: Optional[Dict[str, Any]] = None
     flights: Optional[List[Dict[str, Any]]] = None
     hotels: Optional[List[Dict[str, Any]]] = None
+    rentals: Optional[List[Dict[str, Any]]] = None  # ที่พักให้เช่า (same source as hotels, labeled for UI)
     transfers: Optional[List[Dict[str, Any]]] = None
     activities: Optional[List[Dict[str, Any]]] = None
+    popular_destinations: Optional[List[Dict[str, Any]]] = None  # จุดหมายยอดนิยม
     summary: str
 
 # =============================================================================
@@ -100,12 +102,21 @@ class TravelOrchestrator:
         self._token_expiry: float = 0
         self._geocoding_cache: Dict[str, Dict[str, Any]] = {}
         self._iata_cache: Dict[str, str] = {}
+        # เมื่อ Production auth ล้มเหลว (401) ใช้ Test แทนเพื่อให้ค้นหาทำงานได้
+        self._search_fallback_to_test: bool = False
         
         # ✅ HTTP Client with optimized timeout for 1.5-minute search completion
         self.client = httpx.AsyncClient(timeout=12.0)  # ✅ Reduced from 15s to 12s for faster responses
 
-    async def _amadeus_get(self, url: str, token: str, params: Dict[str, Any], retries: int = 3) -> httpx.Response:
-        """GET with basic retry/backoff for 429/5xx to reduce flaky empty results."""
+    async def _amadeus_get(
+        self,
+        url: str,
+        token: str,
+        params: Dict[str, Any],
+        retries: int = 3,
+        use_booking_env: Optional[bool] = None,
+    ) -> httpx.Response:
+        """GET with basic retry/backoff for 429/5xx to reduce flaky empty results. use_booking_env is ignored (search always uses search base URL)."""
         last_exc: Optional[Exception] = None
         for attempt in range(retries):
             try:
@@ -132,41 +143,61 @@ class TravelOrchestrator:
     
     async def _get_amadeus_token(self) -> str:
         """
-        Get or refresh Amadeus OAuth2 token for search operations
-        ✅ Uses separate search API keys for security
+        Get or refresh Amadeus OAuth2 token for search operations.
+        Uses search API keys; if production returns 401, falls back to test environment so search still works.
         """
         if self._token and time.time() < self._token_expiry:
             return self._token
-            
-        # ✅ Use search environment and search API keys
+
         base_url = self.amadeus_search_base_url
-        logger.info(f"Refreshing Amadeus OAuth2 token for search environment...")
+        client_id = self.amadeus_search_client_id
+        client_secret = self.amadeus_search_client_secret
+        logger.info("Refreshing Amadeus OAuth2 token for search environment...")
         try:
             response = await self.client.post(
                 f"{base_url}/v1/security/oauth2/token",
                 data={
                     "grant_type": "client_credentials",
-                    "client_id": self.amadeus_search_client_id,
-                    "client_secret": self.amadeus_search_client_secret
+                    "client_id": client_id,
+                    "client_secret": client_secret
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
             response.raise_for_status()
             data = response.json()
-            
             self._token = data["access_token"]
-            # Set expiry with a small buffer (10 seconds)
             self._token_expiry = time.time() + data["expires_in"] - 10
-            
-            # ✅ Determine environment type from base URL
-            env_type = "production" if "api.amadeus.com" in base_url else "test"
-            logger.info(f"✅ Amadeus token refreshed successfully for {env_type} environment")
+            env_type = "production" if "api.amadeus.com" in base_url and "test." not in base_url else "test"
+            logger.info(f"Amadeus token refreshed successfully for {env_type} environment")
             return self._token
         except Exception as e:
-            # ✅ Determine environment type from base URL
-            env_type = "production" if "api.amadeus.com" in base_url else "test"
-            logger.error(f"❌ Failed to authenticate with Amadeus ({env_type}): {e}", exc_info=True)
-            raise AmadeusException(f"Authentication failed with Amadeus API ({env_type})")
+            resp = getattr(e, "response", None)
+            is_401 = resp is not None and getattr(resp, "status_code", None) == 401
+            if not is_401:
+                is_401 = "401" in str(e) or "Unauthorized" in str(e).lower()
+            # ถ้า Production คืน 401 และยังไม่เคย fallback ให้ลองใช้ Test
+            if is_401 and not self._search_fallback_to_test and "api.amadeus.com" in base_url and "test." not in base_url:
+                test_url = "https://test.api.amadeus.com"
+                test_id = settings.amadeus_booking_api_key or client_id
+                test_secret = settings.amadeus_booking_api_secret or client_secret
+                if test_id and test_secret:
+                    logger.warning(
+                        "Amadeus production auth failed (401). Falling back to test environment for search. "
+                        "To use production, set valid AMADEUS_SEARCH_API_KEY and AMADEUS_SEARCH_API_SECRET in .env"
+                    )
+                    self._search_fallback_to_test = True
+                    self.amadeus_search_base_url = test_url
+                    self.amadeus_search_client_id = test_id
+                    self.amadeus_search_client_secret = test_secret
+                    self._token = None
+                    self._token_expiry = 0
+                    return await self._get_amadeus_token()
+            env_type = "production" if "api.amadeus.com" in base_url and "test." not in base_url else "test"
+            logger.error(f"Failed to authenticate with Amadeus ({env_type}): {e}", exc_info=True)
+            raise AmadeusException(
+                f"Authentication failed with Amadeus API ({env_type}). "
+                "Check AMADEUS_SEARCH_API_KEY and AMADEUS_SEARCH_API_SECRET in .env (production keys from api.amadeus.com)."
+            )
 
     # -------------------------------------------------------------------------
     # Google Maps Integration (The Enabler)
@@ -506,44 +537,111 @@ class TravelOrchestrator:
     
     def detect_intent(self, query: str) -> List[str]:
         """
-        Simple Keyword-based Intent Detection
-        In a real app, this would use LLM or NLP classifier.
+        Keyword-based Intent Detection for AI Agent.
+        Supports: เที่ยวบิน, โรงแรม, ที่พักให้เช่า, transfer, กิจกรรม, สำรวจ/จุดหมายยอดนิยม.
         """
-        query = query.lower()
+        query_lower = query.lower().strip()
         intents = []
-        if any(k in query for k in ["บิน", "ไฟลต์", "ตั๋วเครื่องบิน", "flight"]):
+        # เที่ยวบิน
+        if any(k in query_lower for k in ["บิน", "ไฟลต์", "ตั๋วเครื่องบิน", "flight", "เที่ยวบิน"]):
             intents.append("flights")
-        if any(k in query for k in ["นอน", "พัก", "โรงแรม", "รีสอร์ท", "hotel"]):
+        # โรงแรม
+        if any(k in query_lower for k in ["นอน", "พัก", "โรงแรม", "รีสอร์ท", "hotel"]) and "ที่พักให้เช่า" not in query and "rental" not in query_lower:
             intents.append("hotels")
-        if any(k in query for k in ["รถ", "รับส่ง", "แท็กซี่", "transfer"]):
+        # ที่พักให้เช่า (rental accommodation)
+        if any(k in query_lower for k in ["ที่พักให้เช่า", "ให้เช่า", "rental", "accommodation", "ที่พักให้เช่าทั้งหมด"]):
+            intents.append("rentals")
+        # Transfer
+        if any(k in query_lower for k in ["รถ", "รับส่ง", "แท็กซี่", "transfer", "รถรับส่ง"]):
             intents.append("transfers")
-        if any(k in query for k in ["เที่ยว", "ทัวร์", "เรือ", "กิจกรรม", "activities", "cruise"]):
+        # กิจกรรม / ท่องเที่ยว
+        if any(k in query_lower for k in ["เที่ยว", "ทัวร์", "เรือ", "กิจกรรม", "activities", "cruise", "สถานที่ท่องเที่ยว"]):
             intents.append("activities")
-            
-        # Default if no specific intent found but location is mentioned
+        # สำรวจ / จุดหมายยอดนิยม / ทั้งหมด (popular destinations - no frontend, data only)
+        if any(k in query_lower for k in ["สำรวจ", "explore", "จุดหมายยอดนิยม", "popular", "แนะนำที่เที่ยว", "ไปไหนดี", "ทั้งหมด", "all", "ทุกที่", "ทุกแห่ง", "ทุกแห่งหน"]):
+            intents.append("popular_destinations")
+
         if not intents:
             intents = ["bundle"]
-            
         return intents
+
+    async def get_popular_destinations(self, user_lat: Optional[float] = None, user_lng: Optional[float] = None) -> List[Dict[str, Any]]:
+        """
+        Return popular destinations for AI Agent (จุดหมายยอดนิยม).
+        No frontend required - structured data only. Optional: based on user location.
+        """
+        # Curated popular destinations with sample dates and descriptions (like the reference UI)
+        base = datetime.now()
+        popular = [
+            {
+                "id": "popular-seoul",
+                "name": "Seoul",
+                "name_th": "โซล",
+                "dates": f"{(base + timedelta(days=36)).strftime('%d')} - {(base + timedelta(days=45)).strftime('%d')} {(base + timedelta(days=36)).strftime('%b')}",
+                "description": "พระราชวัง Gyeongbokgung และหอคอย N Seoul",
+                "description_en": "Gyeongbokgung Palace and N Seoul Tower",
+                "iata_code": "SEL",
+                "country_code": "KR",
+                "hotel_price_estimate_thb": 1984,
+                "flight_price_estimate_thb": None,
+            },
+            {
+                "id": "popular-tokyo",
+                "name": "Tokyo",
+                "name_th": "โตเกียว",
+                "dates": f"{(base + timedelta(days=59)).strftime('%d')} - {(base + timedelta(days=66)).strftime('%d')} {(base + timedelta(days=59)).strftime('%b')}",
+                "description": "ศาลเจ้า Meiji, วังอิมพีเรียล, พิพิธภัณฑ์",
+                "description_en": "Meiji Shrine, Imperial Palace, Museum",
+                "iata_code": "TYO",
+                "country_code": "JP",
+                "flight_price_estimate_thb": 9300,
+                "hotel_price_estimate_thb": 3348,
+            },
+            {
+                "id": "popular-koh-samui",
+                "name": "Koh Samui",
+                "name_th": "เกาะสมุย",
+                "dates": f"{(base + timedelta(days=100)).strftime('%d')} - {(base + timedelta(days=108)).strftime('%d')} {(base + timedelta(days=100)).strftime('%b')}",
+                "description": "ชายหาด สถานบันเทิงยามค่ำคืนและวัดพระใหญ่",
+                "description_en": "Beach, nightlife and Big Buddha Temple",
+                "iata_code": "USM",
+                "country_code": "TH",
+                "flight_price_estimate_thb": 4530,
+                "hotel_price_estimate_thb": 1656,
+            },
+        ]
+        logger.info(f"Returning {len(popular)} popular destinations for AI Agent")
+        return popular
 
     async def smart_search(self, request: TravelSearchRequest) -> UnifiedTravelResponse:
         """
-        Main Endpoint Logic: One call for everything
+        Main Endpoint Logic: One call for everything.
+        Supports: flights, hotels, rentals (ที่พักให้เช่า), transfers, activities, popular_destinations (จุดหมายยอดนิยม).
         """
         logger.info(f"Unified search started: {request.query}")
-        
-        # 1. Intent Detection
         intents = self.detect_intent(request.query)
-        
-        # 2. Extract Location (Simple logic for demo, should be improved with LLM)
-        # Assuming location is the last part or use LLM to extract
+
+        # Popular destinations only: no location needed
+        if "popular_destinations" in intents and len(intents) == 1:
+            destinations = await self.get_popular_destinations()
+            return UnifiedTravelResponse(
+                intent="popular_destinations",
+                location=None,
+                flights=None,
+                hotels=None,
+                rentals=None,
+                transfers=None,
+                activities=None,
+                popular_destinations=destinations,
+                summary="จุดหมายยอดนิยมสำหรับวางแผนการเดินทางค่ะ",
+            )
+
+        # 2. Extract Location
         location_query = request.query.split("ไป")[-1].strip() if "ไป" in request.query else request.query
-        
         try:
             loc_info = await self.get_coordinates(location_query)
             iata = await self.find_nearest_iata(loc_info["lat"], loc_info["lng"])
         except Exception:
-            # Fallback if geocoding fails but we have a broad query
             loc_info = {"city": "Tokyo", "lat": 35.6762, "lng": 139.6503, "address": "Tokyo, Japan"}
             iata = "HND"
 
@@ -553,35 +651,58 @@ class TravelOrchestrator:
             tasks.append(self.get_flights(iata))
         else:
             tasks.append(asyncio.sleep(0, result=None))
-            
+
         if "hotels" in intents or "bundle" in intents:
             tasks.append(self.get_hotels(iata))
         else:
             tasks.append(asyncio.sleep(0, result=None))
-            
+
+        # ที่พักให้เช่า: use same hotel API, label as rentals
+        if "rentals" in intents:
+            tasks.append(self.get_hotels(iata))
+        else:
+            tasks.append(asyncio.sleep(0, result=None))
+
         if "activities" in intents or "bundle" in intents:
             tasks.append(self.get_activities(loc_info["lat"], loc_info["lng"]))
         else:
             tasks.append(asyncio.sleep(0, result=None))
-            
+
         if "transfers" in intents or "bundle" in intents:
             tasks.append(self.get_transfers(iata, loc_info["address"]))
         else:
             tasks.append(asyncio.sleep(0, result=None))
 
+        # Popular destinations (with location context)
+        if "popular_destinations" in intents:
+            tasks.append(self.get_popular_destinations(loc_info.get("lat"), loc_info.get("lng")))
+        else:
+            tasks.append(asyncio.sleep(0, result=None))
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # 4. Aggregation
+
+        flights = results[0] if isinstance(results[0], list) else None
+        hotels = results[1] if isinstance(results[1], list) else None
+        rentals = results[2] if isinstance(results[2], list) else None
+        activities = results[3] if isinstance(results[3], list) else None
+        transfers = results[4] if isinstance(results[4], list) else None
+        popular_destinations = results[5] if isinstance(results[5], list) else None
+
+        # If bundle requested hotels but not rentals, rentals stays None
+        if "rentals" not in intents:
+            rentals = None
+
         response = UnifiedTravelResponse(
             intent=", ".join(intents),
             location=loc_info,
-            flights=results[0] if isinstance(results[0], list) else None,
-            hotels=results[1] if isinstance(results[1], list) else None,
-            activities=results[2] if isinstance(results[2], list) else None,
-            transfers=results[3] if isinstance(results[3], list) else None,
-            summary=f"พบข้อมูลสำหรับการเดินทางไป {loc_info['city']} เรียบร้อยแล้วค่ะ"
+            flights=flights,
+            hotels=hotels,
+            rentals=rentals,
+            activities=activities,
+            transfers=transfers,
+            popular_destinations=popular_destinations,
+            summary=f"พบข้อมูลสำหรับการเดินทางไป {loc_info['city']} เรียบร้อยแล้วค่ะ",
         )
-        
         return response
 
     # -------------------------------------------------------------------------
@@ -601,11 +722,21 @@ class TravelOrchestrator:
         """
         token = await self._get_amadeus_token()
         
-        # Use provided date or default to 30 days from now
+        # Use provided date or default to 30 days from now; normalize Buddhist year (พ.ศ.) to Christian
         if not departure_date:
             date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
         else:
-            date = departure_date
+            date = str(departure_date).strip()
+            try:
+                parts = date.split("-")
+                if len(parts) == 3:
+                    y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+                    if y > 2100:  # Buddhist Era (พ.ศ.) -> subtract 543
+                        y = y - 543
+                        date = f"{y:04d}-{m:02d}-{d:02d}"
+                        logger.info(f"📅 Normalized Buddhist date to Christian: {date}")
+            except (ValueError, IndexError):
+                pass
         
         # Ensure origin and destination are IATA codes
         origin_code = origin if len(origin) == 3 and origin.isupper() else await self._city_to_iata_sync(origin)
@@ -669,8 +800,9 @@ class TravelOrchestrator:
             except ValueError:
                 logger.warning(f"⚠️ Invalid date format: {date}")
             
-            # ✅ Log search parameters with date validation info
-            logger.info(f"🔍 Amadeus Flight Search: {origin_code} → {dest_code} on {date} ({adults} adult(s))")
+            # ✅ Log search parameters and confirm production URL
+            env_label = "production" if "api.amadeus.com" in self.amadeus_search_base_url and "test." not in self.amadeus_search_base_url else "test"
+            logger.info(f"🔍 Amadeus Flight Search ({env_label}): {self.amadeus_search_base_url} | {origin_code} → {dest_code} on {date} ({adults} adult(s))")
             
             # ✅ Search: ใช้ production environment
             resp = await self.client.get(
@@ -687,35 +819,63 @@ class TravelOrchestrator:
                 return []
             
             data = response_json.get("data", [])
+            meta = response_json.get("meta", {})
             
-            # ✅ Check for warnings/errors in response
+            # ✅ Check for warnings/errors in response (log clearly when using production)
             if "warnings" in response_json:
                 logger.warning(f"⚠️ Amadeus API warnings: {response_json['warnings']}")
             if "errors" in response_json:
-                logger.error(f"❌ Amadeus API errors: {response_json['errors']}")
+                err_list = response_json["errors"]
+                logger.error(f"❌ Amadeus API errors (status={resp.status_code}): {err_list}")
+                for err in (err_list if isinstance(err_list, list) else [err_list]):
+                    logger.error(f"   Amadeus error: code={err.get('code')} title={err.get('title')} detail={err.get('detail')}")
             
             # ✅ Log results with detailed information
             if data:
                 logger.info(f"✅ Found {len(data)} flight options for {origin_code} → {dest_code} on {date}")
                 return data
             
-            # ✅ FALLBACK: Try nearby dates (±1, ±2 days) if no results found
-            logger.info(f"⚠️ No flights found for {date}, trying fallback dates (±1, ±2 days)...")
+            # ✅ When 0 results: log meta/errors for debugging (especially with production key)
+            logger.info(
+                f"📋 Amadeus returned 0 flights for {origin_code}→{dest_code} on {date} | "
+                f"meta.count={meta.get('count')} meta={meta} | errors={response_json.get('errors')}"
+            )
+            
+            # ✅ FALLBACK: Try alternate airport for Osaka (KIX vs ITM)
+            if dest_code == "KIX" and not data:
+                logger.info(f"🔄 Trying alternate airport ITM (Osaka Itami) for {origin_code} → Osaka")
+                params_itm = {**params, "destinationLocationCode": "ITM"}
+                try:
+                    resp_itm = await self.client.get(
+                        f"{self.amadeus_search_base_url}/v2/shopping/flight-offers",
+                        params=params_itm,
+                        headers={"Authorization": f"Bearer {token}"}
+                    )
+                    if resp_itm.status_code == 200:
+                        data_itm = resp_itm.json().get("data", [])
+                        if data_itm:
+                            logger.info(f"✅ Found {len(data_itm)} flights via ITM (Osaka Itami)")
+                            return data_itm[:10]
+                except Exception as e_itm:
+                    logger.debug(f"ITM fallback failed: {e_itm}")
+            
+            # ✅ FALLBACK: Try nearby dates (±1..±5 days) to increase chance of finding data (e.g. when Google has results)
+            logger.info(f"⚠️ No flights found for {date}, trying fallback dates (±1..±5 days)...")
             fallback_dates = []
             try:
                 from datetime import datetime, timedelta
                 base_date = datetime.strptime(date, "%Y-%m-%d")
-                for offset in [-2, -1, 1, 2]:  # Try 2 days before, 1 day before, 1 day after, 2 days after
+                for offset in [-3, -2, -1, 1, 2, 3, 5]:  # Wider range to match availability
                     fallback_date = (base_date + timedelta(days=offset)).strftime("%Y-%m-%d")
                     fallback_dates.append(fallback_date)
             except Exception:
                 pass
             
-            # ✅ Parallel fallback searches (with timeout to stay within 1.5-minute target)
+            # ✅ Parallel fallback searches (try up to 4 dates, 10s timeout)
             if fallback_dates:
                 import asyncio
                 fallback_tasks = []
-                for fallback_date in fallback_dates[:2]:  # Limit to 2 fallback dates for speed
+                for fallback_date in fallback_dates[:4]:  # Try 4 fallback dates for better hit rate
                     fallback_params = params.copy()
                     fallback_params["departureDate"] = fallback_date
                     task = self.client.get(
@@ -725,41 +885,37 @@ class TravelOrchestrator:
                     )
                     fallback_tasks.append((fallback_date, task))
                 
-                # ✅ Execute fallback searches with 5s timeout
                 try:
                     results_list = await asyncio.wait_for(
                         asyncio.gather(*[task for _, task in fallback_tasks], return_exceptions=True),
-                        timeout=5.0
+                        timeout=10.0
                     )
                     
-                    # Collect results from fallback searches
                     for (fallback_date, _), result in zip(fallback_tasks, results_list):
                         if isinstance(result, Exception):
                             continue
                         try:
-                            # result is an httpx.Response object
                             if hasattr(result, 'json'):
                                 fallback_data = result.json().get("data", [])
                             else:
                                 continue
                             if fallback_data:
                                 logger.info(f"✅ Fallback success: Found {len(fallback_data)} flights for {fallback_date}")
-                                # Mark these as fallback results
                                 for item in fallback_data:
                                     item["_fallback_date"] = fallback_date
                                     item["_original_date"] = date
-                                data.extend(fallback_data[:3])  # Limit to top 3 from each fallback
-                                if len(data) >= 3:  # Stop if we have enough results
+                                data.extend(fallback_data[:3])
+                                if len(data) >= 3:
                                     break
                         except Exception as e:
                             logger.debug(f"Error processing fallback result for {fallback_date}: {e}")
                             continue
                     
                     if data:
-                        logger.info(f"✅ Found {len(data)} total flight options (including {len(data) - len([d for d in data if '_fallback_date' not in d])} from fallback dates)")
-                        return data[:10]  # Return max 10 results
+                        logger.info(f"✅ Found {len(data)} total flight options (including fallback dates) → will show PlanChoiceCard")
+                        return data[:10]
                 except asyncio.TimeoutError:
-                    logger.warning(f"⚠️ Fallback date searches timed out after 5s")
+                    logger.warning(f"⚠️ Fallback date searches timed out after 10s")
             
             # If still no results, log detailed diagnostic information
             full_response = response_json
@@ -768,22 +924,33 @@ class TravelOrchestrator:
             
             logger.warning(
                 f"⚠️ No flights found for {origin_code} → {dest_code} on {date} (including fallback dates).\n"
+                f"   URL: {self.amadeus_search_base_url} (production={('test' not in self.amadeus_search_base_url)})\n"
                 f"   Response status: {resp.status_code}\n"
                 f"   Response keys: {list(full_response.keys())}\n"
                 f"   Meta count: {count}\n"
                 f"   Meta: {meta}\n"
+                f"   Errors: {full_response.get('errors')}\n"
                 f"   Possible causes:\n"
                 f"   1. Date too far in future (Amadeus supports ~11 months ahead)\n"
                 f"   2. No flights available for this route/date\n"
                 f"   3. IATA codes may be incorrect: {origin_code} or {dest_code}\n"
                 f"   4. Route not serviced by airlines in Amadeus database\n"
-                f"   5. Date format or timezone issue"
+                f"   5. If production: ensure AMADEUS_SEARCH_API_KEY + AMADEUS_SEARCH_API_SECRET are production keys (not test)"
             )
-            logger.debug(f"Full Amadeus response (first 1000 chars): {str(full_response)[:1000]}")
+            logger.info(f"Full Amadeus response (first 1500 chars): {str(full_response)[:1500]}")
             
             return data
         except Exception as e:
-            logger.error(f"❌ Flight API error for {origin_code} → {dest_code} on {date}: {e}", exc_info=True)
+            # ✅ Log HTTP response body when request fails (e.g. 401/403/429 with production key)
+            err_detail = str(e)
+            if hasattr(e, "response") and e.response is not None:
+                try:
+                    body = e.response.text if hasattr(e.response, "text") else getattr(e.response, "content", b"")
+                    if body:
+                        err_detail = f"{e} | response: {body[:500] if isinstance(body, str) else body[:500].decode('utf-8', errors='replace')}"
+                except Exception:
+                    pass
+            logger.error(f"❌ Flight API error for {origin_code} → {dest_code} on {date}: {err_detail}", exc_info=True)
             return []
     
     async def _city_to_iata_sync(self, city_name: str) -> Optional[str]:

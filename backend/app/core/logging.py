@@ -1,6 +1,6 @@
 """
-Production-Grade Structured Logging
-Every log includes session_id and user_id for traceability
+ระบบบันทึกเหตุการณ์ (Logging) ระดับ production
+ทุก log มี session_id และ user_id สำหรับติดตาม
 """
 
 import logging

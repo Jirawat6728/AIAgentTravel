@@ -2,9 +2,12 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import LoginPage from "./pages/auth/LoginPage.jsx";
 import RegisterPage from "./pages/auth/RegisterPage.jsx";
 import ResetPasswordPage from "./pages/auth/ResetPasswordPage.jsx";
+import VerifyEmailPage from "./pages/auth/VerifyEmailPage.jsx";
+import VerifyEmailSentPage from "./pages/auth/VerifyEmailSentPage.jsx";
 import AITravelChat from "./pages/chat/AITravelChat.jsx";
 import HomePage from "./pages/home/HomePage.jsx";
 import UserProfileEditPage from "./pages/profile/UserProfileEditPage.jsx";
+import SettingsPage from "./pages/settings/SettingsPage.jsx";
 import MyBookingsPage from "./pages/bookings/MyBookingsPage.jsx";
 import PaymentPage from "./pages/bookings/PaymentPage.jsx";
 import FlightsPage from "./pages/search/FlightsPage.jsx";
@@ -16,6 +19,7 @@ import { clearAllUserData, checkAndClearIfUserChanged } from "./utils/userDataMa
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
+const FIREBASE_ENABLED = import.meta.env.VITE_FIREBASE_ENABLED === "true";
 
 // URL path mapping
 const VIEW_PATHS = {
@@ -23,6 +27,8 @@ const VIEW_PATHS = {
   'login': '/login',
   'register': '/register',
   'reset-password': '/reset-password',
+  'verify-email': '/verify-email',
+  'verify-email-sent': '/verify-email-sent',
   'chat': '/chat',
   'profile': '/profile',
   'bookings': '/bookings',
@@ -38,13 +44,15 @@ const PATH_VIEWS = Object.fromEntries(
   Object.entries(VIEW_PATHS).map(([view, path]) => [path, view])
 );
 
-// Get view from URL path
+// Get view from URL path (หน้า explore ถูกลบออก — /explore ไปแชท)
 function getViewFromPath() {
   const path = window.location.pathname;
-  // Check for payment page with booking_id
   if (path.startsWith('/payment') || path.includes('/payment')) {
     return 'payment';
   }
+  if (path === '/verify-email') return 'verify-email';
+  if (path === '/verify-email-sent') return 'verify-email-sent';
+  if (path === '/explore') return 'chat';
   return PATH_VIEWS[path] || 'home';
 }
 
@@ -70,6 +78,7 @@ function App() {
   const [notificationCount, setNotificationCount] = useState(0);
   const [notifications, setNotifications] = useState([]);
   const [pendingPrompt, setPendingPrompt] = useState("");
+  const [pendingVerifyEmail, setPendingVerifyEmail] = useState(""); // Email shown on verify-email-sent page
   const [isAuthChecking, setIsAuthChecking] = useState(true); // Loading state for auth check
   const [loadingData, setLoadingData] = useState(loadingAnimation); // Lottie animation data
 
@@ -190,55 +199,34 @@ function App() {
     }
   }, [isLoggedIn, user, fetchNotificationCount, view]);
 
-  // Sync view with URL and browser history
+  // Navigate without changing browser URL (path stays the same on all pages)
   const navigateToView = useCallback((newView, replace = false) => {
-    const path = getPathFromView(newView);
-    const currentPath = window.location.pathname;
-    
-    if (path !== currentPath) {
-      if (replace) {
-        window.history.replaceState({ view: newView }, '', path);
-      } else {
-        window.history.pushState({ view: newView }, '', path);
-      }
-    }
-    
     setView(newView);
-    
     // Save view to localStorage (but not login/register pages)
     if (newView !== 'login' && newView !== 'register' && newView !== 'reset-password') {
       localStorage.setItem("app_view", newView);
     }
   }, []);
 
-  // Handle browser back/forward buttons
+  // Keep browser URL always at / (no path change on any page)
+  useEffect(() => {
+    if (window.history.replaceState && window.location.pathname !== '/') {
+      window.history.replaceState({ view }, '', '/');
+    }
+  }, [view]);
+
+  // Optional: handle browser back
   useEffect(() => {
     const handlePopState = (event) => {
-      const newView = event.state?.view || getViewFromPath();
-      // Use setView directly here (not navigateToView) to avoid pushing new history entry
+      const newView = event.state?.view || 'home';
       setView(newView);
       if (newView !== 'login' && newView !== 'register' && newView !== 'reset-password') {
         localStorage.setItem("app_view", newView);
       }
     };
-
     window.addEventListener('popstate', handlePopState);
-    
-    // Initialize URL on mount
-    const currentPath = window.location.pathname;
-    const currentView = getViewFromPath();
-    if (currentView !== view) {
-      // URL doesn't match current view, update URL
-      window.history.replaceState({ view }, '', getPathFromView(view));
-    } else {
-      // URL matches, ensure state is set
-      window.history.replaceState({ view }, '', currentPath);
-    }
-
-    return () => {
-      window.removeEventListener('popstate', handlePopState);
-    };
-  }, [view]); // Re-run when view changes to sync URL
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   useEffect(() => {
     // Save view to localStorage whenever it changes
@@ -870,8 +858,91 @@ function App() {
   };
 
   // This is what LoginPage's "Login with Google" button calls (no args)
+  // Firebase Google Sign-In handler
+  const handleFirebaseGoogleLogin = async () => {
+    try {
+      // Dynamic import Firebase config to avoid loading if not needed
+      const { auth, googleProvider, signInWithPopup } = await import('./config/firebase.js');
+      
+      if (!auth || !googleProvider || !signInWithPopup) {
+        throw new Error("Firebase is not configured. Please contact administrator.");
+      }
+      
+      // Sign in with Google popup
+      const result = await signInWithPopup(auth, googleProvider);
+      const user = result.user;
+      
+      // Get ID token
+      const idToken = await user.getIdToken();
+      
+      // Send to backend Firebase endpoint
+      const res = await fetch(`${API_BASE_URL}/api/auth/firebase`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ idToken }),
+      });
+      
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({ detail: `HTTP ${res.status}: ${res.statusText}` }));
+        throw new Error(errorData.detail || `Firebase login failed: ${res.status} ${res.statusText}`);
+      }
+      
+      const data = await res.json();
+      if (!data?.ok || !data?.user) {
+        throw new Error(data?.detail || "Login failed: Invalid response from server");
+      }
+      
+      // Clear previous user data
+      clearAllUserData();
+      setIsLoggedIn(false);
+      setUser(null);
+      setNotificationCount(0);
+      setNotifications([]);
+      
+      // Set new user data
+      setIsLoggedIn(true);
+      const userData = { ...data.user, id: data.user.user_id || data.user.id };
+      setUser(userData);
+      localStorage.setItem("is_logged_in", "true");
+      localStorage.setItem("user_data", JSON.stringify(userData));
+      localStorage.setItem("session_timestamp", Date.now().toString());
+      
+      // Check if profile is complete
+      if (!hasRequiredProfileInfo(userData)) {
+        navigateToView("profile");
+      } else {
+        navigateToView("chat");
+      }
+    } catch (e) {
+      console.error("Firebase Google login error:", e);
+      const errorMessage = e?.message || String(e);
+      
+      if (errorMessage.includes("not configured") || errorMessage.includes("Firebase")) {
+        throw new Error("Firebase authentication is not configured. Please contact administrator.");
+      } else if (errorMessage.includes("popup") || errorMessage.includes("cancelled")) {
+        throw new Error("Sign-in was cancelled. Please try again.");
+      } else {
+        throw new Error(`Firebase login failed: ${errorMessage}`);
+      }
+    }
+  };
+
   const handleGoogleLoginClick = async () => {
     try {
+      // ✅ Try Firebase first if enabled, fallback to Google OAuth
+      if (FIREBASE_ENABLED) {
+        try {
+          console.log("Trying Firebase Google Sign-In...");
+          await handleFirebaseGoogleLogin();
+          return; // Success, exit early
+        } catch (firebaseError) {
+          console.warn("Firebase login failed, trying Google OAuth:", firebaseError);
+          // Fall through to Google OAuth as fallback
+        }
+      }
+      
+      // ✅ Fallback to Google OAuth (original implementation)
       // Check if GOOGLE_CLIENT_ID is set
       if (!GOOGLE_CLIENT_ID) {
         throw new Error("VITE_GOOGLE_CLIENT_ID ไม่ได้ตั้งค่าในไฟล์ .env\n\nกรุณาเพิ่ม VITE_GOOGLE_CLIENT_ID=your-client-id ในไฟล์ frontend/.env");
@@ -879,7 +950,7 @@ function App() {
 
       // Get current origin for debugging
       const currentOrigin = window.location.origin;
-      console.log("Starting Google login...", { 
+      console.log("Starting Google OAuth login...", { 
         hasClientId: !!GOOGLE_CLIENT_ID,
         currentOrigin: currentOrigin,
         clientId: GOOGLE_CLIENT_ID.substring(0, 20) + "..."
@@ -1007,10 +1078,7 @@ function App() {
   };
 
   const handleNavigateToSettings = () => {
-    // TODO: Create Settings page component
-    // For now, we can navigate to profile or show a message
-    alert("หน้าตั้งค่าจะเปิดใช้งานเร็วๆ นี้");
-    // setView("settings");
+    navigateToView("settings");
   };
 
   if (isAuthChecking) {
@@ -1068,6 +1136,21 @@ function App() {
           onNavigateToLogin={() => navigateToView("login")}
           onNavigateToHome={() => navigateToView("home")}
           onNavigateToRegister={() => navigateToView("register")}
+        />
+      )}
+
+      {view === "verify-email" && (
+        <VerifyEmailPage
+          onNavigateToHome={() => navigateToView("home")}
+          onNavigateToLogin={() => navigateToView("login")}
+        />
+      )}
+
+      {view === "verify-email-sent" && (
+        <VerifyEmailSentPage
+          email={pendingVerifyEmail}
+          onNavigateToHome={() => navigateToView("home")}
+          onNavigateToSettings={() => navigateToView("settings")}
         />
       )}
 
@@ -1216,6 +1299,46 @@ function App() {
           onNavigateToProfile={handleNavigateToProfile}
           onNavigateToSettings={handleNavigateToSettings}
           onNavigateToHome={() => navigateToView("home")}
+        />
+      )}
+
+      {view === "settings" && isLoggedIn && (
+        <SettingsPage
+          user={user}
+          onLogout={handleSignOut}
+          onNavigateToHome={() => navigateToView("home")}
+          onNavigateToProfile={handleNavigateToProfile}
+          onNavigateToBookings={() => navigateToView("bookings")}
+          onNavigateToAI={() => navigateToView("chat")}
+          onNavigateToFlights={() => navigateToView("flights")}
+          onNavigateToHotels={() => navigateToView("hotels")}
+          onNavigateToCarRentals={() => navigateToView("car-rentals")}
+          notificationCount={notificationCount}
+          onSendVerificationEmailSuccess={(email) => {
+            setPendingVerifyEmail(email || user?.email || "");
+            navigateToView("verify-email-sent");
+          }}
+          onUpdateEmailSuccess={(email) => {
+            setPendingVerifyEmail(email || "");
+            navigateToView("verify-email-sent");
+          }}
+          onRefreshUser={async () => {
+            // Refresh user data
+            try {
+              const res = await fetch(`${API_BASE_URL}/api/auth/me`, {
+                credentials: 'include',
+              });
+              if (res.ok) {
+                const data = await res.json();
+                if (data.user) {
+                  setUser(data.user);
+                  localStorage.setItem("user_data", JSON.stringify(data.user));
+                }
+              }
+            } catch (error) {
+              console.error("Failed to refresh user:", error);
+            }
+          }}
         />
       )}
     </div>

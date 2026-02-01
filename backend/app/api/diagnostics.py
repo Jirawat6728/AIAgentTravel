@@ -1,5 +1,5 @@
 """
-Diagnostic API endpoints for troubleshooting search issues
+Endpoint API วินิจฉัย สำหรับแก้ปัญหาในการค้นหา
 """
 from fastapi import APIRouter, HTTPException
 from typing import Dict, Any

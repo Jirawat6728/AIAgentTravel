@@ -1,6 +1,6 @@
 """
-Monitoring API Endpoints
-Provides access to cost tracking and workflow visualization for debugging and monitoring
+Endpoint API การตรวจสอบระบบ
+ให้เข้าถึงการติดตามต้นทุน (Amadeus-only, ไม่มี workflow)
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -8,9 +8,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 
 from app.engine.cost_tracker import cost_tracker
-from app.engine.workflow_visualizer import workflow_visualizer
 from app.storage.connection_manager import MongoConnectionManager
-from app.models.session import UserSession
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -117,99 +115,6 @@ async def get_cost_breakdown(session_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/workflow/session/{session_id}")
-async def get_session_workflow(
-    session_id: str,
-    detailed: bool = Query(default=False, description="Include detailed report")
-) -> Dict[str, Any]:
-    """
-    Get workflow visualization for a session
-    
-    Args:
-        session_id: Session identifier
-        detailed: Include detailed ASCII report
-        
-    Returns:
-        Workflow state and visualization
-    """
-    try:
-        # Get session from database
-        db = MongoConnectionManager.get_instance().get_database()
-        session_data = db.sessions.find_one({"session_id": session_id})
-        
-        if not session_data:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        # Convert to UserSession
-        session = UserSession.from_dict(session_data)
-        
-        # Get workflow data
-        workflow_dict = workflow_visualizer.export_to_dict(session.trip_plan)
-        compact_status = workflow_visualizer.get_compact_status(session.trip_plan)
-        progress_bar = workflow_visualizer.create_progress_bar(session.trip_plan)
-        slot_summary = workflow_visualizer.get_slot_summary(session.trip_plan)
-        
-        result = {
-            "ok": True,
-            "session_id": session_id,
-            "compact_status": compact_status,
-            "progress_bar": progress_bar,
-            "slot_summary": slot_summary,
-            "workflow": workflow_dict
-        }
-        
-        # Add detailed report if requested
-        if detailed:
-            ascii_report = workflow_visualizer.create_detailed_report(session.trip_plan)
-            ascii_viz = workflow_visualizer.visualize(session.trip_plan)
-            result["ascii_report"] = ascii_report
-            result["ascii_visualization"] = ascii_viz
-        
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting workflow: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/workflow/ascii/{session_id}")
-async def get_workflow_ascii(session_id: str) -> Dict[str, Any]:
-    """
-    Get ASCII visualization of workflow (for terminal display)
-    
-    Args:
-        session_id: Session identifier
-        
-    Returns:
-        ASCII diagram as text
-    """
-    try:
-        # Get session from database
-        db = MongoConnectionManager.get_instance().get_database()
-        session_data = db.sessions.find_one({"session_id": session_id})
-        
-        if not session_data:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        # Convert to UserSession
-        session = UserSession.from_dict(session_data)
-        
-        # Get ASCII visualization
-        ascii_viz = workflow_visualizer.visualize(session.trip_plan, include_details=True)
-        
-        return {
-            "ok": True,
-            "session_id": session_id,
-            "visualization": ascii_viz
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting ASCII workflow: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.post("/cost/reset/{session_id}")
 async def reset_session_cost(session_id: str) -> Dict[str, Any]:
     """
@@ -249,4 +154,81 @@ async def monitoring_health() -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Error in health check: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Redis Sync Endpoints
+# =============================================================================
+
+@router.post("/sync/redis/session/{session_id}")
+async def sync_session_from_redis(session_id: str) -> Dict[str, Any]:
+    """
+    Manually sync a specific session from Redis to long-term memory (memories collection)
+    
+    Args:
+        session_id: Session identifier to sync
+        
+    Returns:
+        Sync result with status
+    """
+    try:
+        from app.storage.redis_sync import redis_sync_service
+        
+        result = await redis_sync_service.sync_session_with_history(session_id)
+        
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "sync_result": result,
+            "message": "Session synced to long-term memory successfully" if result.get("session") or result.get("history") else "No data to sync"
+        }
+    except Exception as e:
+        logger.error(f"Error syncing session {session_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sync/redis/all")
+async def sync_all_from_redis() -> Dict[str, Any]:
+    """
+    Manually sync all sessions from Redis to long-term memory (memories collection)
+    
+    Returns:
+        Sync statistics
+    """
+    try:
+        from app.storage.redis_sync import redis_sync_service
+        
+        stats = await redis_sync_service.sync_all_to_long_term_memory()
+        
+        return {
+            "ok": True,
+            "message": "Bulk sync to long-term memory completed",
+            "stats": stats
+        }
+    except Exception as e:
+        logger.error(f"Error in bulk sync: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sync/redis/status")
+async def get_sync_status() -> Dict[str, Any]:
+    """
+    Get Redis sync service status
+    
+    Returns:
+        Current sync service status and statistics
+    """
+    try:
+        from app.storage.redis_sync import redis_sync_service
+        
+        status = await redis_sync_service.get_sync_status()
+        
+        return {
+            "ok": True,
+            "timestamp": datetime.utcnow().isoformat(),
+            "status": status
+        }
+    except Exception as e:
+        logger.error(f"Error getting sync status: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

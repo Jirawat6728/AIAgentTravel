@@ -1,28 +1,90 @@
 """
-Authentication Router
-Handles Google Login, Session Management, and User Profile
+เราเตอร์การยืนยันตัวตน
+จัดการล็อกอินอีเมล/รหัสผ่าน Google OAuth Firebase การจัดการเซสชัน และโปรไฟล์ผู้ใช้
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Response, Request
+from fastapi import APIRouter, HTTPException, Depends, Response, Request, Query
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
+from dateutil import parser as date_parser
+
+# Firebase Admin SDK
+try:
+    import firebase_admin
+    from firebase_admin import credentials, auth as firebase_auth
+    FIREBASE_AVAILABLE = True
+except ImportError:
+    FIREBASE_AVAILABLE = False
+    firebase_admin = None
+    firebase_auth = None
 
 from app.core.config import settings
 from app.core.logging import get_logger, set_logging_context, clear_logging_context
 from app.core.security import hash_password, verify_password, validate_password_strength
 from app.storage.mongodb_storage import MongoStorage
-from app.models.database import User, SessionDocument
+from app.models.database import User, SessionDocument, FamilyMember
+from app.services.email_service import get_email_service
+from app.services.sms_service import get_sms_service, generate_otp
 
 logger = get_logger(__name__)
+
+# Initialize Firebase Admin SDK (lazy initialization)
+_firebase_initialized = False
+
+def initialize_firebase():
+    """Initialize Firebase Admin SDK if not already initialized"""
+    global _firebase_initialized
+    
+    if _firebase_initialized:
+        return
+    
+    if not FIREBASE_AVAILABLE:
+        logger.warning("Firebase Admin SDK not available. Install: pip install firebase-admin")
+        return
+    
+    try:
+        # Check if Firebase is already initialized
+        if firebase_admin._apps:
+            _firebase_initialized = True
+            logger.info("Firebase Admin SDK already initialized")
+            return
+        
+        # Initialize Firebase with credentials
+        if settings.firebase_credentials_path:
+            # Use service account JSON file
+            cred = credentials.Certificate(settings.firebase_credentials_path)
+            firebase_admin.initialize_app(cred)
+            logger.info(f"Firebase Admin SDK initialized with credentials file: {settings.firebase_credentials_path}")
+        elif settings.firebase_project_id:
+            # Use default credentials (for GCP environments)
+            firebase_admin.initialize_app(options={"projectId": settings.firebase_project_id})
+            logger.info(f"Firebase Admin SDK initialized with project ID: {settings.firebase_project_id}")
+        else:
+            # Try to use default credentials (for local development with gcloud auth)
+            try:
+                firebase_admin.initialize_app()
+                logger.info("Firebase Admin SDK initialized with default credentials")
+            except Exception as default_error:
+                logger.warning(f"Firebase Admin SDK initialization failed: {default_error}. Firebase authentication will be disabled.")
+                return
+        
+        _firebase_initialized = True
+        logger.info("✅ Firebase Admin SDK initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize Firebase Admin SDK: {e}", exc_info=True)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 class GoogleLoginRequest(BaseModel):
     """Google OAuth login. Send id_token from Google Sign-In (not 'token')."""
     id_token: str = Field(..., description="Google ID token from OAuth flow")
+
+class FirebaseLoginRequest(BaseModel):
+    """Firebase Authentication login. Send idToken from Firebase Auth."""
+    idToken: str = Field(..., description="Firebase ID token from Firebase Authentication")
 
 class LoginRequest(BaseModel):
     email: str
@@ -66,42 +128,16 @@ class ProfileUpdateRequest(BaseModel):
     dob: Optional[str] = None
     gender: Optional[str] = None
     profile_image: Optional[str] = Field(default=None, description="Profile image URL or base64 data URL")
-    # Hotel Booking Preferences (Production-ready for Agoda/Traveloka)
     # Emergency Contact
     emergency_contact_name: Optional[str] = Field(default=None, description="Emergency contact full name")
     emergency_contact_phone: Optional[str] = Field(default=None, description="Emergency contact phone number")
     emergency_contact_relation: Optional[str] = Field(default=None, description="Emergency contact relation: SPOUSE, PARENT, FRIEND, OTHER")
     emergency_contact_email: Optional[str] = Field(default=None, description="Emergency contact email")
-    # Special Requests / Preferences
-    hotel_early_checkin: Optional[bool] = Field(default=False, description="Request early check-in")
-    hotel_late_checkout: Optional[bool] = Field(default=False, description="Request late check-out")
-    hotel_smoking_preference: Optional[str] = Field(default=None, description="Smoking preference: SMOKING, NON_SMOKING")
-    hotel_room_type_preference: Optional[str] = Field(default=None, description="Room type preference: STANDARD, DELUXE, SUITE, etc.")
-    hotel_floor_preference: Optional[str] = Field(default=None, description="Floor preference: HIGH, LOW, ANY")
-    hotel_view_preference: Optional[str] = Field(default=None, description="View preference: SEA, CITY, GARDEN, ANY")
-    hotel_extra_bed: Optional[bool] = Field(default=False, description="Request extra bed/cot")
-    hotel_airport_transfer: Optional[bool] = Field(default=False, description="Request airport transfer")
-    hotel_dietary_requirements: Optional[str] = Field(default=None, description="Dietary requirements: VEGETARIAN, VEGAN, HALAL, ALLERGIES, NONE")
-    hotel_special_occasion: Optional[str] = Field(default=None, description="Special occasion: BIRTHDAY, HONEYMOON, ANNIVERSARY, NONE")
-    hotel_accessibility_needs: Optional[bool] = Field(default=False, description="Accessibility needs (wheelchair accessible room)")
-    # Check-in Details
-    hotel_arrival_time: Optional[str] = Field(default=None, description="Expected arrival time (HH:MM format)")
-    hotel_arrival_flight: Optional[str] = Field(default=None, description="Arrival flight number")
-    hotel_departure_time: Optional[str] = Field(default=None, description="Expected departure time (HH:MM format)")
     hotel_number_of_guests: Optional[int] = Field(default=1, description="Number of guests (including main guest)")
-    # Payment Information
-    payment_method: Optional[str] = Field(default=None, description="Payment method: CREDIT_CARD, DEBIT_CARD, BANK_TRANSFER")
-    card_holder_name: Optional[str] = Field(default=None, description="Card holder name (if using card)")
-    card_last_4_digits: Optional[str] = Field(default=None, description="Card last 4 digits (for verification)")
-    # Tax Invoice Information
-    company_name: Optional[str] = Field(default=None, description="Company/Organization name (for business booking)")
-    tax_id: Optional[str] = Field(default=None, description="Tax ID / VAT Number")
-    invoice_address: Optional[str] = Field(default=None, description="Invoice address (if different from main address)")
-    # Loyalty Program
-    hotel_loyalty_number: Optional[str] = Field(default=None, description="Hotel loyalty program number (e.g., Marriott Bonvoy, Hilton Honors)")
-    airline_frequent_flyer: Optional[str] = Field(default=None, description="Airline frequent flyer number")
-    # Additional Notes
-    hotel_booking_notes: Optional[str] = Field(default=None, description="Additional notes/comments for hotel booking (max 500 chars)")
+    # Notification & App preferences (from Settings page)
+    preferences: Optional[Dict[str, Any]] = Field(default=None, description="User preferences: notificationsEnabled, bookingNotifications, paymentNotifications, tripChangeNotifications, emailNotifications, etc.")
+    # ผู้จองร่วม (สมาชิกในครอบครัว) - สำหรับเลือกตอนจองมากกว่า 1 คน
+    family: Optional[list] = Field(default=None, description="List of family members (adult/child) for co-traveler selection: [{id, type, first_name, last_name, date_of_birth?, passport_no?, ...}]")
 
 @router.post("/login")
 async def login(request: LoginRequest, response: Response):
@@ -119,9 +155,15 @@ async def login(request: LoginRequest, response: Response):
         await storage.connect()
         users_collection = storage.db["users"]
         
-        # 1. Admin/Test Account Check (special hardcoded account)
-        if request.email == "admin@example.com" and request.password == "1234":
-            user_data = await users_collection.find_one({"email": request.email})
+        # ✅ Normalize email for consistent checking (lowercase, trimmed)
+        normalized_email = request.email.lower().strip()
+        
+        # 1. Admin/Test Account Check (from environment variables)
+        # ✅ SECURITY: Use environment variables instead of hardcoded credentials
+        if (normalized_email == settings.admin_email.lower().strip() and 
+            settings.admin_password and 
+            request.password == settings.admin_password):
+            user_data = await users_collection.find_one({"email": normalized_email})
             
             if not user_data:
                 # Create admin user if not exists
@@ -169,28 +211,36 @@ async def login(request: LoginRequest, response: Response):
             return {"ok": True, "user": user.model_dump()}
 
         # 2. General User Login (verify password from DB)
-        user_data = await users_collection.find_one({"email": request.email})
+        # ✅ Use normalized email for case-insensitive search
+        user_data = await users_collection.find_one({"email": normalized_email})
+        
+        # If not found with exact match, try case-insensitive regex search
+        if not user_data:
+            user_data = await users_collection.find_one({
+                "email": {"$regex": f"^{normalized_email}$", "$options": "i"}
+            })
 
         if not user_data:
             # ✅ Return specific error for email not found
-            raise HTTPException(status_code=401, detail="Email not found")
+            logger.warning(f"Login attempt with non-existent email: {normalized_email}")
+            raise HTTPException(status_code=401, detail="อีเมลหรือรหัสผ่านไม่ถูกต้อง")
 
         # Verify password
         password_hash = user_data.get("password_hash")
         if not password_hash:
-            logger.warning(f"User {request.email} has no password_hash - cannot login with password")
-            raise HTTPException(status_code=401, detail="Invalid email or password")
+            logger.warning(f"User {normalized_email} has no password_hash - cannot login with password")
+            raise HTTPException(status_code=401, detail="อีเมลหรือรหัสผ่านไม่ถูกต้อง")
 
         # Verify password with detailed logging
         try:
-            logger.info(f"Attempting password verification for user {request.email}")
+            logger.info(f"Attempting password verification for user {normalized_email}")
             logger.debug(f"Password hash from DB: {password_hash[:50]}...")
             
             password_valid = verify_password(request.password, password_hash)
             
             if not password_valid:
                 logger.warning(
-                    f"Password verification failed for user {request.email}. "
+                    f"Password verification failed for user {normalized_email}. "
                     f"Hash exists: {bool(password_hash)}, Hash length: {len(password_hash) if password_hash else 0}"
                 )
                 # Try to diagnose the issue
@@ -202,21 +252,21 @@ async def login(request: LoginRequest, response: Response):
                 except Exception as test_error:
                     logger.debug(f"Test hash/verify failed: {test_error}")
                 
-                raise HTTPException(status_code=401, detail="Invalid email or password")
+                raise HTTPException(status_code=401, detail="อีเมลหรือรหัสผ่านไม่ถูกต้อง")
             
-            logger.info(f"Password verified successfully for user {request.email}")
+            logger.info(f"Password verified successfully for user {normalized_email}")
         except HTTPException:
             raise
         except Exception as verify_error:
             logger.error(
-                f"Password verification error for user {request.email}: {verify_error}",
+                f"Password verification error for user {normalized_email}: {verify_error}",
                 exc_info=True
             )
-            raise HTTPException(status_code=401, detail="Invalid email or password")
+            raise HTTPException(status_code=401, detail="อีเมลหรือรหัสผ่านไม่ถูกต้อง")
 
-        # Update last login
+        # Update last login (use normalized email)
         await users_collection.update_one(
-            {"email": request.email},
+            {"email": normalized_email},
             {"$set": {"last_login": datetime.utcnow()}}
         )
 
@@ -331,12 +381,21 @@ async def google_login(request: GoogleLoginRequest, response: Response):
             logger.error("Google token missing 'email' field")
             raise HTTPException(status_code=400, detail="Invalid Google token: missing email")
 
+        # ✅ Normalize email for consistent checking
+        normalized_email = email.lower().strip()
+
         storage = MongoStorage()
         await storage.connect()
 
-        # ✅ Check if user exists by email
+        # ✅ Check if user exists by email (case-insensitive)
         users_collection = storage.db["users"]
-        user_data = await users_collection.find_one({"email": email})
+        user_data = await users_collection.find_one({"email": normalized_email})
+        
+        # If not found with exact match, try case-insensitive regex search
+        if not user_data:
+            user_data = await users_collection.find_one({
+                "email": {"$regex": f"^{normalized_email}$", "$options": "i"}
+            })
 
         if not user_data:
             # ✅ Create new user with Google ID as user_id
@@ -508,6 +567,271 @@ async def update_profile(request: Request, profile: ProfileUpdateRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@router.post("/change-password")
+async def change_password(request: Request, password_data: dict):
+    """
+    Change user password
+    """
+    user_id = request.cookies.get(settings.session_cookie_name)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    current_password = password_data.get("current_password")
+    new_password = password_data.get("new_password")
+    
+    if not current_password or not new_password:
+        raise HTTPException(status_code=400, detail="กรุณากรอกรหัสผ่านปัจจุบันและรหัสผ่านใหม่")
+    
+    # Validate password strength
+    try:
+        validate_password_strength(new_password)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    try:
+        storage = MongoStorage()
+        await storage.connect()
+        users_collection = storage.db["users"]
+        
+        # Get user
+        user_data = await users_collection.find_one({"user_id": user_id})
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Verify current password
+        stored_password = user_data.get("password", "")
+        if not stored_password:
+            raise HTTPException(status_code=400, detail="บัญชีนี้ไม่ได้ตั้งรหัสผ่าน (ใช้ Google/Firebase login)")
+        
+        if not verify_password(current_password, stored_password):
+            raise HTTPException(status_code=400, detail="รหัสผ่านปัจจุบันไม่ถูกต้อง")
+        
+        # Hash new password
+        hashed_password = hash_password(new_password)
+        
+        # Update password
+        await users_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"password": hashed_password}}
+        )
+        
+        logger.info(f"Password changed for user: {user_id}")
+        return {"ok": True, "message": "เปลี่ยนรหัสผ่านสำเร็จ"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error changing password: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"เกิดข้อผิดพลาดในการเปลี่ยนรหัสผ่าน: {str(e)}")
+
+
+@router.post("/update-email")
+async def update_email(request: Request, email_data: dict):
+    """
+    Update user email (requires verification)
+    """
+    user_id = request.cookies.get(settings.session_cookie_name)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    new_email = email_data.get("new_email", "").strip().lower()
+    
+    if not new_email or "@" not in new_email:
+        raise HTTPException(status_code=400, detail="กรุณากรอกอีเมลที่ถูกต้อง")
+    
+    try:
+        storage = MongoStorage()
+        await storage.connect()
+        users_collection = storage.db["users"]
+        
+        # Check if email already exists
+        normalized_email = new_email.lower().strip()
+        existing_user = await users_collection.find_one({"email": normalized_email})
+        if existing_user:
+            existing_user_id = existing_user.get("user_id")
+            if existing_user_id != user_id:
+                raise HTTPException(status_code=400, detail="อีเมลนี้ถูกใช้งานแล้ว")
+        
+        # Get email service
+        from app.services.email_service import get_email_service
+        email_service = get_email_service()
+        
+        # Generate verification token
+        verification_token = email_service.generate_verification_token()
+        
+        # Update user with new email (unverified)
+        await users_collection.update_one(
+            {"user_id": user_id},
+            {
+                "$set": {
+                    "email": normalized_email,
+                    "email_verified": False,
+                    "email_verification_token": verification_token,
+                    "email_verification_sent_at": datetime.utcnow()
+                }
+            }
+        )
+        
+        # Send verification email to new address (every time email is changed)
+        user_data = await users_collection.find_one({"user_id": user_id})
+        user_name = (user_data or {}).get("full_name") or (user_data or {}).get("first_name") or None
+        try:
+            email_sent = email_service.send_verification_email(
+                normalized_email, verification_token, user_name=user_name
+            )
+            if email_sent:
+                logger.info(f"Verification email sent to {normalized_email} for user {user_id}")
+            else:
+                logger.warning(f"Verification email not sent (service not configured?) to {normalized_email}")
+        except Exception as email_error:
+            logger.error(f"Failed to send verification email: {email_error}", exc_info=True)
+            # Don't fail the request if email sending fails
+
+        return {
+            "ok": True,
+            "message": "กรุณายืนยันอีเมลในแอป (Firebase จะส่งลิงก์ยืนยันให้)",
+            "email": normalized_email,
+            "use_firebase": True,
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating email: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"เกิดข้อผิดพลาดในการอัปเดตอีเมล: {str(e)}")
+
+
+@router.delete("/profile")
+async def delete_account(request: Request, response: Response):
+    """
+    Delete user account and all associated data
+    
+    This will permanently delete:
+    - User document
+    - All sessions
+    - All memories
+    - All bookings
+    - All conversations
+    - All notifications
+    
+    ⚠️ WARNING: This action cannot be undone!
+    """
+    user_id = request.cookies.get(settings.session_cookie_name)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    try:
+        storage = MongoStorage()
+        await storage.connect()
+        
+        if storage.db is None:
+            raise HTTPException(status_code=500, detail="Database connection unavailable")
+        
+        # Get user info before deletion (for logging)
+        users_collection = storage.db["users"]
+        user_data = await users_collection.find_one({"user_id": user_id})
+        
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user_email = user_data.get("email", "unknown")
+        is_admin = user_data.get("is_admin", False)
+        
+        # Prevent deletion of admin account
+        if is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail="ไม่สามารถลบบัญชีผู้ดูแลระบบได้"
+            )
+        
+        logger.warning(f"⚠️ User account deletion requested: user_id={user_id}, email={user_email}")
+        
+        deletion_summary = {
+            "user_id": user_id,
+            "email": user_email,
+            "deleted_at": datetime.utcnow(),
+            "collections_deleted": {}
+        }
+        
+        # 1. Delete all sessions
+        try:
+            sessions_collection = storage.db["sessions"]
+            sessions_result = await sessions_collection.delete_many({"user_id": user_id})
+            deletion_summary["collections_deleted"]["sessions"] = sessions_result.deleted_count
+            logger.info(f"Deleted {sessions_result.deleted_count} sessions for user {user_id}")
+        except Exception as e:
+            logger.error(f"Error deleting sessions for user {user_id}: {e}", exc_info=True)
+            deletion_summary["collections_deleted"]["sessions"] = f"Error: {str(e)}"
+        
+        # 2. Delete all memories
+        try:
+            memories_collection = storage.db["memories"]
+            memories_result = await memories_collection.delete_many({"user_id": user_id})
+            deletion_summary["collections_deleted"]["memories"] = memories_result.deleted_count
+            logger.info(f"Deleted {memories_result.deleted_count} memories for user {user_id}")
+        except Exception as e:
+            logger.error(f"Error deleting memories for user {user_id}: {e}", exc_info=True)
+            deletion_summary["collections_deleted"]["memories"] = f"Error: {str(e)}"
+        
+        # 3. Delete all bookings
+        try:
+            bookings_collection = storage.db["bookings"]
+            bookings_result = await bookings_collection.delete_many({"user_id": user_id})
+            deletion_summary["collections_deleted"]["bookings"] = bookings_result.deleted_count
+            logger.info(f"Deleted {bookings_result.deleted_count} bookings for user {user_id}")
+        except Exception as e:
+            logger.error(f"Error deleting bookings for user {user_id}: {e}", exc_info=True)
+            deletion_summary["collections_deleted"]["bookings"] = f"Error: {str(e)}"
+        
+        # 4. Delete all conversations
+        try:
+            conversations_collection = storage.db["conversations"]
+            conversations_result = await conversations_collection.delete_many({"user_id": user_id})
+            deletion_summary["collections_deleted"]["conversations"] = conversations_result.deleted_count
+            logger.info(f"Deleted {conversations_result.deleted_count} conversations for user {user_id}")
+        except Exception as e:
+            logger.error(f"Error deleting conversations for user {user_id}: {e}", exc_info=True)
+            deletion_summary["collections_deleted"]["conversations"] = f"Error: {str(e)}"
+        
+        # 5. Delete all notifications
+        try:
+            notifications_collection = storage.db.get_collection("notifications")
+            notifications_result = await notifications_collection.delete_many({"user_id": user_id})
+            deletion_summary["collections_deleted"]["notifications"] = notifications_result.deleted_count
+            logger.info(f"Deleted {notifications_result.deleted_count} notifications for user {user_id}")
+        except Exception as e:
+            logger.error(f"Error deleting notifications for user {user_id}: {e}", exc_info=True)
+            deletion_summary["collections_deleted"]["notifications"] = f"Error: {str(e)}"
+        
+        # 6. Delete user document (LAST - after all related data is deleted)
+        try:
+            user_result = await users_collection.delete_one({"user_id": user_id})
+            deletion_summary["collections_deleted"]["user"] = user_result.deleted_count
+            logger.info(f"Deleted user document for user {user_id}")
+        except Exception as e:
+            logger.error(f"Error deleting user document for user {user_id}: {e}", exc_info=True)
+            deletion_summary["collections_deleted"]["user"] = f"Error: {str(e)}"
+            raise HTTPException(status_code=500, detail="Failed to delete user account")
+        
+        # Clear session cookie
+        response.delete_cookie(settings.session_cookie_name)
+        
+        logger.warning(f"✅ User account deleted successfully: user_id={user_id}, email={user_email}")
+        logger.info(f"Deletion summary: {deletion_summary}")
+        
+        return {
+            "ok": True,
+            "message": "บัญชีถูกลบเรียบร้อยแล้ว",
+            "deletion_summary": deletion_summary
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting user account: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"เกิดข้อผิดพลาดในการลบบัญชี: {str(e)}")
+
+
 
 
 @router.post("/register", status_code=201)
@@ -536,10 +860,21 @@ async def register(request: RegisterRequest, response: Response):
         await storage.connect()
         users_collection = storage.db["users"]
 
-        # Check if user already exists
-        existing_user = await users_collection.find_one({"email": request.email})
+        # ✅ Normalize email for consistent checking (lowercase, trimmed)
+        normalized_email = request.email.lower().strip()
+        
+        # Check if user already exists (case-insensitive search)
+        # Try multiple search strategies to handle case variations
+        existing_user = await users_collection.find_one({"email": normalized_email})
+        if not existing_user:
+            # Try case-insensitive regex search as fallback
+            existing_user = await users_collection.find_one({
+                "email": {"$regex": f"^{normalized_email}$", "$options": "i"}
+            })
+        
         if existing_user:
-            raise HTTPException(status_code=400, detail="Email already registered")
+            logger.warning(f"Registration attempt with existing email: {normalized_email} (found: {existing_user.get('email')})")
+            raise HTTPException(status_code=400, detail="อีเมลนี้ถูกใช้งานแล้ว กรุณาใช้อีเมลอื่น")
 
         # Hash password (with SHA-256 pre-hashing to handle long passwords)
         try:
@@ -549,21 +884,70 @@ async def register(request: RegisterRequest, response: Response):
             logger.error(f"Password hashing error: {hash_error}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Password encryption failed: {str(hash_error)}")
 
-        # Create new user
+        # ✅ CRUD STABILITY: Create new user with duplicate key error handling
         user_id = f"user_{int(datetime.utcnow().timestamp())}"
+        
+        # Generate email verification token (รองรับทุกเมล: Gmail, Hotmail, Outlook, Yahoo, etc. ยกเว้น admin)
+        email_verification_token = None
+        email_verification_sent_at = None
+        email_verified = False
+        admin_email_normalized = (settings.admin_email or "").lower().strip()
+
+        # Skip email verification only for configured admin email (default admin@example.com)
+        if normalized_email != admin_email_normalized:
+            email_service = get_email_service()
+            if email_service.is_configured:
+                email_verification_token = email_service.generate_verification_token()
+                email_verification_sent_at = datetime.utcnow()
+                email_verified = False
+            else:
+                # If email service is not configured, mark as verified (for development)
+                logger.warning("Email service not configured. Skipping email verification.")
+                email_verified = True
+        else:
+            # Admin email is automatically verified
+            email_verified = True
+        
         user_doc = {
             "user_id": user_id,
-            "email": request.email,
+            "email": normalized_email,  # ✅ Use normalized email (already lowercased and trimmed)
             "full_name": f"{request.first_name} {request.last_name}",
             "first_name": request.first_name.strip(),
             "last_name": request.last_name.strip(),
             "phone": request.phone.strip() if request.phone else None,
             "password_hash": hashed_password,
+            "email_verified": email_verified,
+            "email_verification_token": email_verification_token,
+            "email_verification_sent_at": email_verification_sent_at,
             "created_at": datetime.utcnow(),
             "last_login": datetime.utcnow()
         }
-        await users_collection.insert_one(user_doc)
+        
+        # ✅ CRUD STABILITY: Insert with duplicate key error handling
+        try:
+            await users_collection.insert_one(user_doc)
+        except Exception as insert_error:
+            error_str = str(insert_error).lower()
+            if "duplicate" in error_str or "e11000" in error_str:
+                logger.warning(f"Duplicate key error on user registration: {insert_error}")
+                raise HTTPException(status_code=409, detail="Email already registered")
+            raise
         logger.info(f"Registered new user: {request.email}")
+        
+        # Send verification email (ทุกเมล ยกเว้น admin)
+        if normalized_email != admin_email_normalized and email_verification_token:
+            email_service = get_email_service()
+            if email_service.is_configured:
+                user_name = f"{request.first_name} {request.last_name}"
+                email_sent = email_service.send_verification_email(
+                    to_email=request.email,
+                    token=email_verification_token,
+                    user_name=user_name
+                )
+                if email_sent:
+                    logger.info(f"✅ Verification email sent to {request.email}")
+                else:
+                    logger.warning(f"⚠️ Failed to send verification email to {request.email}")
 
         # Create user response (without password hash)
         user = User(
@@ -799,6 +1183,210 @@ async def reset_password(request: ResetPasswordRequest):
         raise HTTPException(status_code=500, detail=f"Password reset failed: {str(e)}")
 
 
+@router.post("/firebase")
+async def firebase_login(request: FirebaseLoginRequest, response: Response):
+    """
+    Firebase Authentication login. Send idToken from Firebase Auth.
+    Returns {ok, user} and sets session cookie. 400/401/500 if invalid or not configured.
+    
+    รองรับการเข้าสู่ระบบผ่าน Firebase Authentication (Google Account)
+    """
+    try:
+        # Initialize Firebase if not already initialized
+        initialize_firebase()
+        
+        if not FIREBASE_AVAILABLE or not _firebase_initialized:
+            logger.error("Firebase Admin SDK not available or not initialized. Please configure Firebase credentials.")
+            raise HTTPException(
+                status_code=500,
+                detail="Firebase authentication is not configured. Please contact administrator."
+            )
+        
+        # Verify Firebase ID token
+        try:
+            decoded_token = firebase_auth.verify_id_token(request.idToken)
+        except firebase_auth.InvalidIdTokenError as e:
+            logger.error(f"Invalid Firebase ID token: {e}")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid Firebase token. Please try logging in again."
+            )
+        except firebase_auth.ExpiredIdTokenError as e:
+            logger.error(f"Expired Firebase ID token: {e}")
+            raise HTTPException(
+                status_code=400,
+                detail="Firebase token expired. Please try logging in again."
+            )
+        except Exception as verify_error:
+            logger.error(f"Firebase token verification error: {verify_error}", exc_info=True)
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to verify Firebase token. Please try again."
+            )
+        
+        # Extract user information from decoded token
+        firebase_uid = decoded_token.get('uid')
+        email = decoded_token.get('email')
+        name = decoded_token.get('name')
+        picture = decoded_token.get('picture')
+        email_verified = decoded_token.get('email_verified', False)
+        
+        # Validate required fields
+        if not firebase_uid:
+            logger.error("Firebase token missing 'uid' field")
+            raise HTTPException(status_code=400, detail="Invalid Firebase token: missing user ID")
+        if not email:
+            logger.error("Firebase token missing 'email' field")
+            raise HTTPException(status_code=400, detail="Invalid Firebase token: missing email")
+        
+        # ✅ Normalize email for consistent checking
+        normalized_email = email.lower().strip()
+        
+        # Parse name into first_name and last_name
+        first_name_val = decoded_token.get('given_name') or decoded_token.get('first_name')
+        last_name_val = decoded_token.get('family_name') or decoded_token.get('last_name')
+        
+        if not first_name_val and name:
+            name_parts = name.split()
+            first_name_val = name_parts[0] if name_parts else normalized_email.split('@')[0]
+            last_name_val = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
+        if not first_name_val:
+            first_name_val = normalized_email.split('@')[0]
+        if not last_name_val:
+            last_name_val = ''
+        
+        full_name_val = name or f"{first_name_val} {last_name_val}".strip() or normalized_email.split('@')[0]
+        
+        storage = MongoStorage()
+        await storage.connect()
+        users_collection = storage.db["users"]
+        
+        # Check if user exists by email (case-insensitive)
+        user_data = await users_collection.find_one({"email": normalized_email})
+        
+        # If not found with exact match, try case-insensitive regex search
+        if not user_data:
+            user_data = await users_collection.find_one({
+                "email": {"$regex": f"^{normalized_email}$", "$options": "i"}
+            })
+        
+        if not user_data:
+            # Create new user with Firebase UID as user_id
+            user = User(
+                user_id=firebase_uid,  # Use Firebase UID as user_id
+                email=email,
+                full_name=full_name_val,
+                first_name=first_name_val,
+                last_name=last_name_val,
+                profile_image=picture,
+                created_at=datetime.utcnow(),
+                last_login=datetime.utcnow(),
+                email_verified=email_verified,  # Store email verification status
+                auth_provider="firebase"  # Mark as Firebase-authenticated user
+            )
+            await users_collection.insert_one(user.model_dump())
+            logger.info(f"✅ Created new Firebase user: {email} (user_id: {firebase_uid})")
+        else:
+            # Update existing user (update profile image, last login, and auth provider)
+            update_data = {
+                "last_login": datetime.utcnow(),
+                "auth_provider": "firebase"  # Update auth provider
+            }
+            
+            # Update profile image if available and different
+            if picture and user_data.get("profile_image") != picture:
+                update_data["profile_image"] = picture
+            
+            # Update name if available and different
+            if name and user_data.get("full_name") != name:
+                update_data["full_name"] = name
+            if first_name_val and user_data.get("first_name") != first_name_val:
+                update_data["first_name"] = first_name_val
+            if last_name_val and user_data.get("last_name") != last_name_val:
+                update_data["last_name"] = last_name_val
+            
+            # Update email verification status
+            if email_verified:
+                update_data["email_verified"] = True
+            
+            await users_collection.update_one(
+                {"email": email},
+                {"$set": update_data}
+            )
+            
+            # Reload user data to get updated fields
+            user_data = await users_collection.find_one({"email": email})
+            user = User(**user_data)
+            logger.info(f"✅ Firebase user logged in: {email} (user_id: {user.user_id})")
+        
+        # Set session cookie
+        response.set_cookie(
+            key=settings.session_cookie_name,
+            value=user.user_id,
+            httponly=True,
+            max_age=settings.session_expiry_days * 24 * 60 * 60,
+            samesite="lax",
+            secure=False  # Set to True in production with HTTPS
+        )
+        
+        return {"ok": True, "user": user.model_dump()}
+    
+    except HTTPException:
+        # Re-raise HTTP exceptions (already handled)
+        raise
+    except Exception as e:
+        logger.error(f"Firebase login error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error during Firebase login: {str(e)}"
+        )
+
+
+@router.post("/firebase-refresh")
+async def firebase_refresh(request: FirebaseLoginRequest, response: Response):
+    """
+    Sync user from Firebase ID token (e.g. after email verification).
+    อัปเดต email_verified และข้อมูลจาก Firebase โดยไม่ต้องล็อกอินใหม่
+    """
+    initialize_firebase()
+    if not FIREBASE_AVAILABLE or not _firebase_initialized:
+        raise HTTPException(status_code=503, detail="Firebase authentication is not configured")
+    try:
+        decoded_token = firebase_auth.verify_id_token(request.idToken)
+    except Exception as e:
+        logger.warning(f"Firebase refresh token invalid: {e}")
+        raise HTTPException(status_code=400, detail="Invalid or expired token. Please sign in again.")
+    firebase_uid = decoded_token.get("uid")
+    email = decoded_token.get("email")
+    email_verified = decoded_token.get("email_verified", False)
+    if not firebase_uid or not email:
+        raise HTTPException(status_code=400, detail="Invalid token: missing uid or email")
+    storage = MongoStorage()
+    await storage.connect()
+    users_collection = storage.db["users"]
+    user_data = await users_collection.find_one({"user_id": firebase_uid})
+    if not user_data:
+        raise HTTPException(status_code=404, detail="User not found")
+    update_data = {"last_login": datetime.utcnow()}
+    if email_verified:
+        update_data["email_verified"] = True
+    await users_collection.update_one(
+        {"user_id": firebase_uid},
+        {"$set": update_data},
+    )
+    user_data = await users_collection.find_one({"user_id": firebase_uid})
+    user = User(**user_data)
+    response.set_cookie(
+        key=settings.session_cookie_name,
+        value=user.user_id,
+        httponly=True,
+        max_age=settings.session_expiry_days * 24 * 60 * 60,
+        samesite="lax",
+        secure=False,
+    )
+    return {"ok": True, "user": user.model_dump()}
+
+
 @router.post("/dev-login")
 async def dev_login(response: Response):
     """
@@ -836,4 +1424,269 @@ async def dev_login(response: Response):
     )
     
     return {"ok": True, "user": user.model_dump()}
+
+
+@router.post("/send-verification-email")
+async def send_verification_email(request: Request):
+    """
+    Send email verification email to current user (resend)
+    """
+    user_id = request.cookies.get(settings.session_cookie_name)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    try:
+        storage = MongoStorage()
+        await storage.connect()
+        users_collection = storage.db["users"]
+        
+        user_data = await users_collection.find_one({"user_id": user_id})
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        email = user_data.get("email")
+        if not email:
+            raise HTTPException(status_code=400, detail="User email not found")
+        
+        # Skip email verification only for configured admin email (รองรับทุกเมลอื่น: Gmail, Hotmail, Outlook, etc.)
+        admin_email_normalized = (settings.admin_email or "").lower().strip()
+        if email.lower().strip() == admin_email_normalized:
+            return {
+                "ok": True,
+                "message": "Admin email does not require verification",
+                "email_verified": True
+            }
+        
+        # Check if already verified
+        if user_data.get("email_verified"):
+            return {
+                "ok": True,
+                "message": "Email already verified",
+                "email_verified": True
+            }
+        
+        # Generate new verification token (เก็บใน DB สำหรับ /verify-email ถ้ามี custom flow)
+        email_service = get_email_service()
+        if not email_service.is_configured:
+            raise HTTPException(
+                status_code=503,
+                detail="Firebase ยังไม่ได้ตั้งค่า กรุณาตั้งค่า FIREBASE_PROJECT_ID หรือ FIREBASE_CREDENTIALS_PATH ใน backend/.env"
+            )
+        
+        verification_token = email_service.generate_verification_token()
+        verification_sent_at = datetime.utcnow()
+        
+        # Update user with new token
+        await users_collection.update_one(
+            {"user_id": user_id},
+            {
+                "$set": {
+                    "email_verification_token": verification_token,
+                    "email_verification_sent_at": verification_sent_at
+                }
+            }
+        )
+        
+        # การส่งอีเมลยืนยันทำที่ฝั่ง Client ด้วย Firebase sendEmailVerification()
+        email_service.send_verification_email(
+            to_email=email,
+            token=verification_token,
+            user_name=user_data.get("full_name") or user_data.get("first_name", "")
+        )
+        logger.info(f"Verification flow prepared for {email}; client should call Firebase sendEmailVerification()")
+        return {
+            "ok": True,
+            "message": "กรุณายืนยันอีเมลในแอป (Firebase จะส่งลิงก์ยืนยันให้)",
+            "email": email,
+            "use_firebase": True,
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending verification email: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/verify-email")
+async def verify_email(token: str = Query(..., description="Verification token from email link")):
+    """
+    Verify email address using verification token
+    """
+    if not token:
+        raise HTTPException(status_code=400, detail="Verification token is required")
+    
+    try:
+        storage = MongoStorage()
+        await storage.connect()
+        users_collection = storage.db["users"]
+        
+        # Find user by verification token
+        user_data = await users_collection.find_one({"email_verification_token": token})
+        
+        if not user_data:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid or expired verification token"
+            )
+        
+        # Check if token is expired (24 hours)
+        verification_sent_at = user_data.get("email_verification_sent_at")
+        if verification_sent_at:
+            if isinstance(verification_sent_at, str):
+                verification_sent_at = date_parser.parse(verification_sent_at)
+            
+            token_age = datetime.utcnow() - verification_sent_at
+            if token_age > timedelta(hours=24):
+                # Token expired - clear it
+                await users_collection.update_one(
+                    {"user_id": user_data["user_id"]},
+                    {
+                        "$unset": {
+                            "email_verification_token": "",
+                            "email_verification_sent_at": ""
+                        }
+                    }
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail="Verification token has expired. Please request a new one."
+                )
+        
+        # Check if already verified
+        if user_data.get("email_verified"):
+            return {
+                "ok": True,
+                "message": "Email already verified",
+                "email_verified": True
+            }
+        
+        # Verify email
+        await users_collection.update_one(
+            {"user_id": user_data["user_id"]},
+            {
+                "$set": {
+                    "email_verified": True
+                },
+                "$unset": {
+                    "email_verification_token": "",
+                    "email_verification_sent_at": ""
+                }
+            }
+        )
+        
+        logger.info(f"✅ Email verified for user: {user_data.get('email')}")
+        
+        return {
+            "ok": True,
+            "message": "Email verified successfully",
+            "email_verified": True
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error verifying email: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# =============================================================================
+# Phone OTP (เปลี่ยนเบอร์โทร - ส่ง OTP)
+# =============================================================================
+
+@router.post("/send-phone-otp")
+async def send_phone_otp(request: Request, body: dict):
+    """
+    ส่ง OTP ไปเบอร์โทรที่ระบุ (สำหรับเปลี่ยนเบอร์) รองรับทุกเครือข่าย
+    Body: { "new_phone": "0812345678" }
+    """
+    user_id = request.cookies.get(settings.session_cookie_name)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    new_phone = (body.get("new_phone") or "").strip().replace(" ", "")
+    if not new_phone or len(new_phone) < 9:
+        raise HTTPException(status_code=400, detail="กรุณากรอกเบอร์โทรที่ถูกต้อง (เช่น 0812345678)")
+    try:
+        storage = MongoStorage()
+        await storage.connect()
+        users_collection = storage.db["users"]
+        user_data = await users_collection.find_one({"user_id": user_id})
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+        otp = generate_otp(6)
+        sent_at = datetime.utcnow()
+        await users_collection.update_one(
+            {"user_id": user_id},
+            {
+                "$set": {
+                    "phone_pending": new_phone,
+                    "phone_verification_otp": otp,
+                    "phone_verification_sent_at": sent_at,
+                }
+            },
+        )
+        sms_service = get_sms_service()
+        sent = sms_service.send_otp(new_phone, otp)
+        if not sent:
+            raise HTTPException(status_code=503, detail="ส่ง OTP ไม่สำเร็จ (ตรวจสอบ Twilio/SMS ใน .env)")
+        logger.info(f"✅ Phone OTP sent to {new_phone} for user {user_id}")
+        return {"ok": True, "message": "ส่ง OTP ไปที่เบอร์โทรแล้ว กรุณากรอกรหัส OTP"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending phone OTP: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/verify-phone")
+async def verify_phone(request: Request, body: dict):
+    """
+    ยืนยันเบอร์โทรด้วย OTP แล้วอัปเดตเบอร์ในโปรไฟล์
+    Body: { "otp": "123456" }
+    """
+    user_id = request.cookies.get(settings.session_cookie_name)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    otp = (body.get("otp") or "").strip()
+    if not otp or len(otp) != 6:
+        raise HTTPException(status_code=400, detail="กรุณากรอกรหัส OTP 6 หลัก")
+    try:
+        storage = MongoStorage()
+        await storage.connect()
+        users_collection = storage.db["users"]
+        user_data = await users_collection.find_one({"user_id": user_id})
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+        phone_pending = user_data.get("phone_pending")
+        stored_otp = user_data.get("phone_verification_otp")
+        sent_at = user_data.get("phone_verification_sent_at")
+        if not phone_pending or not stored_otp:
+            raise HTTPException(status_code=400, detail="ไม่พบการรอยืนยันเบอร์โทร กรุณากดส่ง OTP ก่อน")
+        if sent_at:
+            if isinstance(sent_at, str):
+                sent_at = date_parser.parse(sent_at)
+            age_minutes = (datetime.utcnow() - sent_at).total_seconds() / 60
+            if age_minutes > settings.sms_otp_expire_minutes:
+                await users_collection.update_one(
+                    {"user_id": user_id},
+                    {"$unset": {"phone_pending": "", "phone_verification_otp": "", "phone_verification_sent_at": ""}},
+                )
+                raise HTTPException(status_code=400, detail="รหัส OTP หมดอายุแล้ว กรุณาขอ OTP ใหม่")
+        if otp != stored_otp:
+            raise HTTPException(status_code=400, detail="รหัส OTP ไม่ถูกต้อง")
+        await users_collection.update_one(
+            {"user_id": user_id},
+            {
+                "$set": {"phone": phone_pending},
+                "$unset": {"phone_pending": "", "phone_verification_otp": "", "phone_verification_sent_at": ""},
+            },
+        )
+        logger.info(f"✅ Phone verified for user {user_id}: {phone_pending}")
+        user_data = await users_collection.find_one({"user_id": user_id})
+        return {"ok": True, "message": "ยืนยันเบอร์โทรสำเร็จ", "user": User(**user_data).model_dump()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error verifying phone: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 

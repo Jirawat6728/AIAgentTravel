@@ -1,6 +1,6 @@
 """
-AI Agent Brain & Memory Service
-Handles long-term memory (Recall & Consolidate)
+เซอร์วิสสมองและความจำของ AI Agent
+จัดการความจำระยะยาว (Recall และ Consolidate)
 """
 
 from __future__ import annotations

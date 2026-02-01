@@ -1,6 +1,6 @@
 """
-Omise Payment Service
-Handles integration with Omise Payment Gateway
+เซอร์วิสชำระเงิน Omise
+จัดการการเชื่อมต่อกับ Omise Payment Gateway
 """
 
 import httpx

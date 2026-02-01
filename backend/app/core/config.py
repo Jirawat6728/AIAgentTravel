@@ -1,3 +1,5 @@
+"""การตั้งค่าแอป (ตัวแปรแวดล้อม, Redis, MongoDB, Gemini, Amadeus ฯลฯ)."""
+
 import os
 from pathlib import Path
 from typing import Optional
@@ -22,11 +24,11 @@ class Settings:
         
         # LLM Configuration - Gemini (Primary)
         self.gemini_api_key: str = os.getenv("GEMINI_API_KEY", "").strip()
-        # Model names must be set in .env file
+        # Model names: ใช้จาก .env หรือ default gemini-2.5-flash เพื่อให้แอปรันได้แม้ .env จะไม่ครบ
         # Note: gemini-1.5-flash is deprecated, use gemini-2.5-flash instead
-        default_model = os.getenv("GEMINI_MODEL_NAME", "").strip()
+        default_model = (os.getenv("GEMINI_MODEL_NAME", "") or "gemini-2.5-flash").strip()
         if not default_model:
-            raise ValueError("GEMINI_MODEL_NAME is required in .env file. Example: GEMINI_MODEL_NAME=gemini-2.5-flash")
+            default_model = "gemini-2.5-flash"
         # Auto-update deprecated 1.5 models to 2.5
         if "1.5" in default_model:
             default_model = default_model.replace("1.5", "2.5")
@@ -100,6 +102,16 @@ class Settings:
         self.session_cookie_name: str = "session_id"
         self.session_expiry_days: int = 30
         
+        # Firebase Configuration
+        # Firebase Admin SDK - can use service account JSON file or credentials
+        firebase_creds_path = os.getenv("FIREBASE_CREDENTIALS_PATH", "").strip()
+        self.firebase_credentials_path: Optional[str] = firebase_creds_path if firebase_creds_path else None
+        # Alternative: Use Firebase project ID (for default credentials)
+        self.firebase_project_id: str = os.getenv("FIREBASE_PROJECT_ID", "").strip()
+        # Firebase Web API Key (for frontend)
+        self.firebase_api_key: str = os.getenv("FIREBASE_API_KEY", "").strip()
+        self.firebase_auth_domain: str = os.getenv("FIREBASE_AUTH_DOMAIN", "").strip()
+        
         # Google Maps Configuration
         self.google_maps_api_key: str = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
         
@@ -121,14 +133,23 @@ class Settings:
         self.amadeus_booking_api_secret: str = os.getenv("AMADEUS_BOOKING_API_SECRET", "").strip() or self.amadeus_api_secret
         
         # 🔒 Admin Dashboard Configuration (Production Security)
+        self.admin_email: str = os.getenv("ADMIN_EMAIL", "admin@example.com").strip()
         self.admin_password: str = os.getenv("ADMIN_PASSWORD", "").strip()
         self.admin_enabled: bool = os.getenv("ADMIN_ENABLED", "true").lower() == "true"
         self.admin_require_auth: bool = os.getenv("ADMIN_REQUIRE_AUTH", "true").lower() == "true"
+        if not self.admin_password:
+            logger.warning("ADMIN_PASSWORD not set - admin login disabled for security")
         
         # 💳 Omise Payment Gateway Configuration
         self.omise_secret_key: str = os.getenv("OMISE_SECRET_KEY", "").strip()
         self.omise_public_key: str = os.getenv("OMISE_PUBLIC_KEY", "").strip()
         self.frontend_url: str = os.getenv("FRONTEND_URL", "http://localhost:5173").strip()
+
+        # 📱 SMS/OTP Configuration (for phone verification, e.g. Twilio)
+        self.twilio_account_sid: str = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+        self.twilio_auth_token: str = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+        self.twilio_phone_number: str = os.getenv("TWILIO_PHONE_NUMBER", "").strip()
+        self.sms_otp_expire_minutes: int = int(os.getenv("SMS_OTP_EXPIRE_MINUTES", "5"))
 
 
 # Global settings instance

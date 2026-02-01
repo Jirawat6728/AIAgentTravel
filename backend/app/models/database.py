@@ -1,6 +1,6 @@
 """
-MongoDB Database Models and Schemas
-Production-grade database design for AI Travel Agent
+โมเดลและสคีมาฐานข้อมูล MongoDB
+ออกแบบสำหรับ AI Travel Agent ระดับ production
 """
 
 from __future__ import annotations
@@ -44,6 +44,33 @@ class PyObjectId(ObjectId):
 
 
 # =============================================================================
+# Family member (for co-travelers / booking)
+# =============================================================================
+class FamilyMember(BaseModel):
+    """Family member for co-traveler selection when booking (adult or child). Same detail as main booker."""
+    id: Optional[str] = Field(default=None, description="Unique id for frontend (e.g. uuid)")
+    type: str = Field(..., description="adult or child")
+    first_name: str = Field(..., description="First name")
+    last_name: str = Field(..., description="Last name")
+    first_name_th: Optional[str] = Field(default=None, description="First name in Thai")
+    last_name_th: Optional[str] = Field(default=None, description="Last name in Thai")
+    date_of_birth: Optional[str] = Field(default=None, description="YYYY-MM-DD (recommended for child)")
+    gender: Optional[str] = Field(default=None, description="Gender: M, F, O")
+    national_id: Optional[str] = Field(default=None, description="National ID (13 digits)")
+    passport_no: Optional[str] = Field(default=None, description="Passport number (for international)")
+    passport_expiry: Optional[str] = Field(default=None, description="Passport expiry YYYY-MM-DD")
+    passport_issue_date: Optional[str] = Field(default=None, description="Passport issue date YYYY-MM-DD")
+    passport_issuing_country: Optional[str] = Field(default=None, description="Passport issuing country (e.g. TH)")
+    passport_given_names: Optional[str] = Field(default=None, description="Given names as on passport (English)")
+    passport_surname: Optional[str] = Field(default=None, description="Surname as on passport (English)")
+    place_of_birth: Optional[str] = Field(default=None, description="Place of birth (city, country)")
+    passport_type: Optional[str] = Field(default="N", description="Passport type: N, D, O, S")
+    nationality: Optional[str] = Field(default=None, description="Nationality code (e.g. TH)")
+
+    model_config = {"extra": "allow"}
+
+
+# =============================================================================
 # User Collection
 # =============================================================================
 class User(BaseModel):
@@ -72,7 +99,18 @@ class User(BaseModel):
     national_id: Optional[str] = Field(default=None, description="National ID Card number")
     profile_image: Optional[str] = Field(default=None, description="Profile image URL")
     last_login: Optional[datetime] = Field(default=None, description="Last login timestamp")
+    created_at: Optional[datetime] = Field(default_factory=datetime.utcnow, description="Account creation timestamp")
     preferences: Dict[str, Any] = Field(default_factory=dict, description="User preferences (auto-learned)")
+    # Authentication fields
+    auth_provider: Optional[str] = Field(default=None, description="Authentication provider: 'firebase', 'google', 'email'")
+    email_verified: Optional[bool] = Field(default=False, description="Email verification status")
+    email_verification_token: Optional[str] = Field(default=None, description="Email verification token")
+    email_verification_sent_at: Optional[datetime] = Field(default=None, description="When verification email was sent")
+    # Phone OTP (for change phone)
+    phone_pending: Optional[str] = Field(default=None, description="New phone number pending OTP verification")
+    phone_verification_otp: Optional[str] = Field(default=None, description="OTP sent to phone")
+    phone_verification_sent_at: Optional[datetime] = Field(default=None, description="When OTP was sent")
+    is_admin: Optional[bool] = Field(default=False, description="Admin user flag")
     # Passport information (for international flights)
     passport_no: Optional[str] = Field(default=None, description="Passport number")
     passport_expiry: Optional[str] = Field(default=None, description="Passport expiry date (YYYY-MM-DD)")
@@ -90,42 +128,14 @@ class User(BaseModel):
     visa_expiry_date: Optional[str] = Field(default=None, description="Visa expiry date (YYYY-MM-DD)")
     visa_entry_type: Optional[str] = Field(default="S", description="Visa entry type: S=Single Entry, M=Multiple Entry")
     visa_purpose: Optional[str] = Field(default="T", description="Visa purpose: T=Tourism, B=Business, S=Study, W=Work, O=Other")
-    # Hotel Booking Preferences (Production-ready for Agoda/Traveloka)
     # Emergency Contact
     emergency_contact_name: Optional[str] = Field(default=None, description="Emergency contact full name")
     emergency_contact_phone: Optional[str] = Field(default=None, description="Emergency contact phone number")
     emergency_contact_relation: Optional[str] = Field(default=None, description="Emergency contact relation: SPOUSE, PARENT, FRIEND, OTHER")
     emergency_contact_email: Optional[str] = Field(default=None, description="Emergency contact email")
-    # Special Requests / Preferences
-    hotel_early_checkin: Optional[bool] = Field(default=False, description="Request early check-in")
-    hotel_late_checkout: Optional[bool] = Field(default=False, description="Request late check-out")
-    hotel_smoking_preference: Optional[str] = Field(default=None, description="Smoking preference: SMOKING, NON_SMOKING")
-    hotel_room_type_preference: Optional[str] = Field(default=None, description="Room type preference: STANDARD, DELUXE, SUITE, etc.")
-    hotel_floor_preference: Optional[str] = Field(default=None, description="Floor preference: HIGH, LOW, ANY")
-    hotel_view_preference: Optional[str] = Field(default=None, description="View preference: SEA, CITY, GARDEN, ANY")
-    hotel_extra_bed: Optional[bool] = Field(default=False, description="Request extra bed/cot")
-    hotel_airport_transfer: Optional[bool] = Field(default=False, description="Request airport transfer")
-    hotel_dietary_requirements: Optional[str] = Field(default=None, description="Dietary requirements: VEGETARIAN, VEGAN, HALAL, ALLERGIES, NONE")
-    hotel_special_occasion: Optional[str] = Field(default=None, description="Special occasion: BIRTHDAY, HONEYMOON, ANNIVERSARY, NONE")
-    hotel_accessibility_needs: Optional[bool] = Field(default=False, description="Accessibility needs (wheelchair accessible room)")
-    # Check-in Details
-    hotel_arrival_time: Optional[str] = Field(default=None, description="Expected arrival time (HH:MM format)")
-    hotel_arrival_flight: Optional[str] = Field(default=None, description="Arrival flight number")
-    hotel_departure_time: Optional[str] = Field(default=None, description="Expected departure time (HH:MM format)")
     hotel_number_of_guests: Optional[int] = Field(default=1, description="Number of guests (including main guest)")
-    # Payment Information
-    payment_method: Optional[str] = Field(default=None, description="Payment method: CREDIT_CARD, DEBIT_CARD, BANK_TRANSFER")
-    card_holder_name: Optional[str] = Field(default=None, description="Card holder name (if using card)")
-    card_last_4_digits: Optional[str] = Field(default=None, description="Card last 4 digits (for verification)")
-    # Tax Invoice Information
-    company_name: Optional[str] = Field(default=None, description="Company/Organization name (for business booking)")
-    tax_id: Optional[str] = Field(default=None, description="Tax ID / VAT Number")
-    invoice_address: Optional[str] = Field(default=None, description="Invoice address (if different from main address)")
-    # Loyalty Program
-    hotel_loyalty_number: Optional[str] = Field(default=None, description="Hotel loyalty program number (e.g., Marriott Bonvoy, Hilton Honors)")
-    airline_frequent_flyer: Optional[str] = Field(default=None, description="Airline frequent flyer number")
-    # Additional Notes
-    hotel_booking_notes: Optional[str] = Field(default=None, description="Additional notes/comments for hotel booking (max 500 chars)")
+    # Family members (co-travelers for booking: adults + children)
+    family: List[FamilyMember] = Field(default_factory=list, description="List of family members (adult/child) for co-traveler selection")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_active: datetime = Field(default_factory=datetime.utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -181,6 +191,7 @@ class SessionDocument(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_updated: datetime = Field(default_factory=datetime.utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    popular_destinations: Optional[List[Dict[str, Any]]] = Field(default=None, description="Popular destinations when user searches 'all' in destination")
     
     @classmethod
     def from_user_session(cls, session) -> "SessionDocument":
@@ -202,6 +213,7 @@ class SessionDocument(BaseModel):
                 # trip_plan.model_dump() should include all fields including options_pool and selected_option
                 # This is verified by Pydantic's model_dump() method
             
+            popular = getattr(session, "popular_destinations", None)
             return cls(
                 session_id=session.session_id,
                 user_id=session.user_id,
@@ -209,7 +221,8 @@ class SessionDocument(BaseModel):
                 chat_id=session.chat_id,
                 trip_plan=trip_plan_dict,
                 title=session.title,
-                last_updated=datetime.fromisoformat(session.last_updated.replace('Z', '+00:00'))
+                last_updated=datetime.fromisoformat(session.last_updated.replace('Z', '+00:00')),
+                popular_destinations=popular
             )
         except Exception as e:
             import logging
@@ -236,7 +249,8 @@ class SessionDocument(BaseModel):
             chat_id=self.chat_id,
             trip_plan=TripPlan(**self.trip_plan),
             title=self.title,
-            last_updated=self.last_updated.isoformat()
+            last_updated=self.last_updated.isoformat(),
+            popular_destinations=getattr(self, "popular_destinations", None)
         )
 
 
@@ -321,6 +335,12 @@ BOOKING_INDEXES = [
     IndexModel([("status", 1)]),
     IndexModel([("created_at", -1)]),
     IndexModel([("user_id", 1), ("created_at", -1)])
+]
+
+# บัตรที่บันทึกไว้ต่อ User (Omise customer_id + cards)
+SAVED_CARDS_INDEXES = [
+    IndexModel([("user_id", 1)], unique=True),
+    IndexModel([("updated_at", -1)]),
 ]
 
 MEMORY_INDEXES = [

@@ -4,17 +4,11 @@ import './CarRentalsPage.css';
 
 export default function CarRentalsPage({ user, onLogout, onSignIn, onNavigateToBookings, onNavigateToAI, onNavigateToFlights, onNavigateToHotels, onNavigateToCarRentals, onNavigateToProfile = null, onNavigateToSettings = null, onNavigateToHome = null }) {
   const handleTabChange = (tab) => {
-    if (tab === 'ai' && onNavigateToAI) {
-      onNavigateToAI();
-    } else if (tab === 'bookings' && onNavigateToBookings) {
-      onNavigateToBookings();
-    } else if (tab === 'flights' && onNavigateToFlights) {
-      onNavigateToFlights();
-    } else if (tab === 'hotels' && onNavigateToHotels) {
-      onNavigateToHotels();
-    } else if (tab === 'car-rentals' && onNavigateToCarRentals) {
-      onNavigateToCarRentals();
-    }
+    if (tab === 'ai' && onNavigateToAI) onNavigateToAI();
+    else if (tab === 'bookings' && onNavigateToBookings) onNavigateToBookings();
+    else if (tab === 'flights' && onNavigateToFlights) onNavigateToFlights();
+    else if (tab === 'hotels' && onNavigateToHotels) onNavigateToHotels();
+    else if (tab === 'car-rentals' && onNavigateToCarRentals) onNavigateToCarRentals();
   };
 
   return (

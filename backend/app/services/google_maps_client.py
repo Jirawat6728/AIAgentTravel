@@ -1,6 +1,6 @@
 """
-Google Maps Client for Travel Agent
-Provides geocoding, nearby places search, and place details using Google Maps API
+ไคลเอนต์ Google Maps สำหรับ Travel Agent
+ให้ geocoding การค้นหาสถานที่ใกล้เคียง และรายละเอียดสถานที่ ผ่าน Google Maps API
 """
 
 from __future__ import annotations

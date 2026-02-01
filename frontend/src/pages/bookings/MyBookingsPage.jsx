@@ -79,7 +79,12 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
   useEffect(() => {
     loadBookings();
   }, [user?.id]); // Reload when user changes
-  
+
+  useEffect(() => {
+    document.body.classList.add('page-bookings');
+    return () => document.body.classList.remove('page-bookings');
+  }, []);
+
   // ✅ Listen for storage events to refresh when booking is created from another tab/window
   useEffect(() => {
     const handleStorageChange = (e) => {
@@ -118,63 +123,52 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
       const userIdToSend = user?.user_id || user?.id;
       if (userIdToSend) {
         headers['X-User-ID'] = userIdToSend;
-        console.log(`[MyBookings] Sending user_id: ${userIdToSend} (user.user_id: ${user?.user_id}, user.id: ${user?.id})`);
-      } else {
-        console.warn('[MyBookings] No user.user_id or user.id found. User object:', user);
       }
 
-      const res = await fetch(`${API_BASE_URL}/api/booking/list`, {
-        headers,
-        credentials: 'include',
-      });
-      
-      if (!res.ok) {
-        const errorText = await res.text();
-        console.error(`[MyBookings] HTTP Error ${res.status}:`, errorText);
-        throw new Error(`HTTP Error: ${res.status}`);
-      }
-      
-      const data = await res.json();
-      
-      // ✅ Enhanced logging for debugging
-      console.log(`[MyBookings] API Response:`, {
-        ok: data?.ok,
-        count: data?.count,
-        bookingsLength: data?.bookings?.length,
-        user_id: user?.id,
-        hasBookings: !!data?.bookings && data.bookings.length > 0
-      });
-      
-      if (data?.ok) {
-        // ✅ Log for debugging
-        const userIdForLog = user?.user_id || user?.id || 'none';
-        console.log(`[MyBookings] Loaded ${data.count || 0} bookings for user: ${userIdForLog}`);
+      // ✅ Add timeout (10 seconds) to prevent hanging
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/booking/list`, {
+          headers,
+          credentials: 'include',
+          signal: controller.signal
+        });
         
-        const bookingsList = data.bookings || [];
+        clearTimeout(timeoutId);
         
-        if (bookingsList.length > 0) {
-          console.log(`[MyBookings] Bookings data:`, bookingsList);
-          console.log(`[MyBookings] First booking sample:`, {
-            id: bookingsList[0]?._id,
-            user_id: bookingsList[0]?.user_id,
-            status: bookingsList[0]?.status,
-            created_at: bookingsList[0]?.created_at
-          });
-        } else {
-          console.warn(`[MyBookings] No bookings found. User ID: ${userIdForLog} (user.user_id: ${user?.user_id}, user.id: ${user?.id}).`);
-          console.warn(`[MyBookings] Response data:`, data);
-          console.warn(`[MyBookings] Check if user_id in database matches the user_id being queried.`);
+        if (!res.ok) {
+          const errorText = await res.text();
+          console.error(`[MyBookings] HTTP Error ${res.status}:`, errorText);
+          throw new Error(`HTTP Error: ${res.status}`);
         }
         
-        setBookings(bookingsList);
-      } else {
-        const errorMsg = data.detail || 'เกิดข้อผิดพลาดในการดึงข้อมูล';
-        console.error(`[MyBookings] API returned error:`, errorMsg);
-        setError(errorMsg);
+        const data = await res.json();
+        
+        if (data?.ok) {
+          const bookingsList = data.bookings || [];
+          setBookings(bookingsList);
+          
+          // ✅ Log only if there's an issue
+          if (bookingsList.length === 0 && userIdToSend) {
+            console.debug(`[MyBookings] No bookings found for user: ${userIdToSend}`);
+          }
+        } else {
+          const errorMsg = data.message || data.detail || 'เกิดข้อผิดพลาดในการดึงข้อมูล';
+          setError(errorMsg);
+        }
+      } catch (fetchErr) {
+        clearTimeout(timeoutId);
+        if (fetchErr.name === 'AbortError') {
+          throw new Error('การเชื่อมต่อช้าเกินไป กรุณาลองใหม่อีกครั้ง');
+        }
+        throw fetchErr;
       }
     } catch (err) {
       console.error('[MyBookings] Error loading bookings:', err);
-      setError(err.message || 'เกิดข้อผิดพลาดในการเชื่อมต่อ');
+      const errorMessage = err.message || 'เกิดข้อผิดพลาดในการเชื่อมต่อ';
+      setError(errorMessage);
     } finally {
       setLoading(false);
     }

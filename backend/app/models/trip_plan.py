@@ -1,6 +1,6 @@
 """
-Trip Plan Models with Strict Pydantic V2 Validation
-Hierarchical Structure: Travel (Flight/Car/Both) & Accommodation
+โมเดลแผนการเดินทาง (Trip Plan) ตรวจสอบด้วย Pydantic V2
+โครงสร้างลำดับชั้น: การเดินทาง (เครื่องบิน/รถ/ทั้งสอง) และที่พัก
 """
 
 from __future__ import annotations

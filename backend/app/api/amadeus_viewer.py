@@ -1,3 +1,5 @@
+"""API สำหรับดู/ทดสอบผลการค้นหา Amadeus (เที่ยวบิน, ที่พัก, รถรับส่ง)."""
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any

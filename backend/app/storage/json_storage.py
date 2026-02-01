@@ -1,6 +1,6 @@
 """
-Async JSON File Storage using aiofiles
-Non-blocking I/O for concurrent user support
+การจัดเก็บไฟล์ JSON แบบ async ด้วย aiofiles
+I/O แบบไม่บล็อก สำหรับผู้ใช้พร้อมกันหลายคน
 """
 
 from __future__ import annotations

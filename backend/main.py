@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 import os
@@ -13,7 +13,7 @@ from app.core.resilience import chat_rate_limiter, api_rate_limiter, payment_rat
 from app.api.chat import router as chat_router
 from app.api.auth import router as auth_router
 from app.api.travel import router as travel_router
-from app.api.admin import router as admin_router
+from app.api.admin import router as admin_router, get_admin_dashboard_html
 from app.api.mcp import router as mcp_router
 from app.api.booking import router as booking_router
 from app.api.amadeus_viewer import router as amadeus_viewer_router
@@ -143,6 +143,16 @@ async def lifespan(app: FastAPI):
             logger.info("[OK] Health monitor started")
         except Exception as e:
             logger.warning(f"Failed to start health monitor: {e}")
+        
+        # Start Redis sync service in background (if Redis is available)
+        if app.state.redis_mgr:
+            try:
+                from app.storage.redis_sync import redis_sync_service
+                # Start background sync (runs every 50% of Redis TTL)
+                asyncio.create_task(redis_sync_service.start_background_sync())
+                logger.info("[OK] Redis sync service started")
+            except Exception as e:
+                logger.warning(f"Failed to start Redis sync service: {e}")
     else:
         logger.critical("="*60)
         logger.critical("⚠️  Server started in DEGRADED MODE - MongoDB unavailable")
@@ -154,6 +164,14 @@ async def lifespan(app: FastAPI):
     try:
         from app.core.resilience import health_monitor
         health_monitor.stop_monitoring()
+    except Exception:
+        pass
+    
+    # Stop Redis sync service on shutdown
+    try:
+        from app.storage.redis_sync import redis_sync_service
+        redis_sync_service.stop_background_sync()
+        logger.info("[OK] Redis sync service stopped")
     except Exception:
         pass
     
@@ -198,15 +216,20 @@ app = FastAPI(
 # Must specify explicit origins when using credentials
 # IMPORTANT: CORS middleware must be added FIRST (before other middlewares)
 # to ensure it processes requests correctly
+_cors_origins = [
+    "http://localhost:5173",  # Vite dev server
+    "http://localhost:3000",  # Alternative React dev server
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",  # Backend itself (for testing)
+]
+if getattr(settings, "frontend_url", ""):
+    _url = settings.frontend_url.rstrip("/")
+    if _url and _url not in _cors_origins:
+        _cors_origins.append(_url)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",  # Vite dev server
-        "http://localhost:3000",  # Alternative React dev server
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",  # Backend itself (for testing)
-    ],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
@@ -297,8 +320,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         else:
             limiter = api_rate_limiter
         
-        # Check rate limit
-        is_allowed, remaining = limiter.is_allowed(client_ip)
+        # Check rate limit (support both sync and async rate limiters)
+        if hasattr(limiter, 'is_allowed_async'):
+            is_allowed, remaining = await limiter.is_allowed_async(client_ip)
+        elif asyncio.iscoroutinefunction(limiter.is_allowed):
+            is_allowed, remaining = await limiter.is_allowed(client_ip)
+        else:
+            is_allowed, remaining = limiter.is_allowed(client_ip)
         
         if not is_allowed:
             logger.warning(f"Rate limit exceeded for {client_ip} on {request.url.path}")
@@ -334,14 +362,52 @@ app.include_router(monitoring_router)
 app.include_router(options_cache_router)
 app.include_router(notification_router)
 
-# Serve static admin dashboard
+# Admin dashboard: served from admin.py (แยกจาก frontend — เปิดที่ http://localhost:8000/admin)
 @app.get("/admin", include_in_schema=False)
-async def admin_dashboard():
-    """Serve the admin dashboard HTML file"""
-    admin_path = os.path.join(os.path.dirname(__file__), "static", "admin.html")
-    if os.path.exists(admin_path):
-        return FileResponse(admin_path)
-    return {"error": "Admin dashboard file not found"}
+async def admin_dashboard(request: Request):
+    """Serve the admin dashboard HTML from admin.py (no admin.html file)"""
+    if not settings.admin_enabled:
+        return JSONResponse(
+            status_code=403,
+            content={"error": "Admin dashboard is disabled"}
+        )
+
+    if settings.admin_require_auth and settings.admin_password:
+        import base64
+        import secrets
+        try:
+            authorization = request.headers.get("Authorization")
+            if not authorization or not authorization.startswith("Basic "):
+                return HTMLResponse(
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Basic realm=\"Admin Dashboard\""},
+                    content="<html><body><h1>Authentication required</h1></body></html>",
+                    media_type="text/html",
+                )
+            encoded = authorization.split(" ")[1]
+            decoded = base64.b64decode(encoded).decode("utf-8")
+            username, password = decoded.split(":", 1)
+            provided = password.encode("utf-8")
+            expected = settings.admin_password.encode("utf-8")
+            if not secrets.compare_digest(provided, expected):
+                return HTMLResponse(
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Basic realm=\"Admin Dashboard\""},
+                    content="<html><body><h1>Invalid credentials</h1></body></html>",
+                    media_type="text/html",
+                )
+        except Exception as e:
+            logger.warning(f"Admin authentication error: {e}")
+            return HTMLResponse(
+                status_code=401,
+                headers={"WWW-Authenticate": "Basic realm=\"Admin Dashboard\""},
+                content="<html><body><h1>Authentication required</h1></body></html>",
+                media_type="text/html",
+            )
+
+    html = get_admin_dashboard_html()
+    logger.info("Serving admin dashboard from admin.py (backend only, แยกจาก frontend)")
+    return HTMLResponse(html, media_type="text/html")
 
 
 # Global Exception Handler
@@ -437,13 +503,24 @@ async def health(request: Request):
     if not startup_success:
         # If startup didn't complete, check if MongoDB is at least available now
         try:
+            import asyncio
             mongo_mgr = getattr(request.app.state, "mongo_mgr", None)
             if mongo_mgr:
-                db = mongo_mgr.get_database()
-                db.command('ping')
-                # MongoDB is available, mark as degraded but operational
-                health_status["status"] = "degraded"
-                health_status["checks"]["startup"] = {"status": "degraded", "message": "Startup incomplete but MongoDB available"}
+                # Use async ping with timeout
+                from app.storage.connection_manager import ConnectionManager
+                conn_mgr = ConnectionManager.get_instance()
+                mongo_ok = await asyncio.wait_for(conn_mgr.mongo_ping(), timeout=1.0)
+                if mongo_ok:
+                    # MongoDB is available, mark as degraded but operational
+                    health_status["status"] = "degraded"
+                    health_status["checks"]["startup"] = {"status": "degraded", "message": "Startup incomplete but MongoDB available"}
+                else:
+                    health_status["status"] = "unhealthy"
+                    health_status["checks"]["startup"] = {"status": "failed", "message": "Server failed to start properly - MongoDB ping failed"}
+                    return JSONResponse(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        content=health_status
+                    )
             else:
                 # No MongoDB, mark as unhealthy
                 health_status["status"] = "unhealthy"
@@ -452,42 +529,70 @@ async def health(request: Request):
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     content=health_status
                 )
+        except asyncio.TimeoutError:
+            # MongoDB ping timeout, mark as degraded
+            health_status["status"] = "degraded"
+            health_status["checks"]["startup"] = {"status": "degraded", "message": "Startup incomplete - MongoDB slow but may be available"}
         except Exception as e:
             # MongoDB check failed, mark as unhealthy
             health_status["status"] = "unhealthy"
-            health_status["checks"]["startup"] = {"status": "failed", "message": f"Server failed to start properly - MongoDB error: {str(e)}"}
+            health_status["checks"]["startup"] = {"status": "failed", "message": f"Server failed to start properly - MongoDB error: {str(e)[:100]}"}
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 content=health_status
             )
     
-    # Check MongoDB
+    # Check MongoDB (with timeout to prevent slow health checks)
     try:
+        import asyncio
         mongo_mgr = request.app.state.mongo_mgr
         if mongo_mgr:
-            db = mongo_mgr.get_database()
-            db.command('ping')
-            health_status["checks"]["mongodb"] = {"status": "healthy", "message": "Connection OK"}
+            # Use async ping with timeout (1 second max)
+            try:
+                from app.storage.connection_manager import ConnectionManager
+                conn_mgr = ConnectionManager.get_instance()
+                mongo_ok = await asyncio.wait_for(conn_mgr.mongo_ping(), timeout=1.0)
+                if mongo_ok:
+                    health_status["checks"]["mongodb"] = {"status": "healthy", "message": "Connection OK"}
+                else:
+                    health_status["checks"]["mongodb"] = {"status": "unhealthy", "message": "Ping failed"}
+                    health_status["status"] = "degraded"
+            except asyncio.TimeoutError:
+                health_status["checks"]["mongodb"] = {"status": "slow", "message": "Ping timeout (1s) - may be slow"}
+                health_status["status"] = "degraded"
+            except Exception as ping_err:
+                health_status["checks"]["mongodb"] = {"status": "unhealthy", "message": str(ping_err)[:100]}
+                health_status["status"] = "degraded"
         else:
             health_status["checks"]["mongodb"] = {"status": "unavailable", "message": "Not initialized"}
             health_status["status"] = "degraded"
     except Exception as e:
-        health_status["checks"]["mongodb"] = {"status": "unhealthy", "message": str(e)}
-        health_status["status"] = "unhealthy"
+        health_status["checks"]["mongodb"] = {"status": "unhealthy", "message": str(e)[:100]}
+        health_status["status"] = "degraded"
         logger.error(f"MongoDB health check failed: {e}")
     
-    # Check Redis
+    # Check Redis (with timeout, optional - don't block health check)
     try:
+        import asyncio
         redis_mgr = request.app.state.redis_mgr
         if redis_mgr:
-            redis_client = await redis_mgr.get_redis()
-            await redis_client.ping()
-            health_status["checks"]["redis"] = {"status": "healthy", "message": "Connection OK"}
+            try:
+                redis_client = await redis_mgr.get_redis()
+                if redis_client:
+                    # Use timeout for Redis ping (0.5 second max)
+                    await asyncio.wait_for(redis_client.ping(), timeout=0.5)
+                    health_status["checks"]["redis"] = {"status": "healthy", "message": "Connection OK"}
+                else:
+                    health_status["checks"]["redis"] = {"status": "unavailable", "message": "Client not available"}
+            except asyncio.TimeoutError:
+                health_status["checks"]["redis"] = {"status": "slow", "message": "Ping timeout (0.5s)"}
+            except Exception as redis_err:
+                health_status["checks"]["redis"] = {"status": "unhealthy", "message": str(redis_err)[:100]}
         else:
             health_status["checks"]["redis"] = {"status": "unavailable", "message": "Not initialized"}
-            # Redis is optional, don't mark as unhealthy
+        # Redis failure is not critical - don't mark overall status as unhealthy
     except Exception as e:
-        health_status["checks"]["redis"] = {"status": "unhealthy", "message": str(e)}
+        health_status["checks"]["redis"] = {"status": "unhealthy", "message": str(e)[:100]}
         logger.warning(f"Redis health check failed: {e}")
         # Redis failure is not critical
     

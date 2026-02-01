@@ -1,6 +1,6 @@
 """
-Gemini Live API Service for Real-Time Voice Conversation
-Provides human-like voice interaction using native audio processing
+เซอร์วิส Gemini Live API สำหรับการสนทนาด้วยเสียงแบบเรียลไทม์
+ให้การโต้ตอบด้วยเสียงแบบคล้ายมนุษย์ผ่านการประมวลผลเสียง
 """
 
 from __future__ import annotations
@@ -20,9 +20,10 @@ def _write_debug_log(data: dict):
     """Safely write debug log, creating directory if needed"""
     try:
         import os
-        debug_log_path = r'c:\Users\Juins\Desktop\DEMO\AITravelAgent\.cursor\debug.log'
-        debug_log_dir = os.path.dirname(debug_log_path)
-        os.makedirs(debug_log_dir, exist_ok=True)
+        from pathlib import Path
+        debug_log_dir = Path(__file__).parent.parent.parent / 'data' / 'logs' / 'debug'
+        debug_log_dir.mkdir(parents=True, exist_ok=True)
+        debug_log_path = debug_log_dir / 'live_audio_debug.log'
         with open(debug_log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(data, ensure_ascii=False) + '\n')
     except Exception:

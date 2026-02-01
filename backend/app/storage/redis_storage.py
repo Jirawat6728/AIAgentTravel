@@ -1,8 +1,4 @@
-"""
-Redis Storage Implementation
-High-performance short-term memory using Redis
-"""
-
+"""เก็บเซสชันผู้ใช้ใน Redis (หน่วยความจำระยะสั้น) ตาม StorageInterface."""
 import json
 from typing import Optional
 from app.storage.interface import StorageInterface

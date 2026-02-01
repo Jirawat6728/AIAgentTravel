@@ -1,6 +1,6 @@
 """
-API endpoints for options cache
-ให้ AI และ TripSummary ดึงข้อมูลจาก cache
+Endpoint API สำหรับ options cache
+ให้ AI และ TripSummary ดึงข้อมูลจาก cache ได้
 """
 
 from fastapi import APIRouter, HTTPException, Header

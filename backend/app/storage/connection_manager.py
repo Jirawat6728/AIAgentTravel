@@ -1,6 +1,6 @@
 """
-Unified Connection Manager
-Manages MongoDB and Redis connections with singleton pattern
+ตัวจัดการการเชื่อมต่อแบบรวม
+จัดการการเชื่อมต่อ MongoDB และ Redis แบบ singleton
 """
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+"""ติดตามต้นทุนการใช้ LLM (โทเค็น/ราคา) ตามโมเดลและเซสชัน."""
 from __future__ import annotations
 from typing import Dict, Any, Optional, List
 from datetime import datetime
@@ -14,8 +15,6 @@ class ModelType(str, Enum):
     """LLM Model types with pricing"""
     GEMINI_FLASH = "FLASH"
     GEMINI_PRO = "PRO"
-    GEMINI_ULTRA = "ULTRA"
-
 
 def _get_model_pricing() -> Dict[str, Dict[str, float]]:
     """Get model pricing dictionary using model names from .env"""

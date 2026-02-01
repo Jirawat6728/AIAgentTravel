@@ -1,5 +1,5 @@
 """
-Core Module: Configuration, Logging, Exceptions
+โมดูลหลัก: การตั้งค่า บันทึกเหตุการณ์ ข้อยกเว้น
 """
 
 from app.core.config import settings

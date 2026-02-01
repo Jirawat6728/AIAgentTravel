@@ -1,7 +1,7 @@
 """
-Booking API Router
-Handles booking creation, payment, cancellation, and listing
-Integrates with Omise Payment Gateway
+เราเตอร์ API การจอง
+จัดการการสร้างจอง การชำระเงิน การยกเลิก และรายการจอง
+เชื่อมกับ Omise Payment Gateway
 """
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -109,14 +109,25 @@ async def create_booking(request: BookingCreateRequest):
         storage = MongoStorage()
         await storage.connect()
         
-        # ✅ Agent Mode: Still requires payment (Amadeus sandbox needs payment before booking)
-        # Status is always "pending_payment" - user must pay first
-        initial_status = "pending_payment"
-        
         # ✅ SECURITY: Validate and normalize user_id
         user_id = request.user_id.strip() if request.user_id else None
         if not user_id:
             raise HTTPException(status_code=400, detail="Invalid request format: 'user_id' is required and cannot be empty")
+        
+        # ✅ ต้องยืนยันอีเมลก่อนถึงจะจองได้
+        users_collection = storage.db["users"]
+        user_doc = await users_collection.find_one({"user_id": user_id})
+        if not user_doc:
+            raise HTTPException(status_code=404, detail="User not found")
+        if not user_doc.get("email_verified", False):
+            raise HTTPException(
+                status_code=403,
+                detail="กรุณายืนยันอีเมลก่อนจึงจะจองได้ ไปที่ การตั้งค่า > สถานะการยืนยันอีเมล > ส่งอีเมลยืนยัน"
+            )
+        
+        # ✅ Agent Mode: Still requires payment (Amadeus sandbox needs payment before booking)
+        # Status is always "pending_payment" - user must pay first
+        initial_status = "pending_payment"
         
         # Create booking document
         booking_doc = {
@@ -138,30 +149,83 @@ async def create_booking(request: BookingCreateRequest):
         
         # Insert into bookings collection
         bookings_collection = storage.db["bookings"]
-        result = await bookings_collection.insert_one(booking_doc)
-        booking_id = str(result.inserted_id)
+        
+        # ✅ CRUD STABILITY: Check for duplicate booking (same trip_id + user_id)
+        existing_booking = await bookings_collection.find_one({
+            "trip_id": request.trip_id,
+            "user_id": user_id,
+            "status": {"$in": ["pending_payment", "confirmed", "paid"]}
+        })
+        if existing_booking:
+            logger.warning(f"Duplicate booking attempt: trip_id={request.trip_id}, user_id={user_id}")
+            raise HTTPException(
+                status_code=409,
+                detail="A booking for this trip already exists. Please update the existing booking instead."
+            )
+        
+        # ✅ CRUD STABILITY: Insert with error handling for duplicate key errors
+        try:
+            result = await bookings_collection.insert_one(booking_doc)
+            booking_id = str(result.inserted_id)
+        except Exception as insert_error:
+            error_str = str(insert_error).lower()
+            if "duplicate" in error_str or "e11000" in error_str:
+                logger.warning(f"Duplicate key error on booking insert: {insert_error}")
+                raise HTTPException(
+                    status_code=409,
+                    detail="A booking with this information already exists"
+                )
+            raise
         
         logger.info(f"Created booking: {booking_id} for user: {user_id} (status: {initial_status})")
         
-        # ✅ Create notification for the user
+        # ✅ เคลียร์ Redis workflow + options + raw Amadeus เมื่อจองสำเร็จ (workflow เสร็จสิ้น)
         try:
-            notifications_collection = storage.db.get_collection("notifications")
-            notification_doc = {
-                "user_id": user_id,  # ✅ Use normalized user_id
-                "type": "booking_created",
-                "title": "จองสำเร็จ",
-                "message": f"การจองของคุณได้รับการสร้างแล้ว กรุณาชำระเงินเพื่อยืนยันการจอง",
-                "booking_id": booking_id,
-                "read": False,
-                "created_at": datetime.utcnow().isoformat(),
-                "metadata": {
-                    "status": initial_status,
-                    "total_price": request.total_price,
-                    "currency": request.currency
+            session_id = f"{user_id}::{request.chat_id or request.trip_id}"
+            from app.services.options_cache import get_options_cache
+            from app.services.workflow_state import get_workflow_state_service
+            options_cache = get_options_cache()
+            wf = get_workflow_state_service()
+            await options_cache.clear_session_all(session_id)
+            await wf.clear_workflow(session_id)
+            logger.info(f"Cleared Redis workflow/options/raw for session {session_id} after booking")
+        except Exception as clear_err:
+            logger.warning(f"Failed to clear Redis after booking: {clear_err}")
+        
+        # ✅ Invalidate bookings list cache for this user
+        try:
+            from app.core.redis_cache import cache
+            cache_key = f"bookings:list:{user_id}"
+            await cache.delete(cache_key)
+            logger.debug(f"Invalidated bookings cache for user: {user_id}")
+        except Exception as cache_err:
+            logger.debug(f"Failed to invalidate cache: {cache_err}")
+        
+        # ✅ Create in-app notification only if user has notifications enabled (Settings)
+        try:
+            from app.services.notification_preferences import should_create_in_app_notification
+            users_collection = storage.db["users"]
+            user_doc = await users_collection.find_one({"user_id": user_id})
+            if should_create_in_app_notification(user_doc, "booking_created"):
+                notifications_collection = storage.db.get_collection("notifications")
+                notification_doc = {
+                    "user_id": user_id,
+                    "type": "booking_created",
+                    "title": "จองสำเร็จ",
+                    "message": f"การจองของคุณได้รับการสร้างแล้ว กรุณาชำระเงินเพื่อยืนยันการจอง",
+                    "booking_id": booking_id,
+                    "read": False,
+                    "created_at": datetime.utcnow().isoformat(),
+                    "metadata": {
+                        "status": initial_status,
+                        "total_price": request.total_price,
+                        "currency": request.currency
+                    }
                 }
-            }
-            await notifications_collection.insert_one(notification_doc)
-            logger.info(f"Created notification for booking: {booking_id} (user_id: {user_id})")
+                await notifications_collection.insert_one(notification_doc)
+                logger.info(f"Created notification for booking: {booking_id} (user_id: {user_id})")
+            else:
+                logger.debug(f"Skipped notification for booking {booking_id} (user preferences)")
         except Exception as notif_error:
             logger.warning(f"Failed to create notification for booking {booking_id}: {notif_error}")
             # Don't fail booking creation if notification fails
@@ -188,30 +252,37 @@ async def create_booking(request: BookingCreateRequest):
 async def list_bookings(request: Request):
     """
     List all bookings for the current user
+    ✅ Optimized: Uses Redis caching and removes expensive debug queries
     """
+    import asyncio
+    from app.core.redis_cache import cache
+    
     try:
         # ✅ Use security helper function (prioritizes cookie, then header)
         from app.core.security import extract_user_id_from_request
         user_id = extract_user_id_from_request(request)
         
-        # ✅ Log mismatch warning if both exist and differ (for debugging)
-        # Check log level instead of debug_mode (debug_mode doesn't exist in Settings)
-        cookie_user_id = request.cookies.get(settings.session_cookie_name)
-        header_user_id = request.headers.get("X-User-ID")
-        if cookie_user_id and header_user_id and cookie_user_id.strip() != header_user_id.strip():
-            logger.warning(f"⚠️ User ID mismatch - Cookie: {cookie_user_id}, Header: {header_user_id}. Using cookie (priority): {cookie_user_id}")
-        
-        # ✅ Log extracted user_id for debugging
-        logger.info(f"Extracted user_id from request: '{user_id}' (cookie: '{cookie_user_id}', header: '{header_user_id}')")
-        
         if not user_id:
             # Return empty list if no user_id
-            logger.warning("No user_id provided in request")
+            logger.debug("No user_id provided in request")
             return {
                 "ok": True,
                 "bookings": [],
                 "count": 0
             }
+        
+        # ✅ Normalize user_id
+        user_id_normalized = user_id.strip() if user_id else None
+        
+        # ✅ Try Redis cache first (TTL: 30 seconds for bookings list)
+        cache_key = f"bookings:list:{user_id_normalized}"
+        cached_result = await cache.get(cache_key)
+        if cached_result is not None:
+            logger.debug(f"✅ Cache hit for bookings list: {user_id_normalized}")
+            return cached_result
+        
+        # ✅ Cache miss - fetch from database
+        logger.debug(f"Cache miss - fetching bookings from database for user: {user_id_normalized}")
         
         storage = MongoStorage()
         try:
@@ -239,76 +310,46 @@ async def list_bookings(request: Request):
         bookings_collection = storage.db["bookings"]
         
         # ✅ SECURITY: Query only bookings for this specific user_id
-        # ✅ Normalize user_id (strip whitespace, ensure string)
-        user_id_normalized = user_id.strip() if user_id else None
         query = {"user_id": user_id_normalized}
         
-        # ✅ DEBUG: Log query details
-        logger.info(f"Querying bookings with user_id: '{user_id_normalized}' (original: '{user_id}')")
-        
-        # ✅ DEBUG: Check if collection exists and has any documents
-        total_count = await bookings_collection.count_documents({})
-        logger.info(f"Total bookings in database: {total_count}")
-        
-        # ✅ DEBUG: Check if any bookings exist for this user_id
-        user_count = await bookings_collection.count_documents(query)
-        logger.info(f"Bookings found for user_id '{user_id_normalized}': {user_count}")
-        
-        # ✅ DEBUG: Sample a few bookings to check user_id format
-        if total_count > 0:
-            sample_bookings = await bookings_collection.find({}).limit(5).to_list(length=5)
-            sample_user_ids = [b.get('user_id') for b in sample_bookings]
-            logger.info(f"Sample booking user_ids (first 5): {sample_user_ids}")
-            logger.info(f"Sample booking user_id types: {[type(b.get('user_id')).__name__ for b in sample_bookings]}")
-            
-            # ✅ Check if any sample user_id matches (for debugging)
-            if user_id_normalized:
-                matches = [uid for uid in sample_user_ids if uid and str(uid).strip() == user_id_normalized]
-                if matches:
-                    logger.info(f"✅ Found matching user_id in samples: {matches}")
-                else:
-                    logger.warning(f"⚠️ No matching user_id found in samples. Querying user_id: '{user_id_normalized}'")
-        
-        cursor = bookings_collection.find(query).sort("created_at", -1)
-        bookings = await cursor.to_list(length=100)
+        # ✅ CRUD STABILITY: Optimized query with timeout (5 seconds max) and error handling
+        try:
+            cursor = bookings_collection.find(query).sort("created_at", -1).limit(100)
+            # Use asyncio.wait_for to prevent slow queries from blocking
+            bookings = await asyncio.wait_for(cursor.to_list(length=100), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.error(f"Bookings query timeout for user: {user_id_normalized}")
+            return {
+                "ok": False,
+                "bookings": [],
+                "count": 0,
+                "message": "Query timeout - database may be slow"
+            }
+        except Exception as query_error:
+            logger.error(f"Bookings query error for user {user_id_normalized}: {query_error}", exc_info=True)
+            return {
+                "ok": False,
+                "bookings": [],
+                "count": 0,
+                "message": "Failed to retrieve bookings"
+            }
         
         # Convert ObjectId to string
         for booking in bookings:
             booking["_id"] = str(booking["_id"])
         
-        logger.info(f"Retrieved {len(bookings)} bookings for user: {user_id}")
-        
-        # ✅ DEBUG: Log response structure
-        logger.debug(f"Response structure - ok: True, bookings count: {len(bookings)}, count field: {len(bookings)}")
-        if len(bookings) > 0:
-            logger.debug(f"First booking sample - _id: {bookings[0].get('_id')}, user_id: {bookings[0].get('user_id')}, status: {bookings[0].get('status')}")
-        
-        # ✅ DEBUG: If no bookings found, try alternative queries
-        if len(bookings) == 0 and user_count == 0:
-            # Try case-insensitive search
-            case_insensitive_query = {"user_id": {"$regex": f"^{user_id_normalized}$", "$options": "i"}}
-            case_insensitive_count = await bookings_collection.count_documents(case_insensitive_query)
-            if case_insensitive_count > 0:
-                logger.warning(f"Found {case_insensitive_count} bookings with case-insensitive match for user_id: {user_id_normalized}")
-            
-            # Try to find bookings with similar user_id (for debugging)
-            all_user_ids = await bookings_collection.distinct("user_id")
-            logger.info(f"All unique user_ids in database (first 20): {all_user_ids[:20]}")
-            
-            # ✅ Check if user_id from cookie/header matches any booking user_id
-            if user_id_normalized:
-                # Try exact match with different formats
-                exact_matches = [uid for uid in all_user_ids if uid and str(uid).strip() == user_id_normalized]
-                if exact_matches:
-                    logger.info(f"✅ Found exact match in distinct user_ids: {exact_matches}")
-                else:
-                    logger.warning(f"⚠️ No exact match found. Query user_id: '{user_id_normalized}', Available user_ids: {all_user_ids[:10]}")
-        
-        return {
+        result = {
             "ok": True,
             "bookings": bookings,
             "count": len(bookings)
         }
+        
+        # ✅ Cache the result (30 seconds TTL)
+        await cache.set(cache_key, result, ttl=30)
+        
+        logger.info(f"Retrieved {len(bookings)} bookings for user: {user_id_normalized}")
+        
+        return result
         
     except Exception as e:
         logger.error(f"Failed to list bookings: {e}", exc_info=True)
@@ -755,20 +796,34 @@ async def cancel_booking(
             logger.error(f"🚨 SECURITY ALERT: Booking {booking_id} user_id mismatch! expected {user_id}, found {booking_user_id}")
             raise HTTPException(status_code=403, detail="You do not have permission to cancel this booking")
         
-        # Update status
+        # ✅ CRUD STABILITY: Update status with user_id filter for atomic operation
         from bson import ObjectId
         try:
-            await bookings_collection.update_one(
-                {"_id": ObjectId(booking_id)},
+            result = await bookings_collection.update_one(
+                {"_id": ObjectId(booking_id), "user_id": user_id},  # ✅ Atomic update with user_id filter
                 {"$set": {"status": "cancelled", "updated_at": datetime.utcnow().isoformat()}}
             )
         except:
-            await bookings_collection.update_one(
-                {"booking_id": booking_id},
+            result = await bookings_collection.update_one(
+                {"booking_id": booking_id, "user_id": user_id},  # ✅ Atomic update with user_id filter
                 {"$set": {"status": "cancelled", "updated_at": datetime.utcnow().isoformat()}}
             )
         
+        # ✅ CRUD STABILITY: Verify update was successful
+        if result.matched_count == 0:
+            logger.warning(f"Booking not found during cancellation: booking_id={booking_id}, user_id={user_id}")
+            raise HTTPException(status_code=404, detail="Booking not found or already cancelled")
+        
         logger.info(f"Cancelled booking: {booking_id}")
+        
+        # ✅ Invalidate bookings list cache for this user
+        try:
+            from app.core.redis_cache import cache
+            cache_key = f"bookings:list:{user_id}"
+            await cache.delete(cache_key)
+            logger.debug(f"Invalidated bookings cache for user: {user_id}")
+        except Exception as cache_err:
+            logger.debug(f"Failed to invalidate cache: {cache_err}")
         
         return {
             "ok": True,
@@ -840,17 +895,27 @@ async def update_booking(
                 detail=f"Cannot update booking with status '{current_status}'. Only 'pending_payment' bookings can be updated."
             )
         
-        # Build update data (only include fields that were provided)
+        # ✅ CRUD STABILITY: Build update data with validation (only include fields that were provided)
         update_data = {}
         if request.plan is not None:
+            if not isinstance(request.plan, dict):
+                raise HTTPException(status_code=400, detail="'plan' must be a dictionary")
             update_data["plan"] = request.plan
         if request.travel_slots is not None:
+            if not isinstance(request.travel_slots, dict):
+                raise HTTPException(status_code=400, detail="'travel_slots' must be a dictionary")
             update_data["travel_slots"] = request.travel_slots
         if request.total_price is not None:
+            if not isinstance(request.total_price, (int, float)) or request.total_price < 0:
+                raise HTTPException(status_code=400, detail="'total_price' must be a non-negative number")
             update_data["total_price"] = request.total_price
         if request.currency is not None:
+            if not isinstance(request.currency, str) or len(request.currency) != 3:
+                raise HTTPException(status_code=400, detail="'currency' must be a 3-character currency code")
             update_data["currency"] = request.currency
         if request.metadata is not None:
+            if not isinstance(request.metadata, dict):
+                raise HTTPException(status_code=400, detail="'metadata' must be a dictionary")
             update_data["metadata"] = request.metadata
         
         # Always update timestamp
@@ -876,6 +941,15 @@ async def update_booking(
             raise HTTPException(status_code=404, detail="Booking not found during update")
         
         logger.info(f"Updated booking: {booking_id} - Fields: {list(update_data.keys())}")
+        
+        # ✅ Invalidate bookings list cache for this user
+        try:
+            from app.core.redis_cache import cache
+            cache_key = f"bookings:list:{user_id}"
+            await cache.delete(cache_key)
+            logger.debug(f"Invalidated bookings cache for user: {user_id}")
+        except Exception as cache_err:
+            logger.debug(f"Failed to invalidate cache: {cache_err}")
         
         # ✅ SECURITY: Return updated booking with user_id filter
         try:
@@ -1233,9 +1307,11 @@ async def payment_page(
 class CreateChargeRequest(BaseModel):
     """Request model for creating Omise charge"""
     booking_id: str = Field(..., description="Booking ID")
-    token: str = Field(..., description="Omise token from frontend")
+    token: Optional[str] = Field(None, description="Omise token from frontend (new card)")
     amount: float = Field(..., description="Payment amount")
     currency: str = Field(default="THB", description="Currency code")
+    card_id: Optional[str] = Field(None, description="Omise card id (saved card)")
+    customer_id: Optional[str] = Field(None, description="Omise customer id (saved card)")
 
 
 @router.post("/create-charge")
@@ -1307,22 +1383,37 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
         if request.amount <= 0:
             raise HTTPException(status_code=400, detail="Invalid amount")
         
+        use_saved_card = request.card_id and request.customer_id
+        if not use_saved_card and not request.token:
+            raise HTTPException(status_code=400, detail="Provide either token (new card) or card_id and customer_id (saved card)")
+        if use_saved_card:
+            # ✅ SECURITY: Verify saved card belongs to this user in MongoDB
+            saved_doc = await storage.saved_cards_collection.find_one({"user_id": user_id})
+            if not saved_doc:
+                raise HTTPException(status_code=404, detail="Saved cards not found")
+            cards = saved_doc.get("cards") or []
+            if not any(c.get("card_id") == request.card_id for c in cards):
+                raise HTTPException(status_code=403, detail="Card does not belong to your account")
+        
+        charge_payload = {
+            "amount": int(request.amount * 100),  # Convert to satang
+            "currency": request.currency.lower(),
+            "description": f"Booking #{request.booking_id}",
+            "metadata": {"booking_id": request.booking_id, "user_id": user_id},
+        }
+        if use_saved_card:
+            charge_payload["customer"] = request.customer_id
+            charge_payload["card"] = request.card_id
+        else:
+            charge_payload["card"] = request.token
+        
         # Create charge using Omise API
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.post(
                     "https://api.omise.co/charges",
                     auth=(settings.omise_secret_key, ""),
-                    json={
-                        "amount": int(request.amount * 100),  # Convert to satang
-                        "currency": request.currency.lower(),
-                        "card": request.token,
-                        "description": f"Booking #{request.booking_id}",
-                        "metadata": {
-                            "booking_id": request.booking_id,
-                            "user_id": user_id  # ✅ Store user_id in charge metadata
-                        }
-                    },
+                    json=charge_payload,
                     timeout=30.0
                 )
                 
@@ -1352,6 +1443,19 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
                         )
                     
                     logger.info(f"Charge created successfully for booking {request.booking_id}: {charge_data.get('id')}")
+                    
+                    # ✅ Invalidate bookings list cache for this user
+                    try:
+                        booking = await bookings_collection.find_one({"_id": ObjectId(request.booking_id)})
+                        if booking:
+                            user_id_for_cache = booking.get("user_id")
+                            if user_id_for_cache:
+                                from app.core.redis_cache import cache
+                                cache_key = f"bookings:list:{user_id_for_cache}"
+                                await cache.delete(cache_key)
+                                logger.debug(f"Invalidated bookings cache for user: {user_id_for_cache}")
+                    except Exception as cache_err:
+                        logger.debug(f"Failed to invalidate cache after payment: {cache_err}")
                     
                     return {
                         "ok": True,
@@ -1398,3 +1502,189 @@ async def get_payment_config(request: Request):
     except Exception as e:
         logger.error(f"Failed to get payment config: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get payment config: {str(e)}")
+
+
+@router.get("/omise.js")
+async def serve_omise_js():
+    """
+    Proxy Omise.js from CDN — โหลดจาก Backend (same origin) ลดโอกาสถูก Ad blocker / CORS บล็อก
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get("https://cdn.omise.co/omise.js", timeout=15.0)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail="Omise CDN unavailable")
+            from fastapi.responses import Response
+            return Response(content=resp.content, media_type="application/javascript")
+    except httpx.RequestError as e:
+        logger.warning(f"Omise.js proxy failed: {e}")
+        raise HTTPException(status_code=502, detail="Cannot fetch Omise.js from CDN")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Omise.js proxy error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to serve Omise.js")
+
+
+# =============================================================================
+# Saved Cards (MongoDB + Omise Customer)
+# =============================================================================
+
+class AddSavedCardRequest(BaseModel):
+    """Request model for adding a saved card"""
+    token: str = Field(..., description="Omise token from frontend (single-use)")
+    email: Optional[str] = Field(None, description="Customer email (for Omise customer)")
+
+
+@router.get("/saved-cards")
+async def list_saved_cards(request: Request):
+    """
+    List saved cards for the current user (from MongoDB).
+    Returns list of { id, last4, brand, expiry_month, expiry_year } — id is Omise card_id for charging.
+    """
+    try:
+        user_id = request.headers.get("X-User-ID") or request.cookies.get(settings.session_cookie_name)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        storage = MongoStorage()
+        await storage.connect()
+        doc = await storage.saved_cards_collection.find_one({"user_id": user_id})
+        cards = (doc or {}).get("cards") or []
+        return {"ok": True, "cards": cards, "customer_id": doc.get("omise_customer_id") if doc else None}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to list saved cards: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to list saved cards: {str(e)}")
+
+
+@router.post("/saved-cards")
+async def add_saved_card(fastapi_request: Request, body: AddSavedCardRequest):
+    """
+    Add a card to the user's saved cards: create/update Omise customer with token, then save to MongoDB.
+    """
+    try:
+        user_id = fastapi_request.headers.get("X-User-ID") or fastapi_request.cookies.get(settings.session_cookie_name)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if not settings.omise_secret_key or not settings.omise_secret_key.startswith("skey_"):
+            raise HTTPException(status_code=500, detail="Omise secret key not configured")
+        storage = MongoStorage()
+        await storage.connect()
+        coll = storage.saved_cards_collection
+        doc = await coll.find_one({"user_id": user_id})
+        email = (body.email or "").strip() or f"user-{user_id}@saved-card.local"
+        async with httpx.AsyncClient() as client:
+            auth = (settings.omise_secret_key, "")
+            if not doc or not doc.get("omise_customer_id"):
+                # Create new Omise customer with card
+                resp = await client.post(
+                    "https://api.omise.co/customers",
+                    auth=auth,
+                    json={"email": email, "description": f"User {user_id}", "card": body.token},
+                    timeout=30.0,
+                )
+                if resp.status_code != 200:
+                    err = resp.json() if resp.text else {}
+                    raise HTTPException(status_code=400, detail=err.get("message", resp.text))
+                data = resp.json()
+                customer_id = data["id"]
+                cards_data = data.get("cards", {}).get("data") or []
+                if not cards_data:
+                    raise HTTPException(status_code=400, detail="Card could not be added to customer")
+                new_card = cards_data[-1]
+                card_info = {
+                    "card_id": new_card["id"],
+                    "last4": new_card.get("last_digits", "****"),
+                    "brand": new_card.get("brand", "Card"),
+                    "expiry_month": str(new_card.get("expiration_month", "")),
+                    "expiry_year": str(new_card.get("expiration_year", ""))[-2:],
+                }
+                await coll.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"user_id": user_id, "omise_customer_id": customer_id, "updated_at": datetime.utcnow().isoformat()}, "$push": {"cards": card_info}},
+                    upsert=True,
+                )
+            else:
+                # Add card to existing customer
+                customer_id = doc["omise_customer_id"]
+                resp = await client.patch(
+                    f"https://api.omise.co/customers/{customer_id}",
+                    auth=auth,
+                    json={"card": body.token},
+                    timeout=30.0,
+                )
+                if resp.status_code != 200:
+                    err = resp.json() if resp.text else {}
+                    raise HTTPException(status_code=400, detail=err.get("message", resp.text))
+                data = resp.json()
+                cards_data = data.get("cards", {}).get("data") or []
+                if not cards_data:
+                    raise HTTPException(status_code=400, detail="Card could not be added")
+                new_card = cards_data[-1]
+                card_info = {
+                    "card_id": new_card["id"],
+                    "last4": new_card.get("last_digits", "****"),
+                    "brand": new_card.get("brand", "Card"),
+                    "expiry_month": str(new_card.get("expiration_month", "")),
+                    "expiry_year": str(new_card.get("expiration_year", ""))[-2:],
+                }
+                await coll.update_one(
+                    {"user_id": user_id},
+                    {"$push": {"cards": card_info}, "$set": {"updated_at": datetime.utcnow().isoformat()}},
+                )
+            # Return updated list
+            doc = await coll.find_one({"user_id": user_id})
+            cards = (doc or {}).get("cards") or []
+        return {"ok": True, "cards": cards, "customer_id": customer_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to add saved card: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to add saved card: {str(e)}")
+
+
+@router.delete("/saved-cards/{card_id}")
+async def delete_saved_card(fastapi_request: Request, card_id: str):
+    """
+    Remove a saved card from MongoDB and from Omise customer.
+    """
+    try:
+        user_id = fastapi_request.headers.get("X-User-ID") or fastapi_request.cookies.get(settings.session_cookie_name)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if not settings.omise_secret_key or not settings.omise_secret_key.startswith("skey_"):
+            raise HTTPException(status_code=500, detail="Omise secret key not configured")
+        storage = MongoStorage()
+        await storage.connect()
+        coll = storage.saved_cards_collection
+        doc = await coll.find_one({"user_id": user_id})
+        if not doc:
+            raise HTTPException(status_code=404, detail="No saved cards")
+        customer_id = doc.get("omise_customer_id")
+        if not customer_id:
+            raise HTTPException(status_code=404, detail="No Omise customer")
+        cards = doc.get("cards") or []
+        if not any(c.get("card_id") == card_id for c in cards):
+            raise HTTPException(status_code=404, detail="Card not found")
+        async with httpx.AsyncClient() as client:
+            resp = await client.delete(
+                f"https://api.omise.co/customers/{customer_id}/cards/{card_id}",
+                auth=(settings.omise_secret_key, ""),
+                timeout=30.0,
+            )
+            if resp.status_code not in (200, 204):
+                err = resp.json() if resp.text else {}
+                logger.warning(f"Omise delete card: {resp.status_code} - {err}")
+        await coll.update_one(
+            {"user_id": user_id},
+            {"$pull": {"cards": {"card_id": card_id}}, "$set": {"updated_at": datetime.utcnow().isoformat()}},
+        )
+        doc = await coll.find_one({"user_id": user_id})
+        cards = (doc or {}).get("cards") or []
+        return {"ok": True, "cards": cards}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete saved card: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete saved card: {str(e)}")

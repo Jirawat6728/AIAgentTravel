@@ -1,3 +1,4 @@
+"""เก็บเซสชัน แชท และข้อมูลอื่นใน MongoDB ตาม StorageInterface."""
 from __future__ import annotations
 from typing import Optional, Dict, Any
 from datetime import datetime
@@ -14,7 +15,8 @@ from app.models.database import (
     USER_INDEXES, 
     MEMORY_INDEXES, 
     BOOKING_INDEXES, 
-    CONVERSATION_INDEXES
+    CONVERSATION_INDEXES,
+    SAVED_CARDS_INDEXES,
 )
 from app.core.config import settings
 from app.core.exceptions import StorageException
@@ -61,12 +63,14 @@ class MongoStorage(StorageInterface):
             self.memories_collection = self.db["memories"]
             self.bookings_collection = self.db["bookings"]
             self.conversations_collection = self.db["conversations"]
+            self.saved_cards_collection = self.db["user_saved_cards"]
         else:
             self.sessions_collection = None
             self.users_collection = None
             self.memories_collection = None
             self.bookings_collection = None
             self.conversations_collection = None
+            self.saved_cards_collection = None
         
         logger.info(f"MongoStorage initialized with shared connection: database={self.database_name}")
     
@@ -93,6 +97,7 @@ class MongoStorage(StorageInterface):
             self.memories_collection = self.db["memories"]
             self.bookings_collection = self.db["bookings"]
             self.conversations_collection = self.db["conversations"]
+            self.saved_cards_collection = self.db["user_saved_cards"]
         
         try:
             # Create indexes for all collections
@@ -122,6 +127,8 @@ class MongoStorage(StorageInterface):
             await create_indexes_safe(self.memories_collection, MEMORY_INDEXES, "memories")
             await create_indexes_safe(self.bookings_collection, BOOKING_INDEXES, "bookings")
             await create_indexes_safe(self.conversations_collection, CONVERSATION_INDEXES, "conversations")
+            if hasattr(self, "saved_cards_collection") and self.saved_cards_collection is not None:
+                await create_indexes_safe(self.saved_cards_collection, SAVED_CARDS_INDEXES, "user_saved_cards")
             
             logger.info("MongoDB indexes verified via shared connection (including user_id indexes for data isolation)")
         except Exception as e:

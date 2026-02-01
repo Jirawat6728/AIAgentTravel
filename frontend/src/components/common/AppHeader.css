@@ -9,7 +9,7 @@
   z-index: 100;
 }
 
-/* Mobile: header เล็กลง แต่ยังคงความสมส่วน */
+/* Mobile: โลโก้แบบแถบน้ำเงิน + เครื่องบิน + AI Travel Agent ตามภาพอ้างอิง */
 @media (max-width: 768px) {
   .app-header {
     padding: clamp(0.5rem, 1.5vw, 0.75rem) clamp(0.75rem, 2vw, 1rem);
@@ -26,19 +26,9 @@
     min-width: 0;
   }
   
+  /* Mobile: แสดงเฉพาะไอคอนเครื่องบิน ไม่แสดงคำว่า AI Travel Agent */
   .app-logo-text {
-    display: none; /* ซ่อนข้อความบน mobile */
-  }
-  
-  .app-logo-icon {
-    width: clamp(1.5rem, 4vw, 1.75rem);
-    height: clamp(1.5rem, 4vw, 1.75rem);
-    flex-shrink: 0;
-  }
-  
-  .app-plane-icon {
-    width: clamp(0.875rem, 2.5vw, 1rem);
-    height: clamp(0.875rem, 2.5vw, 1rem);
+    display: none !important;
   }
 }
 
@@ -57,6 +47,24 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
+}
+
+.app-project-logo {
+  height: 36px;
+  width: auto;
+  object-fit: contain;
+  border-radius: 6px;
+  display: block;
+}
+.app-mobile-logo {
+  display: none;
+  height: 40px;
+  width: auto;
+  object-fit: contain;
+  border-radius: 8px;
+}
+.app-logo-text-fallback {
+  display: none; /* โลโก้มีข้อความ AI Travel Agent อยู่แล้ว */
 }
 
 .app-btn-ai-header {
@@ -157,14 +165,22 @@
   display: none;
 }
 
-/* ✅ Desktop: Show navigation links, hide mobile menu */
+/* ✅ Desktop: แท็บบรรทัดเดียว — เที่ยวบิน, โรงแรม, ที่พักให้เช่า, เอเจนท์, รถเช่า, การจองของฉัน */
 @media (min-width: 768px) {
   .app-nav-links {
     display: flex;
-    gap: 1.5rem;
-    flex: 0;
+    flex-wrap: nowrap;
+    white-space: nowrap;
+    gap: 0.5rem;
+    flex: 0 1 auto;
     justify-content: flex-start;
     overflow-x: visible;
+    min-width: 0;
+  }
+  .app-nav-links-desktop .app-nav-link {
+    padding: 0.4rem 0.6rem;
+    font-size: 0.8125rem;
+    flex-shrink: 0;
   }
   
   /* ✅ Show slider on desktop */
@@ -768,6 +784,11 @@
 }
 
 @media (max-width: 768px) {
+  /* ขยับ dropdown ผู้ใช้มาทางขวาบนมือถือ */
+  .app-user-menu-container {
+    margin-left: auto;
+    width: fit-content;
+  }
   .app-user-popup {
     right: 0;
     left: auto;

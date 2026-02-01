@@ -4,18 +4,11 @@ import './FlightsPage.css';
 
 export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBookings, onNavigateToAI, onNavigateToFlights, onNavigateToHotels, onNavigateToCarRentals, onNavigateToProfile, onNavigateToSettings, onNavigateToHome = null }) {
   const handleTabChange = (tab) => {
-    // Handle navigation to other tabs
-    if (tab === 'ai' && onNavigateToAI) {
-      onNavigateToAI();
-    } else if (tab === 'bookings' && onNavigateToBookings) {
-      onNavigateToBookings();
-    } else if (tab === 'flights' && onNavigateToFlights) {
-      onNavigateToFlights();
-    } else if (tab === 'hotels' && onNavigateToHotels) {
-      onNavigateToHotels();
-    } else if (tab === 'car-rentals' && onNavigateToCarRentals) {
-      onNavigateToCarRentals();
-    }
+    if (tab === 'ai' && onNavigateToAI) onNavigateToAI();
+    else if (tab === 'bookings' && onNavigateToBookings) onNavigateToBookings();
+    else if (tab === 'flights' && onNavigateToFlights) onNavigateToFlights();
+    else if (tab === 'hotels' && onNavigateToHotels) onNavigateToHotels();
+    else if (tab === 'car-rentals' && onNavigateToCarRentals) onNavigateToCarRentals();
   };
 
   return (

@@ -1,6 +1,6 @@
 """
-Migration Script: JSON Storage to MongoDB
-Utility to migrate existing JSON sessions to MongoDB
+สคริปต์ย้ายข้อมูล: จาก JSON Storage ไป MongoDB
+ยูทิลิตี้สำหรับย้ายเซสชัน JSON ที่มีอยู่ไป MongoDB
 """
 
 import asyncio

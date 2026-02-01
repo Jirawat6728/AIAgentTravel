@@ -1,6 +1,6 @@
 """
-Agent Monitor Service
-Tracks recent agent activities globally for the admin dashboard
+เซอร์วิสตรวจสอบ Agent
+ติดตามกิจกรรมล่าสุดของ agent ทั้งระบบ สำหรับแดชบอร์ดแอดมิน
 """
 
 from typing import List, Dict, Any

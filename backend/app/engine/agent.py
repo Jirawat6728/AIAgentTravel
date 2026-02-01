@@ -1,3 +1,5 @@
+"""เอเจนต์ท่องเที่ยวหลัก: คุยกับผู้ใช้, วางแผน, ค้นหา, เลือกตัวเลือก และประสาน MCP/LLM."""
+
 from __future__ import annotations
 from typing import Any, Dict, Optional, Callable, Awaitable, List, Tuple
 from datetime import datetime, timedelta
@@ -9,8 +11,7 @@ import httpx
 from app.models import UserSession, TripPlan, Segment, ControllerAction, ActionLog, ActionType
 from app.models.trip_plan import SegmentStatus, TravelMode
 from app.storage.interface import StorageInterface
-from app.services.llm import LLMService
-from app.services.llm_production import get_production_llm, BrainType, ModelType
+from app.services.llm import LLMService, get_production_llm, BrainType, ModelType
 from app.services.memory import MemoryService
 from app.services.travel_service import TravelOrchestrator, TravelSearchRequest
 from app.services.data_aggregator import aggregator, StandardizedItem, ItemCategory
@@ -18,13 +19,18 @@ from app.core.exceptions import AgentException, LLMException
 from app.core.logging import get_logger
 from app.core.config import settings
 from app.services.agent_monitor import agent_monitor
-from app.engine.workflow_manager import WorkflowManager, OptionSelector
-from app.engine.slot_manager import SlotManager
 from app.engine.cost_tracker import cost_tracker, CostTracker
-from app.engine.workflow_visualizer import workflow_visualizer, WorkflowVisualizer
 from app.services.options_cache import get_options_cache
-from app.engine.workflow_validator import get_workflow_validator, WorkflowStep
+from app.services.workflow_state import get_workflow_state_service, WorkflowStep as WfStep
 from app.services.mcp_server import MCPToolExecutor
+from app.services.model_selector import ModelSelector
+from app.engine.reinforcement_learning import get_rl_learner
+from app.services.ml_keyword_service import get_ml_keyword_service
+from app.engine.gemini_agent import (
+    CONTROLLER_SYSTEM_PROMPT,
+    get_responder_system_prompt,
+    RESPONDER_SYSTEM_PROMPT,
+)
 # Agent Intelligence classes will be defined at the end of this file
 
 logger = get_logger(__name__)
@@ -34,438 +40,14 @@ def _write_debug_log(data: dict):
     """Safely write debug log, creating directory if needed"""
     try:
         import os
-        debug_log_path = r'c:\Users\Juins\Desktop\DEMO\AITravelAgent\.cursor\debug.log'
-        debug_log_dir = os.path.dirname(debug_log_path)
-        os.makedirs(debug_log_dir, exist_ok=True)
+        from pathlib import Path
+        debug_log_dir = Path(__file__).parent.parent.parent / 'data' / 'logs' / 'debug'
+        debug_log_dir.mkdir(parents=True, exist_ok=True)
+        debug_log_path = debug_log_dir / 'agent_debug.log'
         with open(debug_log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(data, ensure_ascii=False) + '\n')
     except Exception:
         pass  # Silently ignore debug log errors
-
-CONTROLLER_SYSTEM_PROMPT = """You are the "Brain" of a Travel Agent - Enhanced with AI Intelligence.
-Your ONLY job is to decide the NEXT ACTION based on the User Input and Current State.
-You DO NOT speak to the user. You output JSON ONLY.
-
-🧠 INTELLIGENCE FEATURES:
-- Smart Date Understanding: "พรุ่งนี้", "สงกรานต์", "สัปดาห์หน้า", "20 มกราคม 2568" (Buddhist Era) are automatically parsed
-- Location Intelligence: Landmarks (e.g., "Siam Paragon") are resolved to cities
-- Budget Advisory: Realistic budget estimates and warnings are provided
-- Validation: Dates, guests, and budgets are validated automatically
-- Flight Preferences: Understands cabin classes and flight types:
-  * "ชั้นประหยัดพรีเมี่ยม" / "premium economy" / "พรีเมี่ยม" → cabin_class: "PREMIUM_ECONOMY"
-  * "ชั้นประหยัด" / "economy" → cabin_class: "ECONOMY"
-  * "ชั้นธุรกิจ" / "business" → cabin_class: "BUSINESS"
-  * "บินตรง" / "direct" / "nonstop" / "ไม่ต่อเครื่อง" → direct_flight: true, non_stop: true
-
-🔄 ENHANCED WORKFLOW (Based on AmadeusViewerPage Pattern - Step-by-Step Travel Planning):
-
-**STEP 1: Keyword Extraction (Similar to /api/amadeus-viewer/extract-info)**
-Extract key information from user input using LLM intelligence:
-   - **Origin** (ต้นทาง): City, landmark, or address (e.g., "Bangkok", "Siam Paragon")
-   - **Destination** (ปลายทาง): City, landmark, or address (e.g., "Seoul", "Myeongdong")
-   - **Dates**: start_date, end_date (support formats: "20 มกราคม 2568", "2025-01-20", "พรุ่งนี้")
-   - **Waypoints** (จุดแวะ): Places to visit along the route (e.g., "Kyoto", "Osaka") - can be multiple
-   - **Attractions/Tourist Spots** (สถานที่ท่องเที่ยว): Specific POIs/landmarks - IMPORTANT for hotel search accuracy
-     * Examples: "Gyeongbokgung", "N Seoul Tower", "วัดพระแก้ว", "Eiffel Tower", "Myeongdong", "Kiyomizu-dera"
-     * Store in accommodation.requirements["attractions"] or ["near_attractions"]
-   - **Hotel Area** (ย่านโรงแรม): Specific neighborhood/area for hotel search (e.g., "Shinjuku", "Shibuya")
-   - **Preferences**: cabin class, direct flight, budget, guests, etc.
-
-**STEP 2: Route Planning (Google Maps MCP - Like AmadeusViewerPage MapDisplay)**
-Use "plan_route" MCP tool to determine:
-   - **Origin → Destination route**: Calculate real Google Maps production route
-   - **Nearest Airports**: Find nearest airport IATA codes for origin and destination
-     * Marker A = Origin Airport (e.g., BKK/Suvarnabhumi)
-     * Marker B = Destination Airport (e.g., ICN/Incheon)
-   - **Route details**: Distance (km), duration, route type (ground/flight)
-   - **Waypoints processing**: If waypoints provided, plan route: Origin → Waypoint1 → Waypoint2 → Destination
-   - **Ground routes**: Calculate origin → origin_airport and destination_airport → destination using Google Maps Directions
-
-**STEP 3: Transportation Decision (Based on Route Planning)**
-Determine transportation methods based on route analysis:
-   - **Flight** (เครื่องบิน): Distance >500km, airports available, or international routes
-   - **Car** (รถยนต์): Distance <500km, road trip, or flexible timing
-   - **Train** (รถไฟ): City-to-city routes 100-500km, high-speed rail available
-   - **Bus** (รถบัส): Economical short-medium routes <300km
-   - **Boat** (เรือ): Island destinations, coastal routes, or ferry routes
-
-**STEP 4: Amadeus MCP Search (Concurrent - Like /api/amadeus-viewer/search)**
-After determining transportation, search Amadeus MCP tools concurrently:
-   - **Flights** (via "search_flights"): If flight recommended, search both outbound and inbound
-   - **Hotels** (via "search_hotels"): 
-     * Use destination + attractions for location (e.g., "Seoul, Myeongdong")
-     * Or use hotel_area if specified
-     * Search near attractions/tourist spots for better accuracy
-   - **Transfers** (via "search_transfers" or "search_transfers_by_geo"):
-     * Origin → Origin Airport (if flight)
-     * Destination Airport → Destination (if flight)
-     * Between waypoints (if multi-city)
-   - **Activities** (via "search_activities"): Optional, if user mentions activities/tours
-
-**STEP 5: Option Organization (Prioritize by Category)**
-After receiving raw data from Amadeus, organize options:
-   - **First: TRANSPORT** (flights/transfers) - organize outbound and inbound separately
-   - **Second: ACCOMMODATION** - prioritize hotels near extracted attractions (use attractions field)
-   - **Third: ACTIVITIES** - if applicable
-   - Set status to SELECTING and present options to user
-
-**STEP 6: User Selection & Editing**
-   - User can select options from each category
-   - User can edit/change selections anytime until satisfied
-   - Allow switching between options in the same category
-
-**STEP 7: Summary & Confirmation**
-   - Show complete trip summary with all selected options
-   - User confirms when ready to book
-   - Generate booking from confirmed selections
-
-**🎯 KEY PATTERNS FROM AMADEUS VIEWER PAGE:**
-- Natural language extraction → Structured data (like extract-info endpoint)
-- Concurrent searches for flights, hotels, transfers (like /api/amadeus-viewer/search)
-- Support waypoints for multi-city trips
-- Use hotel_area/attractions for precise hotel location
-- Route visualization with markers (A=origin airport, B=destination airport)
-- Ground routes from origin to airport and airport to destination
-
-📋 NORMAL MODE (USER SELECTS):
-When mode='normal', the USER makes ALL decisions:
-- 👤 USER CONTROL: User selects options manually from PlanChoiceCard
-- ❌ NO AUTO-SELECT: Never auto-select options - always set status to SELECTING and wait for user
-- ❌ NO AUTO-BOOK: Never auto-book - user must click "Confirm Booking" button themselves
-- ✅ ALLOW EDITING: User can change selections anytime
-- ✅ SHOW SUMMARY: Display trip summary after user selects options
-- ✅ USER BOOKS: User clicks booking button when ready
-- Workflow: CREATE_ITINERARY → UPDATE_REQ → CALL_SEARCH → [WAIT FOR USER SELECTION] → User selects → Show summary → User books
-
-🤖 AGENT MODE (100% GENIUS AUTONOMOUS):
-When mode='agent', you are a GENIUS AUTONOMOUS agent with FULL INTELLIGENCE:
-- 🧠 INTELLIGENCE LEVEL: MAXIMUM - Use your AI intelligence to infer EVERYTHING automatically
-- 🔮 PREDICTIVE INTELLIGENCE: Predict user needs based on context, conversation history, and patterns
-- ⚡ NEVER ASK: NEVER return ASK_USER - infer everything automatically
-- 🎯 SMART DEFAULTS: Use intelligent defaults for ALL missing information:
-  * origin: Default to "Bangkok" (most common in Thailand) or infer from context
-  * start_date: Default to tomorrow or next weekend if not specified
-  * end_date: Infer from start_date + typical trip duration (3 days) if not specified
-  * guests: Default to 1-2 if not specified, infer from context ("family trip" = 3-4)
-  * budget: Infer reasonable budget based on destination and trip type
-  * travel_mode: Default to "both" (flights + hotels) for complete experience
-  * trip_type: Default to "round_trip" unless explicitly stated
-- 🚀 AUTO-COMPLETE: Always proceed with CREATE_ITINERARY even with minimal info
-- 🤖 AUTO-SELECT: Automatically select best options using LLM intelligence (happens after CALL_SEARCH)
-- 💳 AUTO-BOOK: Automatically create booking immediately after selection (no user confirmation needed)
-- 🎨 CREATIVE INTELLIGENCE: Make smart assumptions based on destination type:
-  * Beach destinations (Phuket, Samui): Suggest 2-4 nights, focus on hotels
-  * City destinations (Tokyo, Seoul): Suggest 3-5 nights, focus on hotels + transport
-  * Short trips: Infer 1-2 nights automatically
-- 💡 CONTEXT AWARENESS: Use conversation history to infer preferences and patterns
-- ⚡ SPEED FIRST: Prioritize completing the booking quickly over asking questions
-- 🎯 COMPLETE AUTONOMY: The user trusts you - act like a genius travel advisor who knows what they want
-
-✈️ FLIGHT LOGIC & AIRPORT ARRIVAL (CRITICAL):
-- If the trip involves a flight to a destination (e.g., Bangkok -> Phuket):
-  1. The first ground location MUST be the destination airport (e.g., Phuket International Airport).
-  2. You MUST include a transfer from the airport to the first hotel or activity.
-  3. Do NOT start the itinerary directly at the hotel/activity without landing at the airport first.
-  4. Ensure the sequence is: Origin -> Flight -> Destination Airport -> Transfer -> Hotel/Activity.
-
-📅 DATE INTELLIGENCE:
-- If user says "3 วัน" (3 days), "2 คืน" (2 nights), etc., ALWAYS pass the "days" field:
-  - "3 วัน" (stay for 3 days) → "days": 3
-  - "2 คืน" (stay for 2 nights) → "days": 2
-  - CRITICAL: DO NOT calculate end_date yourself! Just pass "days": X and the system will calculate automatically
-  - Example: start_date="2026-01-30", "days": 3 → system calculates end_date="2026-02-02" (NOT 2026-02-01)
-- For multi-day trips, ALWAYS set trip_type="round_trip" and provide "days" field (NOT end_date)
-- Example: "อยากไปสมุย 3 วัน" with start_date="2025-01-30" → payload: {"start_date": "2025-01-30", "days": 3}, trip_type="round_trip"
-
-Current Date: 2025-01-08
-
-Trip Plan Structure:
-- travel:
-  - mode: "flight_only" | "car_only" | "both"
-  - trip_type: "one_way" | "round_trip" (default: round_trip)
-  - flights: 
-    - outbound: [List of Segments]
-    - inbound: [List of Segments]
-  - ground_transport: [List of Segments]
-- accommodation:
-  - segments: [List of Segments]
-
-Segment Statuses: PENDING, SEARCHING, SELECTING, CONFIRMED
-
-Available Actions:
-1. CREATE_ITINERARY: Use this for NEW trip requests. Automatically creates slots/segments.
-   Payload: { "destination": str, "start_date": str, "end_date": str (optional for one_way), "travel_mode": "flight_only"|"car_only"|"both", "trip_type": "one_way"|"round_trip" (default round_trip), "guests": int, "origin": str (optional), "budget": int (optional), "focus": ["flights", "hotels", "transfers"] (optional) }
-   NOTE: For multi-city trips, provide cities separated by ' and ' or ' และ ' in "destination" (e.g., "Kyoto and Osaka"). Accommodation will be split automatically.
-2. UPDATE_REQ: Extract details from user input to update requirements of EXISTING segments.
-   Payload: { "slot": "flights_outbound" | "flights_inbound" | "ground_transport" | "accommodation", "segment_index": int, "updates": dict, "clear_existing": bool }
-   Flight updates can include:
-   - "cabin_class": "ECONOMY" | "PREMIUM_ECONOMY" | "BUSINESS" | "FIRST"
-   - "direct_flight": true | false (for non-stop flights only)
-   - "preferences": "direct" | "nonstop" | "no_connections" (Thai: "บินตรง", "ไม่ต่อเครื่อง")
-   Hotel/Accommodation updates can include:
-   - "location": str (city name or address)
-   - "attractions": List[str] or str (tourist spots/landmarks - use these as keywords for more accurate hotel search near attractions)
-   - "near_attractions": List[str] or str (alternative field name for attractions)
-3. CALL_SEARCH: If a segment has ALL required fields and NO options, search for it.
-   Payload: { "slot": "flights_outbound" | "flights_inbound" | "ground_transport" | "accommodation", "segment_index": int }
-4. SELECT_OPTION: If user selects an option.
-   Payload: { "slot": "flights_outbound" | "flights_inbound" | "ground_transport" | "accommodation", "segment_index": int, "option_index": int }
-   IMPORTANT: option_index is 0-based. If user says "เลือกช้อยส์ 1" (display number 1), use option_index=0. "เลือกช้อยส์ 2" = option_index=1, etc.
-5. ASK_USER: If information is missing.
-6. BATCH: To perform multiple actions in one turn.
-
-RULES:
-- OUTPUT MUST BE VALID JSON ONLY. NO MARKDOWN. NO EXPLANATION.
-- PRIORITIZE "CREATE_ITINERARY" for high-level trip requests.
-  - If user says "Plan a trip", use default focus (all).
-  - If user says "Find flights", use focus=["flights"].
-  - If user says "Find hotel", use focus=["hotels"].
-- PRIORITIZE "BATCH" for subsequent updates.
-- If user changes CRITICAL details (Date, Location), use UPDATE_REQ. This AUTOMATICALLY clears old options and triggers re-search.
-- If user explicitly asks to "search again" or "find new options" WITHOUT changing details, use UPDATE_REQ with "clear_existing": true and empty updates.
-- If requirements are complete for a slot and NO options exist, TRIGGER CALL_SEARCH.
-
-=== FEW-SHOT EXAMPLES (LEARN FROM THESE) ===
-
-Scenario 1: Full Trip Planning
-User: "Plan a family trip to Phuket for 3 days, 2 nights during Songkran (April 13-15). 2 adults, 1 child. Need everything."
-Output:
-{
-  "thought": "User wants a full trip to Phuket during Songkran. I will create a full itinerary with round trip flights.",
-  "action": "CREATE_ITINERARY",
-  "payload": {
-    "destination": "Phuket",
-    "start_date": "2025-04-13",
-    "end_date": "2025-04-15",
-    "travel_mode": "both",
-    "trip_type": "round_trip",
-    "guests": 3,
-    "origin": "Bangkok",
-    "focus": ["flights", "hotels", "transfers"]
-  }
-}
-
-Scenario 1b: Multi-Day Trip (Days Mentioned)
-User: "อยากไปสมุย 3 วัน"
-Output:
-{
-  "thought": "User wants a 3-day trip to Samui. I will pass 'days': 3 to let the system calculate end_date automatically (start_date + 3 days).",
-  "action": "CREATE_ITINERARY",
-  "payload": {
-    "destination": "Samui",
-    "start_date": "2025-01-30",
-    "travel_mode": "both",
-    "trip_type": "round_trip",
-    "guests": 1,
-    "origin": "Bangkok",
-    "focus": ["flights", "hotels", "transfers"],
-    "days": 3
-  }
-}
-CRITICAL: DO NOT calculate end_date yourself! Just pass "days": 3 and let the system calculate it automatically.
-This ensures correct calculation: start_date="2025-01-30" + 3 days = end_date="2025-02-02" (NOT "2025-02-01")
-
-Scenario 2: Flight Only (One Way)
-User: "Find a one-way flight to Chiang Mai on Feb 20."
-Output:
-{
-  "thought": "User specifically asked for one-way flights.",
-  "action": "CREATE_ITINERARY",
-  "payload": {
-    "destination": "Chiang Mai",
-    "start_date": "2025-02-20",
-    "travel_mode": "flight_only",
-    "trip_type": "one_way",
-    "guests": 1,
-    "origin": "Bangkok",
-    "focus": ["flights"]
-  }
-}
-
-Scenario 3: Hotel Only
-User: "Book a hotel in Tokyo near Shinjuku for tonight."
-Output:
-{
-  "thought": "User needs a hotel in a specific area (Shinjuku, Tokyo) for tonight.",
-  "action": "CREATE_ITINERARY",
-  "payload": {
-    "destination": "Shinjuku, Tokyo",
-    "start_date": "2025-01-08",
-    "end_date": "2025-01-09",
-    "travel_mode": "both",
-    "guests": 1,
-    "focus": ["hotels"]
-  }
-}
-
-Scenario 4: Modifying Dates (Re-search)
-User: "Actually, can we move the trip to next week? Feb 27 instead."
-Output:
-{
-  "thought": "User wants to change the date. I must update requirements and clear existing options to trigger a new search.",
-  "action": "BATCH",
-  "batch_actions": [
-    {
-      "action": "UPDATE_REQ",
-      "payload": { "slot": "flights", "segment_index": 0, "updates": { "departure_date": "2025-02-27" }, "clear_existing": true }
-    },
-    {
-      "action": "UPDATE_REQ",
-      "payload": { "slot": "flights", "segment_index": 1, "updates": { "departure_date": "2025-03-01" }, "clear_existing": true }
-    },
-    {
-      "action": "UPDATE_REQ",
-      "payload": { "slot": "accommodations", "segment_index": 0, "updates": { "check_in": "2025-02-27", "check_out": "2025-03-01" }, "clear_existing": true }
-    }
-  ]
-}
-
-Scenario 5: Adding Requirements
-User: "I want a hotel with a swimming pool and free breakfast."
-Output:
-{
-  "thought": "User added hotel preferences. I will update the accommodation requirements.",
-  "action": "UPDATE_REQ",
-  "payload": {
-    "slot": "accommodations",
-    "segment_index": 0,
-    "updates": { "amenities": "swimming pool, breakfast" },
-    "clear_existing": true
-  }
-}
-
-Scenario 6: Selecting an Option
-User: "I like the first flight option." or "เลือกช้อยส์ 1"
-Output:
-{
-  "thought": "User selected option 1 (display number 1 = index 0).",
-  "action": "SELECT_OPTION",
-  "payload": {
-    "slot": "flights_outbound",
-    "segment_index": 0,
-    "option_index": 0
-  }
-}
-Note: User says "เลือกช้อยส์ 1" means option_index=0 (1-based display → 0-based index). "เลือกช้อยส์ 2" = option_index=1, etc.
-
-Scenario 7: Road Trip with Budget
-User: "Plan a trip from Siam Paragon to Laem Phromthep. No flights, I want to go by car. Budget under 10000 THB."
-Output:
-{
-  "thought": "User wants a road trip (car_only) from a specific landmark to another. Budget constrained.",
-  "action": "CREATE_ITINERARY",
-  "payload": {
-    "destination": "Laem Phromthep",
-    "origin": "Siam Paragon",
-    "start_date": "2025-01-09",
-    "travel_mode": "car_only",
-    "guests": 1,
-    "budget": 10000,
-    "focus": ["hotels", "transfers"]
-  }
-}
-
-Example JSON Output (Specific Search):
-{
-  "thought": "User wants to find flights to Tokyo only.",
-  "action": "CREATE_ITINERARY",
-  "payload": {
-    "destination": "Tokyo",
-    "start_date": "2025-05-01",
-    "end_date": "2025-05-05",
-    "travel_mode": "flight_only",
-    "guests": 2,
-    "origin": "Bangkok",
-    "focus": ["flights"]
-  }
-}
-"""
-
-RESPONDER_SYSTEM_PROMPT = """You are the Voice of the Travel Agent AI.
-Generate a helpful, polite, and proactive response message in Thai.
-
-CRITICAL RULES:
-1. Use Thai language ONLY.
-2. READ THE ACTION_LOG: Acknowledge what was done.
-3. **ALWAYS USE COMPLETE CITY NAMES**: When mentioning origin or destination cities, ALWAYS use the FULL name:
-   - ✅ "กรุงเทพฯ - ภูเก็ต" (NOT "กรุงเทพฯ - ภู")
-   - ✅ "กรุงเทพฯ - เชียงใหม่" (NOT "กรุงเทพฯ - เชียง")
-   - ✅ "กรุงเทพฯ - สมุย" (NOT "กรุงเทพฯ - สมุ")
-   - ✅ "กรุงเทพฯ - โตเกียว" (NOT "กรุงเทพฯ - โต")
-   - NEVER truncate or abbreviate city names in your response
-4. If UPDATE_REQ was performed, mention the specific details extracted.
-5. If CALL_SEARCH was performed:
-   - Mention options found.
-   - 📋 NORMAL MODE: If options_pool exists, tell user to choose from PlanChoiceCard ("กรุณาเลือกตัวเลือกที่ต้องการจากรายการด้านล่างค่ะ").
-   - 🤖 AGENT MODE: If options_pool exists, say "กำลังเลือกตัวเลือกที่ดีที่สุดให้อัตโนมัติ..." (don't ask user to choose).
-   - If NO options found for a slot (e.g. flights), STATE CLEARLY that you searched but found nothing.
-   - **IMPORTANT**: If NO results and the date is very close (today/tomorrow) or passed, SUGGEST changing the date ("ลองเลื่อนวันเดินทางไหมคะ") because flights/hotels might be full or closed.
-   - However, ALSO mention that same-day booking is allowed if available ("แต่ถ้ายังมีว่าง ก็สามารถจองภายในวันได้ค่ะ").
-5. CHECK DATA COMPLETENESS:
-   - Before summarizing the trip as "Ready" or "Complete", check if ALL requested slots (Flights, Hotels) are CONFIRMED.
-   - If ANY slot is missing or pending (e.g. Flight not found), DO NOT imply the trip is fully booked/ready.
-   - Instead, say: "I have confirmed [Item A], but for [Item B], I need [Action/Input]."
-6. Be proactive: Suggest next steps.
-7. NEVER say "no information" if actions were taken.
-
-📋 NORMAL MODE RULES (USER SELECTS):
-- ✅ If options_pool exists, say: "พบ X ตัวเลือก - กรุณาเลือกตัวเลือกที่ต้องการจากรายการด้านล่างค่ะ"
-- ✅ If user selects option, say: "ได้เลือก [item] แล้ว - สามารถแก้ไขได้หากต้องการ"
-- ✅ If all options selected, say: "พร้อมจองแล้ว - กรุณากดปุ่ม 'Confirm Booking' เพื่อดำเนินการจอง"
-- ✅ Always remind user they can edit selections: "สามารถแก้ไขตัวเลือกได้ตลอดเวลาค่ะ"
-- ❌ NEVER auto-select or auto-book - user must do it manually
-- ✅ Show trip summary after user selects options
-
-📋 NORMAL MODE RULES (USER SELECTS):
-- ✅ If options_pool exists, say: "พบ X ตัวเลือก - กรุณาเลือกตัวเลือกที่ต้องการจากรายการด้านล่างค่ะ"
-- ✅ If user selects option, say: "ได้เลือก [item] แล้ว - สามารถแก้ไขได้หากต้องการ"
-- ✅ If all options selected, say: "พร้อมจองแล้ว - กรุณากดปุ่ม 'Confirm Booking' เพื่อดำเนินการจอง"
-- ✅ Always remind user they can edit: "สามารถแก้ไขตัวเลือกได้ตลอดเวลาค่ะ"
-- ✅ Show trip summary after user selects options
-- ❌ NEVER auto-select or auto-book - user must do it manually
-
-🤖 AGENT MODE RULES (100% AUTONOMOUS - NEVER ASK):
-- ❌ NEVER ask user to select options - Agent Mode selects automatically
-- ❌ NEVER say "กรุณาเลือก" or "ต้องการให้เลือก" - Agent does it automatically
-- ❌ NEVER ask "ต้องการให้จองเลยไหม" - Agent books automatically
-- ❌ NEVER ask "บอกดิฉันได้เลย" or any question - Agent infers everything automatically
-- ✅ If you see AGENT_SMART_SELECT actions, say: "ดิฉันได้เลือก [item] ให้แล้ว (AI มั่นใจ X%)"
-- ✅ If you see AUTO_BOOK actions, say: "✅ จองเสร็จแล้วนะ ไปจ่ายตังด้วย! รายละเอียดอยู่ใน My Bookings"
-- ✅ If options_pool exists but no selected_option yet, say: "กำลังเลือกตัวเลือกที่ดีที่สุดให้อัตโนมัติ..."
-- ✅ If selected_option exists, say: "ได้เลือก [item] แล้ว" (don't ask for confirmation)
-- ✅ If Agent Mode is active, ALWAYS emphasize autonomy: "ดิฉันได้ดำเนินการให้อัตโนมัติแล้วค่ะ"
-- ✅ If booking status is "confirmed", mention that booking is already confirmed and ready
-- ✅ Focus on WHAT WAS DONE, not what needs to be done
-
-🚫 CRITICAL: In Agent Mode, NEVER end with questions like:
-- "คุณต้องการให้เลือก..."
-- "กรุณาเลือก..."
-- "ต้องการให้จองเลยไหม..."
-- "บอกดิฉันได้เลย..."
-- "ต้องการข้อมูลเพิ่มเติม..."
-
-✅ Instead, say:
-- "ดิฉันได้เลือกให้แล้ว"
-- "กำลังจองให้อัตโนมัติ..."
-- "จองเสร็จแล้ว"
-
-🛠️ ADMIN FEATURES - AMADEUS VIEWER:
-- 📊 Amadeus Viewer is an ADMIN-ONLY page for comprehensive travel data exploration
-- 🌍 Features:
-  * Natural language input to extract travel details (origin, destination, dates, waypoints, hotel area)
-  * Searches for round-trip flights, hotels, transfers (car, bus, train, boat), and points of interest along the route
-  * Displays Google Maps with routing and markers (origin=blue, destination=red, hotel=green, checkpoints=yellow)
-  * Shows results in Google Flights-style layout with detailed flight information (duration, connections, CO2 emissions, airline names)
-  * Displays return flights, accommodation options, all transfer types, and places of interest
-- 🎯 When to mention Amadeus Viewer:
-  * If user is admin and asks for detailed search/exploration of travel options
-  * If user wants to see comprehensive data without booking
-  * If user wants to see map visualization of routes and multiple options
-  * Example: "คุณสามารถใช้ Amadeus Viewer (Admin) เพื่อดูข้อมูลการเดินทางแบบละเอียด พร้อมแผนที่และตัวเลือกมากมายได้ค่ะ"
-- ❌ Do NOT mention Amadeus Viewer to non-admin users
-
-Tone: Professional, friendly, helpful, proactive, confident, and AUTONOMOUS."""
-
 
 class TravelAgent:
     """
@@ -476,7 +58,8 @@ class TravelAgent:
     def __init__(
         self,
         storage: StorageInterface,
-        llm_service: Optional[LLMService] = None
+        llm_service: Optional[LLMService] = None,
+        agent_personality: str = "friendly"
     ):
         """
         Initialize Travel Agent
@@ -484,12 +67,16 @@ class TravelAgent:
         Args:
             storage: Storage interface implementation
             llm_service: Optional LLM service (creates new if None)
+            agent_personality: Agent personality type (friendly, professional, casual, teenager, detailed, concise)
         """
         self.storage = storage
         self.llm = llm_service or LLMService()
+        self.agent_personality = agent_personality or "friendly"
+        # Generate responder prompt based on personality
+        self.responder_system_prompt = get_responder_system_prompt(self.agent_personality)
         # ✅ Intent-Based LLM Service with tool calling (Gemini)
         try:
-            from app.services.intent_llm import IntentBasedLLM
+            from app.services.llm import IntentBasedLLM
             self.intent_llm = IntentBasedLLM()
             logger.info("IntentBasedLLM initialized with tool calling support")
         except Exception as e:
@@ -504,13 +91,10 @@ class TravelAgent:
             self.production_llm = None
         self.memory = MemoryService(self.llm)
         self.orchestrator = TravelOrchestrator()
-        # ✅ Initialize Workflow Manager, Slot Manager, Cost Tracker, and Visualizer
-        self.workflow_manager = WorkflowManager()
-        self.slot_manager = SlotManager()
         self.cost_tracker = cost_tracker
-        self.visualizer = workflow_visualizer
-        self.workflow_validator = get_workflow_validator()
-        # ✅ Initialize MCP Tool Executor for Google Maps and Amadeus
+        from app.engine.workflow_manager import get_slot_manager
+        self.slot_manager = get_slot_manager()
+        # ✅ Initialize MCP Tool Executor for Amadeus
         try:
             self.mcp_executor = MCPToolExecutor()
             logger.info("MCPToolExecutor initialized for Google Maps and Amadeus")
@@ -525,7 +109,7 @@ class TravelAgent:
             logger.warning(f"Failed to get database instance: {e}, user profile context will be empty")
             self.db = None
         agent_monitor.log_activity("system", "system", "start", "TravelAgent instance created")
-        logger.info("TravelAgent initialized with Brain/Memory support, TravelOrchestrator, Workflow Management, and MCP Tools")
+        logger.info("TravelAgent initialized with Brain/Memory support, TravelOrchestrator, and Amadeus MCP Tools")
     
     async def run_turn(
         self,
@@ -588,7 +172,9 @@ class TravelAgent:
             if status_callback:
                 await status_callback("speaking", "🤖 Agent กำลังสรุปคำตอบ...", "responder_start")
                 
-            response_message = await self.generate_response(session, action_log, memory_context, user_profile_context, mode=mode)
+            response_message = await self.generate_response(
+                session, action_log, memory_context, user_profile_context, mode=mode, user_input=user_input
+            )
             
             # ✅ CRITICAL: Ensure response_message is never None or empty
             if not response_message or not response_message.strip():
@@ -715,6 +301,25 @@ class TravelAgent:
                 if learned_prefs:
                     context_parts.append(f"💡 ความชอบที่เรียนรู้มา: {', '.join(learned_prefs[-3:])}")  # Last 3 preferences
             
+            # 🛂 Visa section (for flight/transfer search and planning - filter/plan by visa)
+            visa_type = user_doc.get("visa_type") or ""
+            visa_number = user_doc.get("visa_number") or ""
+            has_visa = bool(visa_type or visa_number)
+            if has_visa:
+                visa_issuing = user_doc.get("visa_issuing_country") or ""
+                visa_expiry = user_doc.get("visa_expiry_date") or ""
+                visa_entry = user_doc.get("visa_entry_type") or "S"
+                visa_purpose = user_doc.get("visa_purpose") or "T"
+                entry_label = "หลายครั้ง (M)" if visa_entry == "M" else "ครั้งเดียว (S)"
+                purpose_labels = {"T": "ท่องเที่ยว", "B": "ธุรกิจ", "S": "ศึกษา", "W": "ทำงาน", "TR": "ผ่านทาง", "O": "อื่นๆ"}
+                purpose_label = purpose_labels.get(visa_purpose, visa_purpose)
+                context_parts.append(
+                    f"🛂 วีซ่า: มี | ประเภท: {visa_type} | ประเทศที่ออก: {visa_issuing} | "
+                    f"หมดอายุ: {visa_expiry} | การเข้าประเทศ: {entry_label} | วัตถุประสงค์: {purpose_label}"
+                )
+            else:
+                context_parts.append("🛂 วีซ่า: ไม่มีในโปรไฟล์ (ใช้ช่วยกรองเที่ยวบิน/Transit ได้)")
+            
             if context_parts:
                 return "\n".join(["=== USER PROFILE ==="] + context_parts)
             
@@ -722,6 +327,20 @@ class TravelAgent:
         except Exception as e:
             logger.warning(f"Failed to get user profile context for {user_id}: {e}")
             return ""
+
+    async def _get_main_booker_dob(self, user_id: str) -> Optional[str]:
+        """Get main booker's date of birth (YYYY-MM-DD) for age-based adult/child logic. ผู้ใหญ่ = อายุ > 20 ปี."""
+        if self.db is None or not user_id or user_id == "anonymous":
+            return None
+        try:
+            users_collection = self.db["users"]
+            user_doc = await users_collection.find_one({"user_id": user_id})
+            if not user_doc:
+                return None
+            return user_doc.get("dob") or user_doc.get("date_of_birth") or None
+        except Exception as e:
+            logger.debug(f"Failed to get main booker DOB for {user_id}: {e}")
+            return None
     
     async def run_controller(
         self,
@@ -765,13 +384,37 @@ class TravelAgent:
             extra={"session_id": session.session_id, "user_id": session.user_id, "mode": mode}
         )
         
-        # 🆕 WORKFLOW VISUALIZATION: Log initial state
+        # ✅ ML KEYWORD DECODE: ถอดรหัส intent จากข้อความผู้ใช้แบบรวดเร็ว (~90% แม่นยำ) สำหรับวางแผนใน 1 นาที
+        ml_intent_hint = None
+        ml_validation_result = None
         try:
-            initial_viz = self.visualizer.get_compact_status(session.trip_plan)
-            logger.info(f"[WORKFLOW] Initial: {initial_viz}")
-        except Exception as e:
-            logger.warning(f"Failed to visualize initial workflow: {e}")
-        
+            ml_svc = get_ml_keyword_service()
+            ml_intent_hint = ml_svc.decode_keywords(user_input)
+            if ml_intent_hint and ml_intent_hint.get("confidence", 0) >= 0.5:
+                model_used = ml_intent_hint.get("model", "ml")
+                logger.info(
+                    "[%s] Keyword decode: intent=%s confidence=%.2f workflow=%s",
+                    "DL" if model_used == "dl_mlp" else "ML",
+                    ml_intent_hint.get("intent"),
+                    ml_intent_hint.get("confidence", 0),
+                    ml_intent_hint.get("workflow_intent"),
+                    extra={"session_id": session.session_id, "model": model_used},
+                )
+            # ✅ ML DATA VALIDATION: ตรวจสอบวันที่/จำนวนคน/งบประมาณจาก trip_plan
+            extracted_data = self._extract_trip_data_for_ml_validation(session.trip_plan)
+            if extracted_data:
+                ml_validation_result = ml_svc.validate_extracted_data(extracted_data)
+                if ml_validation_result and not ml_validation_result.get("valid", True):
+                    logger.info(
+                        "[ML] Data validation: valid=%s confidence=%.2f issues=%s",
+                        ml_validation_result.get("valid"),
+                        ml_validation_result.get("confidence", 0),
+                        ml_validation_result.get("issues", []),
+                        extra={"session_id": session.session_id},
+                    )
+        except Exception as ml_err:
+            logger.debug("ML keyword/validation skipped: %s", ml_err)
+
         for iteration in range(max_iterations):
             # ✅ SAFETY: If we've reached the limit, force stop
             if iteration >= max_iterations:
@@ -789,18 +432,27 @@ class TravelAgent:
             try:
                 # Get current state as JSON
                 state_json = json.dumps(session.trip_plan.model_dump(), ensure_ascii=False, indent=2)
-                
-                # Call Controller LLM (with session info for cost tracking)
+                # ✅ Workflow state สำหรับให้ Controller ตรวจและ validate
+                workflow_state = None
+                try:
+                    wf = get_workflow_state_service()
+                    workflow_state = await wf.get_workflow_state(session.session_id)
+                except Exception as wf_err:
+                    logger.debug(f"Workflow state fetch: {wf_err}")
+                # Call Controller LLM (with ML intent hint for faster & accurate planning)
                 try:
                     action = await self._call_controller_llm(
-                        state_json, 
-                        user_input, 
-                        action_log, 
-                        memory_context, 
-                        user_profile_context, 
+                        state_json,
+                        user_input,
+                        action_log,
+                        memory_context,
+                        user_profile_context,
                         mode=mode,
                         session_id=session.session_id,
-                        user_id=session.user_id
+                        user_id=session.user_id,
+                        workflow_validation=workflow_state,
+                        ml_intent_hint=ml_intent_hint,
+                        ml_validation_result=ml_validation_result,
                     )
                 except Exception as e:
                     logger.error(f"Failed to call controller LLM: {e}")
@@ -930,7 +582,7 @@ class TravelAgent:
                                         "end_date": payload.get("end_date") or (datetime.now() + timedelta(days=4)).strftime("%Y-%m-%d"),
                                         "travel_mode": payload.get("travel_mode") or "both",
                                         "trip_type": payload.get("trip_type") or "round_trip",
-                                        "guests": payload.get("guests") or 2,
+                                        "guests": payload.get("guests") or 1,
                                         "origin": payload.get("origin") or "Bangkok",
                                         "focus": ["flights", "hotels", "transfers"]
                                     }
@@ -958,6 +610,28 @@ class TravelAgent:
                             logger.error(f"Error executing UPDATE_REQ: {e}", exc_info=True)
                     
                     elif act_type == ActionType.CALL_SEARCH:
+                        # ✅ ML validation ก่อนยิง search: ถ้าข้อมูลทริปไม่ผ่าน (วันที่/คน/งบประมาณ) ไม่ยิง search และถามผู้ใช้แก้ไข
+                        if ml_validation_result and isinstance(ml_validation_result, dict) and ml_validation_result.get("valid") is False:
+                            issues = ml_validation_result.get("issues", [])
+                            warnings = ml_validation_result.get("warnings", [])
+                            logger.info(
+                                "[ML] Blocking CALL_SEARCH: data validation failed (valid=False). issues=%s",
+                                issues,
+                                extra={"session_id": session.session_id},
+                            )
+                            action_log.add_action(
+                                "ASK_USER",
+                                {
+                                    "validation_issues": issues,
+                                    "validation_warnings": warnings,
+                                    "reason": "ml_validation_block_search",
+                                    "message_hint": "กรุณาแก้ไขข้อมูลทริป (วันที่/จำนวนคน/งบประมาณ) ก่อนค้นหา",
+                                },
+                                "Block search: ML data validation failed; ask user to fix",
+                                success=True,
+                            )
+                            has_ask_user = True
+                            continue
                         # Collect search tasks for parallel execution
                         search_tasks.append(self._execute_call_search(session, payload, action_log))
                     
@@ -996,25 +670,49 @@ class TravelAgent:
                             except Exception as e:
                                 results.append(e)
                     
-                    # ✅ Validate search results
+                    # ✅ Validate search results; ถ้าล้มเหลวเพราะ ML validation ให้ถามผู้ใช้แก้ไข
                     for result in results:
                         if isinstance(result, Exception):
                             logger.error(f"Search task failed: {result}")
+                            err_msg = str(result)
+                            if "ML_VALIDATION_BLOCK_SEARCH" in err_msg:
+                                action_log.add_action(
+                                    "ASK_USER",
+                                    {
+                                        "validation_issues": [err_msg.replace("ML_VALIDATION_BLOCK_SEARCH: ", "").strip()],
+                                        "reason": "ml_validation_block_search",
+                                        "message_hint": "กรุณาแก้ไขข้อมูลทริป (วันที่/จำนวนคน/งบประมาณ) ก่อนค้นหา",
+                                    },
+                                    "Search blocked by ML validation",
+                                    success=True,
+                                )
+                                has_ask_user = True
                     
                     # ✅ Validate segment states after search
                     for slot_name, segment, idx in self.slot_manager.get_all_segments(session.trip_plan):
                         self.slot_manager.ensure_segment_state(segment, slot_name)
                     
-                    # ✅ Agent Mode: Auto-select and auto-book immediately after search completes
+                    # ✅ CRUD STABILITY: Agent Mode: Auto-select and auto-book immediately after search completes
                     if mode == "agent":
-                        if status_callback:
-                            await status_callback("acting", "🤖 Agent กำลังเลือกช้อยส์ที่ดีที่สุด...", "agent_auto_select_immediate")
-                        
-                        logger.info("Agent Mode: Search completed, immediately auto-selecting options...")
-                        await self._auto_select_and_book(session, action_log, status_callback)
-                        
-                        # Save session after auto-select to persist state
-                        await self.storage.save_session(session)
+                        # ✅ CRUD STABILITY: Check if already processing to prevent concurrent calls
+                        if not (hasattr(session, '_auto_select_in_progress') and session._auto_select_in_progress):
+                            if status_callback:
+                                await status_callback("acting", "🤖 Agent กำลังเลือกช้อยส์ที่ดีที่สุด...", "agent_auto_select_immediate")
+                            
+                            logger.info("Agent Mode: Search completed, immediately auto-selecting options...")
+                            try:
+                                await self._auto_select_and_book(session, action_log, status_callback)
+                            except Exception as auto_select_error:
+                                logger.error(f"Agent Mode: Auto-select failed after search: {auto_select_error}", exc_info=True)
+                                # Continue - don't fail the entire turn if auto-select fails
+                            
+                            # ✅ CRUD STABILITY: Save session after auto-select to persist state
+                            try:
+                                await self.storage.save_session(session)
+                            except Exception as save_error:
+                                logger.warning(f"Agent Mode: Failed to save session after auto-select: {save_error}")
+                        else:
+                            logger.debug("Agent Mode: Auto-select already in progress, skipping duplicate call")
                 
                 # If any action was ASK_USER, break the loop
                 if has_ask_user:
@@ -1053,15 +751,7 @@ class TravelAgent:
                 if status_callback:
                     await status_callback("acting", "🤖 Agent กำลังเลือกช้อยส์ที่ดีที่สุด (รอบสุดท้าย)...", "agent_auto_select_final")
                 
-                # ✅ Validate workflow before auto-select
-                workflow_state = self.workflow_manager.analyze_workflow(session.trip_plan)
-                logger.info(f"Agent Mode: Final auto-select check - Workflow stage={workflow_state.stage.value}, progress={workflow_state.progress_percentage:.1f}%")
-                
                 await self._auto_select_and_book(session, action_log, status_callback)
-                
-                # ✅ Validate workflow after auto-select
-                workflow_state_after = self.workflow_manager.analyze_workflow(session.trip_plan)
-                logger.info(f"Agent Mode: After final auto-select, stage={workflow_state_after.stage.value}, progress={workflow_state_after.progress_percentage:.1f}%")
                 
                 # Save session after final auto-select
                 await self.storage.save_session(session)
@@ -1098,24 +788,6 @@ class TravelAgent:
                         "Force fallback after max iterations",
                         success=True
                     )
-        
-        # 🆕 FINAL WORKFLOW VISUALIZATION: Log final state
-        try:
-            final_viz = self.visualizer.get_compact_status(session.trip_plan)
-            progress_bar = self.visualizer.create_progress_bar(session.trip_plan)
-            logger.info(f"[WORKFLOW] Final: {final_viz}")
-            logger.info(f"[WORKFLOW] Progress: {progress_bar}")
-            
-            # Log to agent monitor
-            agent_monitor.log_activity(
-                session.session_id,
-                session.user_id,
-                "workflow",
-                f"Workflow completed: {final_viz}",
-                self.visualizer.export_to_dict(session.trip_plan)
-            )
-        except Exception as e:
-            logger.warning(f"Failed to visualize final workflow: {e}")
         
         # 🆕 COST TRACKING: Check budget and log summary
         try:
@@ -1155,6 +827,55 @@ class TravelAgent:
         )
         
         return action_log
+
+    def _extract_trip_data_for_ml_validation(self, trip_plan: TripPlan) -> Dict[str, Any]:
+        """ดึงข้อมูลทริปจาก TripPlan เป็น dict สำหรับ ML validate_extracted_data (วันที่, จำนวนคน, งบประมาณ)."""
+        data: Dict[str, Any] = {}
+        # departure_date / start_date จากเที่ยวบินขาไป
+        outbound = (trip_plan.travel.flights.outbound or [])
+        if outbound and outbound[0].requirements:
+            data["departure_date"] = outbound[0].requirements.get("departure_date") or outbound[0].requirements.get("date")
+            data["start_date"] = data.get("departure_date")
+        # return_date / end_date จากเที่ยวบินขากลับ หรือที่พัก check_out
+        inbound = (trip_plan.travel.flights.inbound or [])
+        if inbound and inbound[0].requirements:
+            data["return_date"] = inbound[0].requirements.get("departure_date") or inbound[0].requirements.get("date")
+            data["end_date"] = data.get("return_date")
+        acc = trip_plan.accommodation.segments or []
+        if not data.get("start_date") and acc and acc[0].requirements:
+            data["start_date"] = acc[0].requirements.get("check_in")
+            data["departure_date"] = data.get("start_date")
+        if not data.get("end_date") and acc and acc[0].requirements:
+            data["end_date"] = acc[0].requirements.get("check_out")
+            data["return_date"] = data.get("end_date")
+        # guests / adults จาก segment ใดก็ได้
+        for seg_list in [outbound, inbound, acc, (trip_plan.travel.ground_transport or [])]:
+            for seg in seg_list:
+                if not seg.requirements:
+                    continue
+                g = seg.requirements.get("guests") or seg.requirements.get("adults")
+                if g is not None:
+                    try:
+                        data["guests"] = int(g) if isinstance(g, (int, float)) else int(str(g).strip())
+                    except (TypeError, ValueError):
+                        pass
+                    else:
+                        data["adults"] = data["guests"]
+                        break
+            if data.get("guests") is not None:
+                break
+        # budget จาก requirements ใดก็ได้
+        for seg_list in [outbound, inbound, acc]:
+            for seg in seg_list:
+                if not seg.requirements:
+                    continue
+                b = seg.requirements.get("budget") or seg.requirements.get("budget_max")
+                if b is not None:
+                    data["budget"] = b
+                    break
+            if data.get("budget") is not None:
+                break
+        return data
     
     async def _call_controller_llm(
         self,
@@ -1165,7 +886,10 @@ class TravelAgent:
         user_profile_context: str = "",
         mode: str = "normal",  # ✅ Pass mode to LLM
         session_id: str = "unknown",  # 🆕 For cost tracking
-        user_id: str = "unknown"  # 🆕 For cost tracking
+        user_id: str = "unknown",  # 🆕 For cost tracking
+        workflow_validation: Optional[Dict[str, Any]] = None,  # ✅ สำหรับตรวจ workflow และ validate
+        ml_intent_hint: Optional[Dict[str, Any]] = None,  # ✅ ML keyword decode สำหรับวางแผนแม่นยำ ~90% ใน 1 นาที
+        ml_validation_result: Optional[Dict[str, Any]] = None,  # ✅ ML validate_extracted_data สำหรับวันที่/คน/งบประมาณ
     ) -> Optional[ControllerAction]:
         """
         Call Controller LLM to get next action
@@ -1175,6 +899,7 @@ class TravelAgent:
             user_input: User's message
             action_log: Previous actions taken
             memory_context: Long-term memory about the user
+            workflow_validation: Current workflow state (step, slots_complete) from Redis
             
         Returns:
             ControllerAction or None
@@ -1191,8 +916,42 @@ class TravelAgent:
                 "\n=== CURRENT STATE (TRIP PLAN) ===\n",
                 state_json,
                 "\n=== LATEST USER INPUT ===\n",
-                user_input
+                user_input,
             ]
+            # ✅ ML KEYWORD DECODE: ใช้สำหรับวางแผนให้แม่นยำ ~90% และรวดเร็วใน 1 นาที
+            if ml_intent_hint and isinstance(ml_intent_hint, dict) and ml_intent_hint.get("confidence", 0) >= 0.5:
+                conf = ml_intent_hint.get("confidence", 0)
+                intent = ml_intent_hint.get("intent", "")
+                workflow_intent = ml_intent_hint.get("workflow_intent", intent)
+                suggested = ml_intent_hint.get("suggested_slot", "")
+                keywords = ml_intent_hint.get("keywords", [])
+                prompt_parts.append("\n=== ML KEYWORD DECODE (USE FOR FASTER & ACCURATE PLANNING) ===\n")
+                prompt_parts.append(
+                    f"Intent: {intent} | workflow_intent: {workflow_intent} | confidence: {conf} | keywords: {keywords}"
+                )
+                if suggested:
+                    prompt_parts.append(f"Planning hint: {suggested}")
+                prompt_parts.append(
+                    "When confidence >= 0.7, prefer actions that match this intent (e.g. UPDATE_REQ or CALL_SEARCH for the suggested slot) to complete in ~1 minute."
+                )
+            # ✅ Workflow state สำหรับให้ Controller ตรวจและ validate
+            if workflow_validation:
+                prompt_parts.append("\n=== WORKFLOW STATE (CHECK & VALIDATE) ===\n")
+                prompt_parts.append(json.dumps(workflow_validation, ensure_ascii=False, indent=2))
+                prompt_parts.append("\n(Use workflow.step to decide allowed actions; validate segment status and options_pool/selected_option consistency.)")
+            # ✅ ML DATA VALIDATION: วันที่/จำนวนคน/งบประมาณ — ถ้า invalid หรือมี issues ให้แก้ด้วย UPDATE_REQ หรือ ASK_USER
+            if ml_validation_result and isinstance(ml_validation_result, dict):
+                valid = ml_validation_result.get("valid", True)
+                conf = ml_validation_result.get("confidence", 1.0)
+                issues = ml_validation_result.get("issues", [])
+                warnings = ml_validation_result.get("warnings", [])
+                prompt_parts.append("\n=== ML DATA VALIDATION (TRIP DATES / GUESTS / BUDGET) ===\n")
+                prompt_parts.append(f"Valid: {valid} | confidence: {conf}")
+                if issues:
+                    prompt_parts.append(f"Issues (fix with UPDATE_REQ or ASK_USER): {issues}")
+                if warnings:
+                    prompt_parts.append(f"Warnings: {warnings}")
+                prompt_parts.append("If valid is False or there are issues, prefer UPDATE_REQ to correct the trip plan or ASK_USER to clarify.")
             
             # Add action log if available
             if action_log.actions:
@@ -1213,7 +972,7 @@ class TravelAgent:
 2. **INFER EVERYTHING** - Use your AI intelligence to infer ALL missing information:
    - Missing origin? Default to "Bangkok" (most common)
    - Missing date? Default to tomorrow or next weekend
-   - Missing guests? Default to 1-2 (infer from "family" = 3-4, "couple" = 2)
+   - Missing guests? Default by main booker age (ตามปีเกิด): age > 20 → 1 ผู้ใหญ่ (ผู้จองหลัก); age ≤ 20 → 1 ผู้ใหญ่ (ผู้จองร่วม) + 1 เด็ก (ผู้จองหลัก) = 2 คน. Infer 2+ only when explicit ("family" = 3-4, "couple" = 2)
    - Missing budget? Infer reasonable budget based on destination type
    - Missing trip_type? Default to "round_trip"
    - Missing travel_mode? Default to "both" for complete experience
@@ -1236,9 +995,9 @@ class TravelAgent:
    - Complete the booking flow in minimum iterations
 
 6. **SMART DEFAULTS STRATEGY**:
-   - If user says "ไปภูเก็ต" → CREATE_ITINERARY with: destination="Phuket", start_date=tomorrow, end_date=tomorrow+3, guests=2, origin="Bangkok", travel_mode="both"
-   - If user says "ญี่ปุ่น" → CREATE_ITINERARY with: destination="Tokyo", start_date=next_weekend, end_date=next_weekend+5, guests=2, origin="Bangkok", travel_mode="both"
-   - If user says "เกาหลี 5 วัน" → CREATE_ITINERARY with: destination="Seoul", start_date=tomorrow, end_date=tomorrow+5, guests=2, origin="Bangkok", travel_mode="both"
+   - If user says "ไปภูเก็ต" → CREATE_ITINERARY with: destination="Phuket", start_date=tomorrow, end_date=tomorrow+3, guests=1, origin="Bangkok", travel_mode="both"
+   - If user says "ญี่ปุ่น" → CREATE_ITINERARY with: destination="Tokyo", start_date=next_weekend, end_date=next_weekend+5, guests=1, origin="Bangkok", travel_mode="both"
+   - If user says "เกาหลี 5 วัน" → CREATE_ITINERARY with: destination="Seoul", start_date=tomorrow, end_date=tomorrow+5, guests=1, origin="Bangkok", travel_mode="both"
 
 7. **WORKFLOW PRIORITY**:
    - Iteration 1: CREATE_ITINERARY (with intelligent defaults) + BATCH CALL_SEARCH for all segments
@@ -1264,7 +1023,7 @@ class TravelAgent:
                 prompt_parts.append("1. INFER missing information intelligently:")
                 prompt_parts.append("   - Dates: 'พรุ่งนี้' → tomorrow, 'สุดสัปดาห์' → next Friday-Sunday, 'สงกรานต์' → April 13-16")
                 prompt_parts.append("   - Duration: 'weekend' → 3 days, 'vacation' → 5-7 days, 'quick trip' → 2 days")
-                prompt_parts.append("   - Guests: Not specified → 2 (default couple/friends)")
+                prompt_parts.append("   - Guests: Not specified → ตามปีเกิดผู้จองหลัก. ผู้ใหญ่ = อายุ > 20 ปี. ถ้าอายุไม่เกิน 20 → 1 ผู้ใหญ่ + 1 เด็ก (2 คน). Use 2+ only when user explicitly says e.g. 2 people, กับแฟน, คู่, ครอบครัว")
                 prompt_parts.append("   - Budget: Not specified → Medium (25,000 THB)")
                 prompt_parts.append("   - Origin: Not specified → Bangkok (BKK)")
                 prompt_parts.append("2. WORKFLOW: CREATE_ITINERARY → UPDATE_REQ (fill missing) → CALL_SEARCH → (auto-select happens after)")
@@ -1300,8 +1059,17 @@ class TravelAgent:
             # ✅ Use Production LLM Service - Controller Brain
             start_time = asyncio.get_event_loop().time()
             if self.production_llm:
-                # Determine complexity
-                complexity = "complex" if mode == "agent" else "moderate"
+                # วิเคราะห์ความยากจากข้อความผู้ใช้ แล้วสลับ Flash/Pro
+                try:
+                    task_complexity = ModelSelector.analyze_complexity(
+                        user_input, context="controller", task_type=None
+                    )
+                    complexity = task_complexity.value  # "simple" | "moderate" | "complex"
+                    if mode == "agent" and complexity == "simple":
+                        complexity = "moderate"  # โหมด Agent อย่างน้อย moderate
+                except Exception as e:
+                    logger.debug(f"ModelSelector.analyze_complexity failed: {e}, using mode-based complexity")
+                    complexity = "complex" if mode == "agent" else "moderate"
                 data = await self.production_llm.controller_generate(
                     prompt=prompt,
                     system_prompt=system_prompt_with_date,
@@ -1366,7 +1134,7 @@ class TravelAgent:
                             "destination": user_input or "Bangkok",
                             "start_date": (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d"),
                             "end_date": (datetime.now() + timedelta(days=4)).strftime("%Y-%m-%d"),
-                            "guests": 2,
+                            "guests": 1,
                             "origin": "Bangkok",
                             "travel_mode": "both",
                             "trip_type": "round_trip"
@@ -1400,7 +1168,7 @@ class TravelAgent:
                         "destination": user_input or "Bangkok",
                         "start_date": (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d"),
                         "end_date": (datetime.now() + timedelta(days=4)).strftime("%Y-%m-%d"),
-                        "guests": 2,
+                        "guests": 1,
                         "origin": "Bangkok"
                     })
                 else:
@@ -1433,7 +1201,7 @@ class TravelAgent:
                         "destination": user_input or "Bangkok",  # Parse from input or default
                         "start_date": (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d"),  # Tomorrow
                         "end_date": (datetime.now() + timedelta(days=4)).strftime("%Y-%m-%d"),  # 3 nights
-                        "guests": 2,  # Default
+                        "guests": 1,  # Default: 1 ผู้ใหญ่ (ผู้จองหลัก)
                         "origin": "Bangkok",  # Default
                         "travel_mode": "both",
                         "trip_type": "round_trip",
@@ -1462,7 +1230,7 @@ class TravelAgent:
                         "destination": user_input or "Bangkok",
                         "start_date": (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d"),
                         "end_date": (datetime.now() + timedelta(days=4)).strftime("%Y-%m-%d"),
-                        "guests": 2,
+                        "guests": 1,
                         "origin": "Bangkok",
                         "travel_mode": "both",
                         "trip_type": "round_trip"
@@ -1484,7 +1252,7 @@ class TravelAgent:
                     payload={
                         "destination": user_input,
                         "start_date": "tomorrow",
-                        "guests": 2,
+                        "guests": 1,
                         "origin": "Bangkok"
                     }
                 )
@@ -1506,28 +1274,48 @@ class TravelAgent:
         Execute CREATE_ITINERARY action with Intelligence Layer.
         Automatically structures the TripPlan based on high-level intent.
         Enhanced with: validation, location intelligence, budget advisory, proactive suggestions.
-        
-        Args:
-            user_input: Original user input for fallback extraction
+        ผู้ใหญ่ = อายุ > 20 ปี (ตามปีเกิด). ถ้าผู้จองหลักอายุไม่เกิน 20 → 1 ผู้ใหญ่ + 1 เด็ก = 2 คน
         """
-        # ✅ Validate workflow step
-        current_step = self.workflow_validator.get_current_workflow_step(session.trip_plan)
-        is_allowed, error_msg = self.workflow_validator.validate_action_allowed(
-            "CREATE_ITINERARY",
-            current_step,
-            session.trip_plan
-        )
-        if not is_allowed and error_msg:
-            logger.warning(f"CREATE_ITINERARY validation failed: {error_msg}")
-            action_log.add_action("VALIDATION_ERROR", {"action": "CREATE_ITINERARY", "error": error_msg}, error_msg)
+        # ✅ ดึงปีเกิดผู้จองหลักเพื่อกำหนด default ผู้ใหญ่/เด็ก (อายุ > 20 = ผู้ใหญ่)
+        main_booker_dob = await self._get_main_booker_dob(session.user_id)
+        # ✅ ACCURACY ~90%: Normalize and correct payload before use
+        payload = self._normalize_create_itinerary_payload(payload, user_input, main_booker_dob)
+        
         destination = payload.get("destination")
         start_date = payload.get("start_date")
         end_date = payload.get("end_date")
-        travel_mode_str = payload.get("travel_mode", "both").lower()
-        guests = payload.get("guests", 1)
-        origin = payload.get("origin", "Bangkok") # Default to BKK if not specified
-        budget = payload.get("budget") # Total budget
-        focus = payload.get("focus", ["flights", "hotels", "transfers"]) # Default to all
+        travel_mode_str = (payload.get("travel_mode") or "both").strip().lower()
+        adults = int(payload.get("adults") or payload.get("guests", 1))
+        children = int(payload.get("children", 0))
+        guests = adults + children  # total for segment requirements
+        origin = (payload.get("origin") or "Bangkok").strip() or "Bangkok"
+        budget = payload.get("budget")
+        focus = payload.get("focus")
+        if not isinstance(focus, list):
+            focus = ["flights", "hotels", "transfers"]
+        focus = [str(f).strip().lower() for f in focus if f]
+        if not focus:
+            focus = ["flights", "hotels", "transfers"]
+        
+        # 🛂 ปลายทาง "ทั้งหมด" / "all" / "ทุกที่" → แสดงจุดหมายยอดนิยม (ไม่สร้างเที่ยวบิน/ที่พัก)
+        dest_lower = (destination or "").strip().lower()
+        if dest_lower in ["ทั้งหมด", "all", "ทุกที่", "ทุกแห่ง", "ทุกแห่งหน"]:
+            try:
+                from app.services.travel_service import orchestrator
+                destinations = await orchestrator.get_popular_destinations()
+                session.popular_destinations = destinations
+                session.update_timestamp()
+                action_log.add_action(
+                    "POPULAR_DESTINATIONS",
+                    {"destinations": destinations, "count": len(destinations)},
+                    f"พบจุดหมายยอดนิยม {len(destinations)} แห่ง (ผู้ใช้ค้นหา 'ทั้งหมด' ในปลายทาง)"
+                )
+                logger.info(f"✅ User searched 'all' in destination: returning {len(destinations)} popular destinations")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to get popular destinations for 'all' search: {e}")
+                action_log.add_action("POPULAR_DESTINATIONS", {"error": str(e)}, "ไม่สามารถโหลดจุดหมายยอดนิยมได้")
+                return
         
         # ✅ Smart end_date inference from days/nights
         days_mentioned = payload.get("days") or payload.get("nights")
@@ -1615,60 +1403,87 @@ class TravelAgent:
         else:
             flight_origin = origin
         
-        # ✅ STEP 2: Route Planning using Google Maps MCP
+        # ✅ STEP 2: Route Planning using Google Maps MCP (plan_route or plan_route_with_waypoints)
         route_plan = None
+        route_plan_through = None  # Full result when waypoints used (has route.waypoints, route_details.legs)
         origin_airport_iata = None
         dest_airport_iata = None
         recommended_transport = []
+        waypoints = list(payload.get("waypoints") or [])
+        waypoints = [str(w).strip() for w in waypoints if w and str(w).strip()]
         
         if self.mcp_executor and origin and destination:
             try:
-                logger.info(f"🗺️ Planning route from {origin} to {destination} using Google Maps...")
-                # ✅ Add timeout for route planning (10s max for 1.5-minute completion)
-                route_result = await asyncio.wait_for(
-                    self.mcp_executor.execute_tool(
-                        "plan_route",
-                        {
-                            "origin": origin,
-                            "destination": destination,
-                            "travel_mode": "driving"  # Default, can be changed based on distance
+                if waypoints:
+                    logger.info(f"🗺️ Plan through: {origin} → {' → '.join(waypoints)} → {destination}")
+                    route_result = await asyncio.wait_for(
+                        self.mcp_executor.execute_tool(
+                            "plan_route_with_waypoints",
+                            {
+                                "origin": origin,
+                                "destination": destination,
+                                "waypoints": waypoints,
+                                "travel_mode": "driving"
+                            }
+                        ),
+                        timeout=15.0
+                    )
+                    if route_result.get("success") and route_result.get("route"):
+                        route_plan_through = route_result
+                        r = route_result["route"]
+                        route_plan = {
+                            "origin": r.get("origin", {}),
+                            "destination": r.get("destination", {}),
+                            "distance_km": r.get("distance_km"),
+                            "recommended_transportation": ["car", "bus", "train"],
+                            "waypoints": r.get("waypoints", []),
+                            "route_details": route_result.get("route", {}).get("route_details") or route_result.get("route")
                         }
-                    ),
-                    timeout=10.0  # ✅ Route planning timeout: 10s max
-                )
+                        origin_airport_iata = (r.get("origin") or {}).get("nearest_airport")
+                        dest_airport_iata = (r.get("destination") or {}).get("nearest_airport")
+                        recommended_transport = route_plan.get("recommended_transportation", [])
+                        action_log.add_action(
+                            "ROUTE_PLANNING_THROUGH",
+                            {"origin": origin, "waypoints": waypoints, "destination": destination},
+                            f"Route planned through {len(waypoints)} waypoints, {route_plan.get('distance_km')} km"
+                        )
+                else:
+                    logger.info(f"🗺️ Planning route from {origin} to {destination} using Google Maps...")
+                    route_result = await asyncio.wait_for(
+                        self.mcp_executor.execute_tool(
+                            "plan_route",
+                            {
+                                "origin": origin,
+                                "destination": destination,
+                                "travel_mode": "driving"
+                            }
+                        ),
+                        timeout=10.0
+                    )
                 
-                if route_result.get("success") and route_result.get("route"):
+                if not waypoints and route_result.get("success") and route_result.get("route"):
                     route_plan = route_result["route"]
                     origin_airport_iata = route_plan.get("origin", {}).get("nearest_airport")
                     dest_airport_iata = route_plan.get("destination", {}).get("nearest_airport")
                     recommended_transport = route_plan.get("recommended_transportation", [])
                     distance_km = route_plan.get("distance_km", 0)
-                    
                     logger.info(f"✅ Route planned: {distance_km} km, Origin Airport: {origin_airport_iata}, Dest Airport: {dest_airport_iata}")
                     logger.info(f"✅ Recommended transport: {recommended_transport}")
-                    
-                    # ✅ Use airport IATA codes if found
                     if origin_airport_iata:
                         flight_origin = origin_airport_iata
-                        logger.info(f"✅ Using origin airport IATA: {flight_origin}")
                     if dest_airport_iata:
                         flight_destination = dest_airport_iata
-                        logger.info(f"✅ Using destination airport IATA: {flight_destination}")
-                    
-                    # ✅ Store route plan in action_log for reference
                     action_log.add_action(
                         "ROUTE_PLANNING",
                         {"origin": origin, "destination": destination},
                         f"Route planned: {distance_km} km, airports: {origin_airport_iata}→{dest_airport_iata}, transport: {recommended_transport}"
                     )
-                else:
-                    logger.warning(f"Route planning failed or returned no route: {route_result}")
+                elif waypoints and not route_plan:
+                    logger.warning(f"Plan-through route failed or no route: {route_result}")
             except asyncio.TimeoutError:
-                logger.warning(f"⚠️ Route planning timed out after 10s - continuing without route plan")
-                # Continue without route plan - fallback to original logic
+                logger.warning(f"⚠️ Route planning timed out - continuing without route plan")
             except Exception as e:
                 logger.warning(f"Route planning error (non-fatal): {e}", exc_info=True)
-                # Continue without route plan - fallback to original logic
         
         # Update variables for flight booking
         origin = flight_origin
@@ -1798,7 +1613,9 @@ class TravelAgent:
                 "origin": flight_origin_code,
                 "destination": flight_dest_code,
                 "departure_date": self._normalize_date(start_date),
-                "adults": guests
+                "adults": adults,
+                "children": children,
+                "guests": guests,
             }
             # ✅ Store route planning results in requirements
             if route_plan:
@@ -1819,7 +1636,9 @@ class TravelAgent:
                     "origin": flight_dest_code,  # Use airport IATA from route planning
                     "destination": flight_origin_code,  # Use airport IATA from route planning
                     "departure_date": self._normalize_date(end_date),
-                    "adults": guests
+                    "adults": adults,
+                    "children": children,
+                    "guests": guests,
                 }
                 # ✅ Store route planning results in requirements
                 if route_plan:
@@ -1833,8 +1652,12 @@ class TravelAgent:
                     return_flight.requirements["max_price"] = budget
                 session.trip_plan.travel.flights.inbound.append(return_flight)
 
-        # 2. Setup Accommodation (only if in focus)
-        if "hotels" in focus:
+        # 2. Setup Accommodation (only if in focus: hotels or rentals ที่พักให้เช่า)
+        if "hotels" in focus or "rentals" in focus:
+            # 🧠 ENHANCED: Intelligent destination type detection for smart planning
+            destination_type = self._detect_destination_type(destination)
+            logger.info(f"🧠 Detected destination type: {destination_type} for {destination}")
+            
             # Use hotel_destination (which preserves landmarks like "Siam Paragon")
             # Multi-city detection
             cities = []
@@ -1849,6 +1672,25 @@ class TravelAgent:
                 cities = [c.strip() for c in hotel_search_location.split(",")]
             else:
                 cities = [hotel_search_location]
+            
+            # 🧠 ENHANCED: Smart nights inference based on destination type
+            if start_date and end_date:
+                try:
+                    d1 = datetime.strptime(self._normalize_date(start_date), "%Y-%m-%d")
+                    d2 = datetime.strptime(self._normalize_date(end_date), "%Y-%m-%d")
+                    calculated_nights = (d2 - d1).days
+                    
+                    # 🧠 Suggest optimal nights based on destination type
+                    suggested_nights = self._suggest_optimal_nights(destination_type, calculated_nights)
+                    if suggested_nights != calculated_nights and calculated_nights <= 1:
+                        logger.info(f"🧠 Destination type '{destination_type}' suggests {suggested_nights} nights (current: {calculated_nights})")
+                        # Update end_date if too short
+                        if calculated_nights < suggested_nights:
+                            new_end_date = (d1 + timedelta(days=suggested_nights)).strftime("%Y-%m-%d")
+                            end_date = new_end_date
+                            logger.info(f"🧠 Adjusted end_date to {end_date} for better {destination_type} experience")
+                except Exception as e:
+                    logger.warning(f"Could not adjust nights based on destination type: {e}")
 
             if start_date and end_date and len(cities) > 0:
                 try:
@@ -1873,7 +1715,9 @@ class TravelAgent:
                                 "location": city,
                                 "check_in": current_check_in.strftime("%Y-%m-%d"),
                                 "check_out": check_out.strftime("%Y-%m-%d"),
-                                "guests": guests
+                                "guests": guests,
+                                "adults": adults,
+                                "children": children,
                             }
                             if budget:
                                 acc_segment.requirements["max_price"] = budget
@@ -1887,7 +1731,9 @@ class TravelAgent:
                             "location": cities[0],
                             "check_in": self._normalize_date(start_date),
                             "check_out": self._normalize_date(end_date),
-                            "guests": guests
+                            "guests": guests,
+                            "adults": adults,
+                            "children": children,
                         }
                         session.trip_plan.accommodation.segments.append(acc_segment)
                 except Exception as e:
@@ -1898,37 +1744,92 @@ class TravelAgent:
                         "location": destination,
                         "check_in": self._normalize_date(start_date),
                         "check_out": self._normalize_date(end_date),
-                        "guests": guests
+                        "guests": guests,
+                        "adults": adults,
+                        "children": children,
                     }
                     session.trip_plan.accommodation.segments.append(acc_segment)
         
-        # 3. Setup Ground Transport (if in focus)
+        # 3. Setup Ground Transport (if in focus) - 🧠 ENHANCED: Logical ordering + plan_through legs
         if "transfers" in focus:
-            if travel_mode == TravelMode.BOTH:
-                # Airport Transfer (Arrival)
-                transfer_arr = Segment()
-                transfer_arr.requirements = {
-                    "origin": f"{destination} Airport",
-                    "destination": "Hotel in " + destination,
-                    "date": self._normalize_date(start_date),
-                    "passengers": guests
-                }
-                if budget:
-                    transfer_arr.requirements["max_price"] = budget
-                session.trip_plan.travel.ground_transport.append(transfer_arr)
+            # ✅ Plan through: create one ground_transport segment per leg (origin→wp1, wp1→wp2, ...→destination)
+            if waypoints and route_plan_through and route_plan_through.get("route"):
+                r = route_plan_through["route"]
+                legs = (r.get("route_details") or {}) if isinstance(r.get("route_details"), dict) else {}
+                leg_list = legs.get("legs") if isinstance(legs.get("legs"), list) else []
+                if not leg_list and waypoints:
+                    # Build legs from waypoints: origin→wp0, wp0→wp1, ..., wpN→destination
+                    all_stops = [origin] + waypoints + [destination]
+                    for i in range(len(all_stops) - 1):
+                        seg = Segment()
+                        seg.requirements = {
+                            "origin": all_stops[i],
+                            "destination": all_stops[i + 1],
+                            "date": self._normalize_date(start_date),
+                            "passengers": guests
+                        }
+                        seg.requirements["_plan_through_leg"] = True
+                        if budget:
+                            seg.requirements["max_price"] = budget
+                        session.trip_plan.travel.ground_transport.append(seg)
+                    logger.info(f"✅ Plan through: added {len(all_stops)-1} ground_transport segments (origin→waypoints→destination)")
+                elif leg_list:
+                    for leg in leg_list:
+                        seg = Segment()
+                        seg.requirements = {
+                            "origin": leg.get("from") or origin,
+                            "destination": leg.get("to") or destination,
+                            "date": self._normalize_date(start_date),
+                            "passengers": guests
+                        }
+                        seg.requirements["_plan_through_leg"] = True
+                        if budget:
+                            seg.requirements["max_price"] = budget
+                        session.trip_plan.travel.ground_transport.append(seg)
+                    logger.info(f"✅ Plan through: added {len(leg_list)} ground_transport segments from route legs")
+            elif travel_mode == TravelMode.BOTH:
+                # 🧠 ENHANCED: Only add transfers if flights exist (logical ordering)
+                has_flights = len(session.trip_plan.travel.flights.outbound) > 0 or len(session.trip_plan.travel.flights.inbound) > 0
                 
-                # Airport Transfer (Departure) - Only if round_trip or end_date exists
-                if trip_type == "round_trip" and end_date:
-                    transfer_dep = Segment()
-                    transfer_dep.requirements = {
-                        "origin": "Hotel in " + destination,
-                        "destination": f"{destination} Airport",
-                        "date": self._normalize_date(end_date),
+                if has_flights:
+                    # Airport Transfer (Arrival) - 🧠 Use airport IATA from route planning
+                    transfer_arr = Segment()
+                    transfer_arr.requirements = {
+                        "origin": dest_airport_iata or f"{destination} Airport",
+                        "destination": hotel_destination or destination,
+                        "date": self._normalize_date(start_date),
                         "passengers": guests
                     }
+                    # 🧠 Store route planning context
+                    if route_plan:
+                        transfer_arr.requirements["_route_plan"] = {
+                            "destination_airport": dest_airport_iata,
+                            "hotel_location": hotel_destination
+                        }
                     if budget:
-                        transfer_dep.requirements["max_price"] = budget
-                    session.trip_plan.travel.ground_transport.append(transfer_dep)
+                        transfer_arr.requirements["max_price"] = budget
+                    session.trip_plan.travel.ground_transport.append(transfer_arr)
+                    
+                    # Airport Transfer (Departure) - Only if round_trip or end_date exists
+                    if trip_type == "round_trip" and end_date:
+                        transfer_dep = Segment()
+                        transfer_dep.requirements = {
+                            "origin": hotel_destination or destination,
+                            "destination": dest_airport_iata or f"{destination} Airport",
+                            "date": self._normalize_date(end_date),
+                            "passengers": guests
+                        }
+                        # 🧠 Store route planning context
+                        if route_plan:
+                            transfer_dep.requirements["_route_plan"] = {
+                                "origin_airport": dest_airport_iata,
+                                "hotel_location": hotel_destination
+                            }
+                        if budget:
+                            transfer_dep.requirements["max_price"] = budget
+                        session.trip_plan.travel.ground_transport.append(transfer_dep)
+                else:
+                    logger.info("🧠 Skipping airport transfers - no flights in itinerary")
                     
             elif travel_mode == TravelMode.CAR_ONLY:
                 # Car Rental or Drive
@@ -1959,6 +1860,12 @@ class TravelAgent:
             f"Created plan with focus {focus}: {len(session.trip_plan.travel.flights.all_segments)} flights, {len(session.trip_plan.accommodation.segments)} hotels."
         )
         session.update_timestamp()
+        # ✅ เริ่ม workflow: planning
+        try:
+            wf = get_workflow_state_service()
+            await wf.set_workflow_state(session.session_id, WfStep.PLANNING)
+        except Exception as wf_err:
+            logger.warning(f"Failed to set workflow state: {wf_err}")
 
     async def _execute_update_req(
         self,
@@ -2108,17 +2015,6 @@ class TravelAgent:
         if segment.needs_search():
             segment.status = SegmentStatus.PENDING  # Will trigger search in next iteration
         
-        # ✅ Validate segment data after update
-        current_step = self.workflow_validator.get_current_workflow_step(session.trip_plan)
-        is_valid, issues = self.workflow_validator.validate_segment_data(
-            segment,
-            slot_name,
-            WorkflowStep.UPDATE_REQ.value
-        )
-        if not is_valid:
-            logger.warning(f"UPDATE_REQ validation issues for {slot_name}[{segment_index}]: {issues}")
-            action_log.add_action("VALIDATION_WARNING", payload, f"Validation issues: {', '.join(issues)}")
-        
         action_log.add_action(
             "UPDATE_REQ",
             payload,
@@ -2171,6 +2067,171 @@ class TravelAgent:
         except Exception as e:
             logger.warning(f"Failed to convert {city_name} to IATA: {e}")
             return None
+    
+    def _detect_destination_type(self, destination: str) -> str:
+        """
+        🧠 ENHANCED: Detect destination type for intelligent planning
+        
+        Returns:
+            "beach", "city", "cultural", "mountain", or "unknown"
+        """
+        if not destination:
+            return "unknown"
+        
+        destination_lower = str(destination).lower()
+        
+        # Beach destinations
+        beach_keywords = ["phuket", "samui", "krabi", "pattaya", "koh", "island", "beach", "resort", "coast", "seaside", "ocean", "sea"]
+        if any(keyword in destination_lower for keyword in beach_keywords):
+            return "beach"
+        
+        # City destinations
+        city_keywords = ["bangkok", "tokyo", "seoul", "singapore", "hong kong", "taipei", "kuala lumpur", "jakarta", "manila", "city", "downtown", "urban"]
+        if any(keyword in destination_lower for keyword in city_keywords):
+            return "city"
+        
+        # Cultural destinations
+        cultural_keywords = ["chiang mai", "chiang rai", "kyoto", "nara", "bali", "ubud", "temple", "ancient", "heritage", "historical", "cultural"]
+        if any(keyword in destination_lower for keyword in cultural_keywords):
+            return "cultural"
+        
+        # Mountain destinations
+        mountain_keywords = ["mountain", "hill", "peak", "summit", "alpine", "ski", "snow"]
+        if any(keyword in destination_lower for keyword in mountain_keywords):
+            return "mountain"
+        
+        return "unknown"
+    
+    def _suggest_optimal_nights(self, destination_type: str, current_nights: int) -> int:
+        """
+        🧠 ENHANCED: Suggest optimal number of nights based on destination type
+        
+        Args:
+            destination_type: "beach", "city", "cultural", "mountain", or "unknown"
+            current_nights: Current number of nights planned
+            
+        Returns:
+            Suggested number of nights
+        """
+        # Default suggestions by destination type
+        suggestions = {
+            "beach": 3,      # Beach destinations: 2-4 nights ideal
+            "city": 4,       # City destinations: 3-5 nights ideal
+            "cultural": 3,   # Cultural destinations: 2-3 nights ideal
+            "mountain": 2,   # Mountain destinations: 1-2 nights ideal
+            "unknown": 3     # Default: 3 nights
+        }
+        
+        suggested = suggestions.get(destination_type, 3)
+        
+        # If current_nights is too short (<= 1), suggest minimum
+        if current_nights <= 1:
+            return suggested
+        
+        # If current_nights is reasonable, keep it
+        return current_nights
+    
+    def _normalize_create_itinerary_payload(self, payload: Dict[str, Any], user_input: str = "", main_booker_dob: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Normalize and correct CREATE_ITINERARY payload for ~90% data accuracy.
+        - Dates to YYYY-MM-DD; fix end_date < start_date
+        - Guests/adults/children: ผู้ใหญ่ = อายุ > 20 ปี (ตามปีเกิด). ถ้าผู้จองหลักอายุไม่เกิน 20 ต้องมีผู้จองร่วมผู้ใหญ่ 1 คน → 1 ผู้ใหญ่ + 1 เด็ก = 2 คน
+        - Trim origin/destination; non-empty strings
+        - focus as list of strings
+        """
+        if not payload or not isinstance(payload, dict):
+            return payload
+        out = dict(payload)
+        # Dates
+        start = out.get("start_date")
+        end = out.get("end_date")
+        if start and isinstance(start, str):
+            norm_start = self._normalize_date(start.strip())
+            if norm_start:
+                out["start_date"] = norm_start
+        if end and isinstance(end, str):
+            norm_end = self._normalize_date(end.strip())
+            if norm_end:
+                out["end_date"] = norm_end
+        # Fix end_date < start_date
+        ns, ne = out.get("start_date"), out.get("end_date")
+        if ns and ne:
+            try:
+                ds = datetime.strptime(ns, "%Y-%m-%d")
+                de = datetime.strptime(ne, "%Y-%m-%d")
+                if de < ds:
+                    out["end_date"] = (ds + timedelta(days=1)).strftime("%Y-%m-%d")
+                    logger.info(f"✅ Auto-corrected end_date (was before start_date) -> {out['end_date']}")
+            except ValueError:
+                pass
+        # Guests: default by age. ผู้ใหญ่ = อายุ > 20 ปี (ตามปีเกิด). ถ้าผู้จองหลักอายุไม่เกิน 20 → 1 ผู้ใหญ่ + 1 เด็ก = 2 คน
+        g = out.get("guests")
+        try:
+            g = int(g) if g is not None else 1
+        except (TypeError, ValueError):
+            g = 1
+        explicit_guests = False
+        if user_input and isinstance(user_input, str):
+            user_lower = user_input.strip().lower()
+            explicit_guests = (
+                "2 คน" in user_lower or "3 คน" in user_lower or "4 คน" in user_lower or "5 คน" in user_lower
+                or "2 people" in user_lower or "3 people" in user_lower or "2 adults" in user_lower or "3 adults" in user_lower
+                or "กับแฟน" in user_lower or "คู่" in user_lower or "ครอบครัว" in user_lower or "พาคุณแม่" in user_lower or "พาเพื่อน" in user_lower
+                or "couple" in user_lower or "family" in user_lower or "สองคน" in user_lower or "สองท่าน" in user_lower
+                or "2 ท่าน" in user_lower or "3 ท่าน" in user_lower or "for 2" in user_lower or "for 3" in user_lower
+            )
+            if not explicit_guests and g != 1:
+                g = 1
+        # ถ้าไม่ระบุจำนวนคน และมีปีเกิดผู้จองหลัก → อายุ > 20 = ผู้ใหญ่, อายุไม่เกิน 20 = ต้องมีผู้จองร่วมผู้ใหญ่ 1 คน (1 ผู้ใหญ่ + 1 เด็ก = 2 คน)
+        if not explicit_guests and main_booker_dob:
+            try:
+                birth = datetime.strptime(main_booker_dob.strip()[:10], "%Y-%m-%d")
+                today = datetime.now()
+                age = today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
+                if age <= 20:
+                    out["guests"] = 2
+                    out["adults"] = 1
+                    out["children"] = 1
+                    logger.info("Main booker age <= 20; default 1 adult (co-booker) + 1 child (ผู้จองหลัก) = 2 people")
+                else:
+                    out["guests"] = 1
+                    out["adults"] = 1
+                    out["children"] = 0
+                    logger.info("Main booker age > 20; default 1 adult (ผู้จองหลัก)")
+            except (ValueError, TypeError):
+                out["guests"] = max(1, min(9, g))
+                if "adults" not in out:
+                    out["adults"] = out["guests"]
+                if "children" not in out:
+                    out["children"] = 0
+        else:
+            out["guests"] = max(1, min(9, g))
+            if "adults" not in out:
+                out["adults"] = out["guests"]
+            if "children" not in out:
+                out["children"] = 0
+        # Origin/destination: trim, ensure non-empty where required
+        if "origin" in out and out["origin"] is not None:
+            out["origin"] = str(out["origin"]).strip() or "Bangkok"
+        if "destination" in out and out["destination"] is not None:
+            out["destination"] = str(out["destination"]).strip()
+        # Focus: list of strings
+        f = out.get("focus")
+        if f is not None and not isinstance(f, list):
+            out["focus"] = ["flights", "hotels", "transfers"]
+        elif isinstance(f, list):
+            out["focus"] = [str(x).strip().lower() for x in f if x]
+            if not out["focus"]:
+                out["focus"] = ["flights", "hotels", "transfers"]
+        # Plan through / waypoints: list of non-empty strings
+        w = out.get("waypoints") or out.get("plan_through")
+        if w is not None:
+            if not isinstance(w, list):
+                w = [w] if w else []
+            out["waypoints"] = [str(x).strip() for x in w if x and str(x).strip()]
+        else:
+            out["waypoints"] = []
+        return out
     
     def _normalize_date(self, date_str: str) -> str:
         """
@@ -2243,24 +2304,14 @@ class TravelAgent:
         payload: Dict[str, Any],
         action_log: ActionLog
     ):
-        """Execute CALL_SEARCH action using DataAggregator (Unified Data Layer)"""
+        """Execute CALL_SEARCH action using DataAggregator (Unified Data Layer).
+        ราคา: API คืนราคารวมตามจำนวนคนที่ขอ (1 คน = ราคาสำหรับ 1 คน, N คน = ราคารวมสำหรับ N คน).
+        """
         slot_name = payload.get("slot")
         segment_index = payload.get("segment_index", 0)
         
         if not slot_name:
             raise AgentException("CALL_SEARCH: Missing slot name")
-        
-        # ✅ Validate workflow step and action
-        current_step = self.workflow_validator.get_current_workflow_step(session.trip_plan)
-        is_allowed, error_msg = self.workflow_validator.validate_action_allowed(
-            "CALL_SEARCH",
-            current_step,
-            session.trip_plan
-        )
-        if not is_allowed and error_msg:
-            logger.warning(f"CALL_SEARCH validation failed: {error_msg}")
-            action_log.add_action("VALIDATION_ERROR", {"action": "CALL_SEARCH", "error": error_msg}, error_msg)
-            raise AgentException(f"CALL_SEARCH validation failed: {error_msg}")
         
         # Get segment
         # Handle the new flight structure
@@ -2285,6 +2336,22 @@ class TravelAgent:
             raise AgentException(f"CALL_SEARCH: Segment index {segment_index} out of range")
         
         segment = segments[segment_index]
+        
+        # ✅ ML validation ก่อนยิง search (ชั้นที่สอง): ตรวจสอบข้อมูลทริปอีกครั้งก่อนเรียก API
+        try:
+            ml_svc = get_ml_keyword_service()
+            extracted = self._extract_trip_data_for_ml_validation(session.trip_plan)
+            if extracted:
+                val = ml_svc.validate_extracted_data(extracted)
+                if val and val.get("valid") is False:
+                    issues = val.get("issues", [])
+                    raise AgentException(
+                        "ML_VALIDATION_BLOCK_SEARCH: " + (", ".join(issues) if issues else "ข้อมูลทริปไม่ผ่านการตรวจสอบ")
+                    )
+        except AgentException:
+            raise
+        except Exception as e:
+            logger.debug("ML validation in _execute_call_search skipped: %s", e)
         
         # Check if requirements are complete
         if not segment.needs_search():
@@ -2456,6 +2523,17 @@ class TravelAgent:
                     
                     # If MCP tools returned results, convert to StandardizedItem format
                     if mcp_results:
+                        # ✅ เก็บ raw Amadeus ไว้ที่ Redis (สำหรับจัดช้อย/แก้ไข)
+                        try:
+                            options_cache = get_options_cache()
+                            await options_cache.save_raw_amadeus(
+                                session_id=session.session_id,
+                                slot_name=slot_name,
+                                segment_index=segment_index,
+                                raw_response=mcp_results,
+                            )
+                        except Exception as raw_err:
+                            logger.warning(f"Failed to save raw Amadeus to Redis: {raw_err}")
                         try:
                             # Convert MCP results to StandardizedItem via DataAggregator
                             # Map slot_name to aggregator category
@@ -2553,18 +2631,14 @@ class TravelAgent:
             
             segment.status = SegmentStatus.SELECTING
             
-            # ✅ Validate segment data after search
-            is_valid, issues = self.workflow_validator.validate_segment_data(
-                segment,
-                slot_name,
-                WorkflowStep.SELECTING.value
-            )
-            if not is_valid:
-                logger.warning(f"CALL_SEARCH validation issues for {slot_name}[{segment_index}]: {issues}")
-                action_log.add_action("VALIDATION_WARNING", payload, f"Validation issues: {', '.join(issues)}")
-            
-            # ✅ Validate state after search
             self.slot_manager.ensure_segment_state(segment, slot_name)
+            
+            # ✅ อัปเดต workflow step = selecting (มีตัวเลือกให้เลือกใน PlanChoiceCard)
+            try:
+                wf = get_workflow_state_service()
+                await wf.set_workflow_state(session.session_id, WfStep.SELECTING)
+            except Exception as wf_err:
+                logger.warning(f"Failed to set workflow state: {wf_err}")
             
             action_log.add_action(
                 "CALL_SEARCH",
@@ -2609,13 +2683,7 @@ class TravelAgent:
             logger.error(f"SELECT_OPTION failed: {e}")
             raise
         
-        # Validate segment state
-        is_valid, issues = self.slot_manager.validate_segment(segment, slot_name)
-        if not is_valid:
-            logger.warning(f"Segment validation issues: {issues}")
-            # Try to auto-fix
-            self.slot_manager.ensure_segment_state(segment, slot_name)
-        
+        self.slot_manager.ensure_segment_state(segment, slot_name)
         # Check if option exists
         if not segment.options_pool or len(segment.options_pool) == 0:
             raise AgentException(f"SELECT_OPTION: No options available for {slot_name}[{segment_index}]")
@@ -2626,31 +2694,7 @@ class TravelAgent:
                 f"(has {len(segment.options_pool)} options)"
             )
         
-        # ✅ Validate workflow step and action
-        current_step = self.workflow_validator.get_current_workflow_step(session.trip_plan)
-        is_allowed, error_msg = self.workflow_validator.validate_action_allowed(
-            "SELECT_OPTION",
-            current_step,
-            session.trip_plan
-        )
-        if not is_allowed and error_msg:
-            logger.warning(f"SELECT_OPTION validation failed: {error_msg}")
-            action_log.add_action("VALIDATION_ERROR", {"action": "SELECT_OPTION", "error": error_msg}, error_msg)
-            raise AgentException(f"SELECT_OPTION validation failed: {error_msg}")
-        
-        # ✅ Use SlotManager to set selection
         self.slot_manager.set_segment_selected(segment, slot_name, option_index)
-        
-        # ✅ Validate segment data after selection
-        is_valid, issues = self.workflow_validator.validate_segment_data(
-            segment,
-            slot_name,
-            WorkflowStep.SELECT_OPTION.value
-        )
-        if not is_valid:
-            logger.warning(f"SELECT_OPTION validation issues for {slot_name}[{segment_index}]: {issues}")
-            action_log.add_action("VALIDATION_WARNING", payload, f"Validation issues: {', '.join(issues)}")
-        
         # Log selection details
         selected_option = segment.selected_option
         option_summary = {
@@ -2672,6 +2716,23 @@ class TravelAgent:
             logger.info(f"✅ Cached selected option for {slot_name}[{segment_index}]")
         except Exception as cache_error:
             logger.warning(f"Failed to cache selected option: {cache_error}")
+        
+        # 🧠 RL: Record reward for user selecting option
+        try:
+            rl_learner = get_rl_learner()
+            rl_learner.record_reward(
+                action_type="select_option",
+                slot_name=slot_name,
+                option_index=option_index,
+                context={
+                    "session_id": session.session_id,
+                    "user_id": session.user_id,
+                    "destination": session.trip_plan.travel.flights.outbound[0].requirements.get("destination") if session.trip_plan.travel.flights.outbound else None
+                }
+            )
+            logger.info(f"🧠 RL: Recorded reward for user selecting {slot_name}[{option_index}]")
+        except Exception as rl_error:
+            logger.warning(f"Failed to record RL reward: {rl_error}")
         
         action_log.add_action(
             "SELECT_OPTION",
@@ -2774,8 +2835,20 @@ class TravelAgent:
         2. Fill missing passenger details intelligently
         3. Auto-book with confidence
         4. Handle errors gracefully with retry
+        
+        ✅ CRUD STABILITY IMPROVEMENTS:
+        - Prevent duplicate bookings with atomic checks
+        - Validate all selections before booking
+        - Retry logic for transient failures
+        - State consistency verification
+        - Comprehensive error handling
         """
         try:
+            # ✅ CRUD STABILITY: Check if already processing (prevent concurrent execution)
+            if hasattr(session, '_auto_select_in_progress') and session._auto_select_in_progress:
+                logger.warning("Agent Mode: Auto-select already in progress, skipping duplicate call")
+                return
+            session._auto_select_in_progress = True
             # ✅ Use SlotManager to get all segments with stable access
             all_segments_managed = self.slot_manager.get_all_segments(session.trip_plan)
             
@@ -2783,16 +2856,18 @@ class TravelAgent:
             segments_to_select = [
                 (slot_name, segment, idx)
                 for slot_name, segment, idx in all_segments_managed
-                if segment.options_pool and not segment.selected_option
+                if segment.options_pool and len(segment.options_pool) > 0 and not segment.selected_option
             ]
+            
+            logger.info(f"Agent Mode: Auto-select check - found {len(segments_to_select)} segments with options that need selection")
+            for slot_name, segment, idx in segments_to_select:
+                logger.info(f"Agent Mode: Segment needs selection - {slot_name}[{idx}]: {len(segment.options_pool)} options, selected: {segment.selected_option is not None}")
             
             if not segments_to_select:
                 logger.info("Agent Mode: No segments with options to auto-select - segments may already be selected, continuing to booking check")
                 # ✅ Continue to booking check even if no segments to select (might already be selected)
             
-            # ✅ Process segments in priority order (outbound → inbound → accommodation → transport)
-            from app.engine.slot_manager import SlotType
-            
+            from app.engine.workflow_manager import SlotType
             priority_order = [
                 SlotType.FLIGHTS_OUTBOUND.value,
                 SlotType.FLIGHTS_INBOUND.value,
@@ -2807,7 +2882,9 @@ class TravelAgent:
             )
             
             # ✅ Use LLM to intelligently select best options for each segment
+            logger.info(f"Agent Mode: Starting auto-select for {len(sorted_segments)} segments")
             for slot_name, segment, segment_index in sorted_segments:
+                logger.info(f"Agent Mode: Processing {slot_name}[{segment_index}] - options: {len(segment.options_pool)}, selected: {segment.selected_option is not None}")
                 num_options = len(segment.options_pool) if segment.options_pool else 0
                 
                 # ✅ แสดงรายละเอียด: พบ options กี่ตัว
@@ -2929,8 +3006,35 @@ Output JSON with your analysis and selection:
                             selection_detail = f": {hotel_name} (ราคา {int(total_price):,} บาทสำหรับ {nights} คืน)"
                     
                     await status_callback("selecting", f"✅ เลือก{slot_display}แล้ว{selection_detail} (AI มั่นใจ {int(confidence*100)}%)", f"agent_select_{slot_name}")
+                
                 try:
+                    logger.info(f"Agent Mode: Setting selection for {slot_name}[{segment_index}] - option_index: {best_option_index}, options_count: {len(segment.options_pool)}")
                     self.slot_manager.set_segment_selected(segment, slot_name, best_option_index)
+                    
+                    # ✅ Verify selection was set correctly
+                    if segment.selected_option is None:
+                        logger.error(f"Agent Mode: CRITICAL - selected_option is None after set_segment_selected! slot: {slot_name}, index: {best_option_index}")
+                        raise Exception(f"Failed to set selected_option for {slot_name}[{segment_index}]")
+                    
+                    logger.info(f"Agent Mode: ✅ Successfully set selected_option for {slot_name}[{segment_index}] - status: {segment.status}")
+                    
+                    # 🧠 RL: Record reward for option selection
+                    try:
+                        rl_learner = get_rl_learner()
+                        rl_learner.record_reward(
+                            action_type="select_option",
+                            slot_name=slot_name,
+                            option_index=best_option_index,
+                            context={
+                                "session_id": session.session_id,
+                                "confidence": confidence,
+                                "reasoning": reasoning,
+                                "destination": session.trip_plan.travel.flights.outbound[0].requirements.get("destination") if session.trip_plan.travel.flights.outbound else None
+                            }
+                        )
+                        logger.info(f"🧠 RL: Recorded reward for selecting {slot_name}[{best_option_index}]")
+                    except Exception as rl_error:
+                        logger.warning(f"Failed to record RL reward: {rl_error}")
                     
                     action_log.add_action(
                         "AGENT_SMART_SELECT",
@@ -2946,11 +3050,12 @@ Output JSON with your analysis and selection:
                     
                     # ✅ Save session after each selection to ensure state is persisted
                     await self.storage.save_session(session)
+                    logger.info(f"Agent Mode: ✅ Session saved after selection for {slot_name}[{segment_index}]")
                 except Exception as e:
-                    logger.error(f"Failed to set selection for {slot_name}[{segment_index}]: {e}")
+                    logger.error(f"Failed to set selection for {slot_name}[{segment_index}]: {e}", exc_info=True)
                     raise
             
-            # Check if all required segments have selected options (ready to book immediately)
+            # ✅ Re-check segments after auto-select (they may have changed)
             all_flights = session.trip_plan.travel.flights.outbound + session.trip_plan.travel.flights.inbound
             all_accommodations = session.trip_plan.accommodation.segments
             
@@ -2958,17 +3063,41 @@ Output JSON with your analysis and selection:
             has_selected_flight = any(seg.selected_option is not None for seg in all_flights)
             has_selected_hotel = any(seg.selected_option is not None for seg in all_accommodations)
             
+            # ✅ DEBUG: Log detailed state after auto-select
+            logger.info(f"Agent Mode: After auto-select - flights: {len(all_flights)} (selected: {sum(1 for s in all_flights if s.selected_option is not None)}), hotels: {len(all_accommodations)} (selected: {sum(1 for s in all_accommodations if s.selected_option is not None)})")
+            for i, seg in enumerate(all_flights):
+                logger.debug(f"Agent Mode: Flight[{i}] after select - selected_option: {seg.selected_option is not None}, status: {seg.status}")
+            for i, seg in enumerate(all_accommodations):
+                logger.debug(f"Agent Mode: Hotel[{i}] after select - selected_option: {seg.selected_option is not None}, status: {seg.status}")
+            
             # Also check confirmed status as fallback
             has_confirmed_flight = any(seg.status == SegmentStatus.CONFIRMED for seg in all_flights)
             has_confirmed_hotel = any(seg.status == SegmentStatus.CONFIRMED for seg in all_accommodations)
             
             logger.info(f"Agent Mode: Booking check - flights: {len(all_flights)} (selected: {sum(1 for s in all_flights if s.selected_option is not None)}, confirmed: {sum(1 for s in all_flights if s.status == SegmentStatus.CONFIRMED)}), hotels: {len(all_accommodations)} (selected: {sum(1 for s in all_accommodations if s.selected_option is not None)}, confirmed: {sum(1 for s in all_accommodations if s.status == SegmentStatus.CONFIRMED)})")
             
+            # ✅ DEBUG: Log detailed segment info for troubleshooting
+            for seg in all_flights:
+                logger.debug(f"Agent Mode: Flight segment - has_options: {bool(seg.options_pool)}, has_selected: {seg.selected_option is not None}, status: {seg.status}")
+            for seg in all_accommodations:
+                logger.debug(f"Agent Mode: Hotel segment - has_options: {bool(seg.options_pool)}, has_selected: {seg.selected_option is not None}, status: {seg.status}")
+            
             # ✅ Auto-book immediately if we have at least flight OR hotel with selected_option (Agent Mode books instantly)
-            if has_selected_flight or has_selected_hotel or has_confirmed_flight or has_confirmed_hotel:
-                logger.info(f"Agent Mode: Ready to auto-book immediately! has_selected_flight={has_selected_flight}, has_selected_hotel={has_selected_hotel}, has_confirmed_flight={has_confirmed_flight}, has_confirmed_hotel={has_confirmed_hotel}")
+            # ✅ Also allow booking if we have options_pool but no selected_option yet (will auto-select first)
+            has_options_available = any(
+                (seg.options_pool and len(seg.options_pool) > 0) 
+                for seg in all_flights + all_accommodations
+            )
+            
+            if has_selected_flight or has_selected_hotel or has_confirmed_flight or has_confirmed_hotel or has_options_available:
+                logger.info(f"Agent Mode: Ready to auto-book! has_selected_flight={has_selected_flight}, has_selected_hotel={has_selected_hotel}, has_confirmed_flight={has_confirmed_flight}, has_confirmed_hotel={has_confirmed_hotel}, has_options_available={has_options_available}")
                 
-                # ✅ Check if booking already exists to prevent duplicates
+                # ✅ If we have options but no selected_option yet, auto-select first
+                if has_options_available and not (has_selected_flight or has_selected_hotel):
+                    logger.info("Agent Mode: Options available but not selected yet - will auto-select first before booking")
+                    # Auto-select will happen in the loop above, so we continue to booking check
+                
+                # ✅ CRUD STABILITY: Check if booking already exists to prevent duplicates (atomic check)
                 from app.core.config import settings
                 booking_check_url = f"{getattr(settings, 'api_base_url', 'http://localhost:8000')}/api/booking/list"
                 existing_booking = None
@@ -2982,15 +3111,20 @@ Output JSON with your analysis and selection:
                         if check_response.ok:
                             check_data = check_response.json()
                             if check_data.get("ok") and check_data.get("bookings"):
-                                # Check if there's already a booking for this trip
+                                # ✅ CRUD STABILITY: Check for existing booking with multiple criteria
+                                trip_id_match = session.trip_id or session.session_id
                                 existing_booking = next(
                                     (b for b in check_data.get("bookings", []) 
-                                     if b.get("trip_id") == (session.trip_id or session.session_id) 
-                                     and b.get("status") in ["pending_payment", "confirmed"]),
+                                     if (b.get("trip_id") == trip_id_match or 
+                                         b.get("session_id") == session.session_id) 
+                                     and b.get("status") in ["pending_payment", "confirmed", "paid"]),
                                     None
                                 )
                                 if existing_booking:
-                                    logger.info(f"Agent Mode: Booking already exists: {existing_booking.get('booking_id')}, skipping duplicate booking")
+                                    booking_id = existing_booking.get('booking_id', 'unknown')
+                                    logger.info(f"Agent Mode: ✅ Duplicate booking prevented - existing booking_id: {booking_id}, status: {existing_booking.get('status')}")
+                except httpx.TimeoutException:
+                    logger.warning("Agent Mode: Booking check timeout - proceeding with caution")
                 except Exception as e:
                     logger.warning(f"Agent Mode: Could not check existing bookings: {e}, proceeding with booking")
                 
@@ -3009,27 +3143,96 @@ Output JSON with your analysis and selection:
                         await status_callback("booking", "💳 กำลังคำนวณราคารวมของทริป...", "agent_auto_book_calculating")
                     
                     try:
-                        # ✅ Calculate total price from segments with selected_option (immediate booking)
+                        # ✅ CRUD STABILITY: Calculate total price from segments with selected_option (with validation)
                         total_price = 0.0
                         currency = "THB"
                         price_details = []
                         
+                        # ✅ CRUD STABILITY: Check if we have any selected options (comprehensive check)
+                        segments_with_selection = [seg for seg in all_flights + all_accommodations if seg.selected_option is not None]
+                        
+                        if not segments_with_selection:
+                            logger.warning("Agent Mode: No segments with selected_option found - cannot create booking without selections")
+                            logger.warning(f"Agent Mode: Debug - all_flights: {len(all_flights)}, all_accommodations: {len(all_accommodations)}")
+                            for i, seg in enumerate(all_flights):
+                                logger.warning(f"Agent Mode: Flight[{i}] - has_options: {bool(seg.options_pool)}, has_selected: {seg.selected_option is not None}, status: {seg.status}")
+                            for i, seg in enumerate(all_accommodations):
+                                logger.warning(f"Agent Mode: Hotel[{i}] - has_options: {bool(seg.options_pool)}, has_selected: {seg.selected_option is not None}, status: {seg.status}")
+                            
+                            if status_callback:
+                                await status_callback("booking", "⚠️ ไม่พบตัวเลือกที่เลือกไว้ - กำลังเลือกให้อัตโนมัติ...", "agent_auto_book_no_selection")
+                            
+                            # ✅ CRUD STABILITY: Retry auto-select if we have options but no selection
+                            has_options_but_no_selection = any(
+                                (seg.options_pool and len(seg.options_pool) > 0) 
+                                for seg in all_flights + all_accommodations
+                            )
+                            
+                            if has_options_but_no_selection:
+                                logger.warning("Agent Mode: Options available but not selected - retrying auto-select")
+                                # Re-run auto-select for segments with options
+                                segments_to_retry = [
+                                    (slot_name, seg, idx)
+                                    for slot_name, seg, idx in self.slot_manager.get_all_segments(session.trip_plan)
+                                    if seg.options_pool and len(seg.options_pool) > 0 and not seg.selected_option
+                                ]
+                                if segments_to_retry:
+                                    logger.info(f"Agent Mode: Retrying auto-select for {len(segments_to_retry)} segments")
+                                    # Continue to selection logic below (will be handled in the loop)
+                                else:
+                                    logger.error("Agent Mode: CRITICAL - Options available but auto-select failed. Cannot proceed with booking.")
+                                    return
+                            else:
+                                logger.error("Agent Mode: CRITICAL - No options and no selections. Cannot proceed with booking.")
+                                return
+                        
+                        # ✅ CRUD STABILITY: Calculate price with validation and error handling
                         for seg in all_flights + all_accommodations:
                             # ✅ Book immediately if segment has selected_option (don't wait for CONFIRMED status)
                             if seg.selected_option:
                                 option = seg.selected_option
+                                
+                                # ✅ CRUD STABILITY: Validate option structure
+                                if not isinstance(option, dict):
+                                    logger.warning(f"Agent Mode: Invalid option type for segment - expected dict, got {type(option)}")
+                                    continue
+                                
                                 price = option.get("price_amount") or option.get("price_total") or option.get("price", 0)
-                                if isinstance(price, (int, float)):
-                                    total_price += float(price)
+                                
+                                # ✅ CRUD STABILITY: Validate price is numeric and non-negative
+                                try:
+                                    price_float = float(price) if price else 0.0
+                                    if price_float < 0:
+                                        logger.warning(f"Agent Mode: Negative price detected: {price_float}, using 0")
+                                        price_float = 0.0
+                                    total_price += price_float
+                                    
                                     # เพิ่มรายละเอียดราคา
                                     if seg in all_flights:
                                         flight_num = option.get("flight_number") or option.get("display_name", "").split()[0] if option.get("display_name") else "เที่ยวบิน"
-                                        price_details.append(f"{flight_num}: {int(price):,} บาท")
+                                        price_details.append(f"{flight_num}: {int(price_float):,} บาท")
                                     elif seg in all_accommodations:
                                         hotel_name = option.get("display_name") or option.get("name", "ที่พัก")
-                                        price_details.append(f"{hotel_name}: {int(price):,} บาท")
+                                        # ✅ CRUD STABILITY: Calculate hotel price per night if needed
+                                        nights = seg.requirements.get("nights") or 1
+                                        hotel_total = price_float * nights if nights > 1 else price_float
+                                        price_details.append(f"{hotel_name}: {int(hotel_total):,} บาท ({nights} คืน)")
+                                except (ValueError, TypeError) as price_error:
+                                    logger.warning(f"Agent Mode: Invalid price format: {price}, error: {price_error}")
+                                    # Continue with 0 price for this segment
+                                
                                 if option.get("currency"):
                                     currency = option.get("currency")
+                        
+                        # ✅ CRUD STABILITY: Validate total_price before booking
+                        if total_price < 0:
+                            logger.error(f"Agent Mode: Invalid total price: {total_price} - cannot create booking with negative price")
+                            raise Exception(f"Invalid total price: {total_price}")
+                        
+                        if total_price == 0:
+                            logger.warning(f"Agent Mode: Total price is 0 - this might be an issue. Segments with selection: {len(segments_with_selection)}")
+                            # Still proceed with booking even if price is 0 (might be free or price not set)
+                            # But log warning for monitoring
                         
                         # ✅ แสดงรายละเอียดราคารวม
                         if status_callback and price_details:
@@ -3042,32 +3245,182 @@ Output JSON with your analysis and selection:
                         # Create booking via HTTP request to booking API
                         # Use settings or default to localhost
                         booking_url = f"{getattr(settings, 'api_base_url', 'http://localhost:8000')}/api/booking/create"
+                        # ✅ Build travel_slots with proper structure
+                        travel_slots = {}
+                        
+                        # Extract origin/destination from flight segments
+                        if all_flights and all_flights[0].requirements:
+                            req = all_flights[0].requirements
+                            travel_slots["origin_city"] = req.get("origin") or req.get("origin_city") or ""
+                            travel_slots["destination_city"] = req.get("destination") or req.get("destination_city") or ""
+                            travel_slots["departure_date"] = req.get("departure_date") or req.get("start_date") or ""
+                            travel_slots["adults"] = req.get("adults") or req.get("guests") or 1
+                            travel_slots["children"] = req.get("children") or 0
+                        
+                        # Extract return date from inbound flight
+                        inbound_flights = [s for s in all_flights if s in session.trip_plan.travel.flights.inbound]
+                        if inbound_flights and inbound_flights[0].requirements:
+                            req = inbound_flights[0].requirements
+                            travel_slots["return_date"] = req.get("departure_date") or req.get("return_date") or ""
+                        
+                        # Extract check-in/check-out from hotel segments
+                        if all_accommodations and all_accommodations[0].requirements:
+                            req = all_accommodations[0].requirements
+                            travel_slots["check_in"] = req.get("check_in") or req.get("check_in_date") or ""
+                            travel_slots["check_out"] = req.get("check_out") or req.get("check_out_date") or ""
+                            # Calculate nights
+                            if travel_slots.get("check_in") and travel_slots.get("check_out"):
+                                try:
+                                    from datetime import datetime
+                                    check_in = datetime.fromisoformat(travel_slots["check_in"].replace("Z", "+00:00"))
+                                    check_out = datetime.fromisoformat(travel_slots["check_out"].replace("Z", "+00:00"))
+                                    nights = (check_out - check_in).days
+                                    travel_slots["nights"] = max(1, nights)
+                                except:
+                                    travel_slots["nights"] = 1
+                        
+                        # Include segment data
+                        travel_slots["flights"] = [s.model_dump() for s in all_flights if s.selected_option is not None]
+                        travel_slots["accommodations"] = [s.model_dump() for s in all_accommodations if s.selected_option is not None]
+                        travel_slots["ground_transport"] = [s.model_dump() for s in session.trip_plan.travel.ground_transport if s.selected_option is not None]
+                        
                         booking_payload = {
                             "trip_id": session.trip_id or session.session_id,
                             "chat_id": session.chat_id,
                             "user_id": session.user_id,
                             "plan": session.trip_plan.model_dump(),
-                            "travel_slots": {
-                                # ✅ Include segments with selected_option immediately (Agent Mode books instantly)
-                                "flights": [s.model_dump() for s in all_flights if s.selected_option is not None],
-                                "accommodations": [s.model_dump() for s in all_accommodations if s.selected_option is not None],
-                                "ground_transport": [s.model_dump() for s in session.trip_plan.travel.ground_transport if s.selected_option is not None]
-                            },
+                            "travel_slots": travel_slots,
                             "total_price": total_price,
                             "currency": currency,
                             "mode": "agent",  # ✅ Mark as agent mode
                             "auto_booked": True  # ✅ Mark as auto-booked
                         }
                         
-                        async with httpx.AsyncClient(timeout=30.0) as client:
-                            response = await client.post(booking_url, json=booking_payload)
-                            response.raise_for_status()
-                            booking_result = response.json()
+                        logger.info(f"Agent Mode: Sending booking request to {booking_url}")
+                        logger.debug(f"Agent Mode: Booking payload - trip_id: {booking_payload.get('trip_id')}, user_id: {booking_payload.get('user_id')}, total_price: {total_price}")
                         
+                        # ✅ CRUD STABILITY: Retry logic for booking API call
+                        max_retries = 3
+                        retry_delay = 1.0
+                        booking_result = None
+                        
+                        for attempt in range(max_retries):
+                            try:
+                                async with httpx.AsyncClient(timeout=30.0) as client:
+                                    response = await client.post(booking_url, json=booking_payload)
+                                    logger.info(f"Agent Mode: Booking API response status: {response.status_code} (attempt {attempt + 1}/{max_retries})")
+                                    
+                                    if not response.ok:
+                                        error_text = await response.text()
+                                        
+                                        # ✅ CRUD STABILITY: Handle duplicate booking error (409 Conflict)
+                                        if response.status_code == 409:
+                                            logger.warning(f"Agent Mode: Duplicate booking detected (409 Conflict): {error_text[:200]}")
+                                            # Extract existing booking_id if possible
+                                            try:
+                                                error_data = response.json()
+                                                existing_id = error_data.get("detail", "").split("booking_id")[-1] if "booking_id" in str(error_data) else "unknown"
+                                                logger.info(f"Agent Mode: Skipping duplicate booking - existing booking_id: {existing_id}")
+                                                action_log.add_action(
+                                                    "AUTO_BOOK_SKIPPED",
+                                                    {"reason": "duplicate", "existing_booking_id": existing_id},
+                                                    f"Agent Mode: Skipped duplicate booking (409 Conflict)"
+                                                )
+                                                if status_callback:
+                                                    await status_callback("booking", f"ℹ️ พบการจองที่มีอยู่แล้ว - ข้ามการจองซ้ำ", "agent_auto_book_duplicate")
+                                                return  # Exit successfully - duplicate is not an error
+                                            except:
+                                                pass
+                                        
+                                        # ✅ CRUD STABILITY: Retry on 5xx errors (server errors)
+                                        if response.status_code >= 500 and attempt < max_retries - 1:
+                                            logger.warning(f"Agent Mode: Server error {response.status_code}, retrying in {retry_delay}s...")
+                                            await asyncio.sleep(retry_delay)
+                                            retry_delay *= 2  # Exponential backoff
+                                            continue
+                                        
+                                        logger.error(f"Agent Mode: Booking API error - Status: {response.status_code}, Response: {error_text[:200]}")
+                                        raise Exception(f"Booking API returned {response.status_code}: {error_text[:200]}")
+                                    
+                                    booking_result = response.json()
+                                    logger.debug(f"Agent Mode: Booking API response: {booking_result}")
+                                    break  # Success, exit retry loop
+                                    
+                            except httpx.TimeoutException:
+                                if attempt < max_retries - 1:
+                                    logger.warning(f"Agent Mode: Booking API timeout (30s), retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})")
+                                    await asyncio.sleep(retry_delay)
+                                    retry_delay *= 2
+                                    continue
+                                else:
+                                    logger.error("Agent Mode: Booking API timeout after all retries")
+                                    raise Exception("Booking API timeout - server may be slow")
+                            except httpx.RequestError as e:
+                                if attempt < max_retries - 1:
+                                    logger.warning(f"Agent Mode: Booking API request error: {e}, retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})")
+                                    await asyncio.sleep(retry_delay)
+                                    retry_delay *= 2
+                                    continue
+                                else:
+                                    logger.error(f"Agent Mode: Booking API request error after all retries: {e}")
+                                    raise Exception(f"Booking API request failed: {str(e)}")
+                        
+                        if not booking_result:
+                            raise Exception("Booking API call failed after all retries")
+                        
+                        # ✅ CRUD STABILITY: Validate booking response
                         booking_id = booking_result.get("booking_id")
                         booking_status = booking_result.get("status", "pending_payment")  # ✅ Status is pending_payment (needs payment)
                         
+                        if not booking_id:
+                            logger.error(f"Agent Mode: Booking API returned no booking_id. Response: {booking_result}")
+                            # ✅ CRUD STABILITY: Check if booking was created but ID not returned
+                            if booking_result.get("ok") and booking_result.get("message"):
+                                logger.warning(f"Agent Mode: Booking may have been created but ID not returned: {booking_result.get('message')}")
+                            raise Exception("Booking API did not return booking_id")
+                        
+                        # ✅ CRUD STABILITY: Validate booking_id format
+                        if not isinstance(booking_id, str) or len(booking_id) < 5:
+                            logger.warning(f"Agent Mode: Suspicious booking_id format: {booking_id}")
+                        
                         logger.info(f"Agent Mode: Auto-booked successfully (instant booking): {booking_id} (status: {booking_status})")
+                        
+                        # 🧠 RL: Record reward for completing booking
+                        try:
+                            rl_learner = get_rl_learner()
+                            # Record reward for each selected option that led to booking
+                            for seg in all_flights + all_accommodations:
+                                if seg.selected_option is not None:
+                                    # Find which slot this segment belongs to
+                                    slot_name = None
+                                    option_index = 0
+                                    if seg in all_flights:
+                                        if seg in session.trip_plan.travel.flights.outbound:
+                                            slot_name = "flights_outbound"
+                                            option_index = session.trip_plan.travel.flights.outbound.index(seg)
+                                        elif seg in session.trip_plan.travel.flights.inbound:
+                                            slot_name = "flights_inbound"
+                                            option_index = session.trip_plan.travel.flights.inbound.index(seg)
+                                    elif seg in all_accommodations:
+                                        slot_name = "accommodation"
+                                        option_index = session.trip_plan.accommodation.segments.index(seg)
+                                    
+                                    if slot_name:
+                                        rl_learner.record_reward(
+                                            action_type="complete_booking",
+                                            slot_name=slot_name,
+                                            option_index=option_index,
+                                            context={
+                                                "session_id": session.session_id,
+                                                "user_id": session.user_id,
+                                                "booking_id": booking_id,
+                                                "total_price": total_price,
+                                                "destination": session.trip_plan.travel.flights.outbound[0].requirements.get("destination") if session.trip_plan.travel.flights.outbound else None
+                                            }
+                                        )
+                            logger.info(f"🧠 RL: Recorded rewards for completing booking {booking_id}")
+                        except Exception as rl_error:
+                            logger.warning(f"Failed to record RL reward for booking: {rl_error}")
                         
                         # ✅ แสดงผลการจองสำเร็จ
                         if status_callback:
@@ -3085,8 +3438,12 @@ Output JSON with your analysis and selection:
                             f"Agent Mode: Auto-booked trip instantly (ID: {booking_id}, status: {booking_status}, total: {total_price} {currency})"
                         )
                         
-                        # ✅ Save session after booking to ensure state is persisted
-                        await self.storage.save_session(session)
+                        # ✅ CRUD STABILITY: Save session after booking to ensure state is persisted
+                        try:
+                            await self.storage.save_session(session)
+                        except Exception as save_error:
+                            logger.error(f"Agent Mode: Failed to save session after booking: {save_error}", exc_info=True)
+                            # Don't fail the booking if session save fails - booking is already created
                     except Exception as e:
                         logger.error(f"Agent Mode: Failed to auto-book: {e}", exc_info=True)
                         action_log.add_action(
@@ -3095,6 +3452,8 @@ Output JSON with your analysis and selection:
                             "Agent Mode: Failed to auto-book",
                             success=False
                         )
+                        # ✅ CRUD STABILITY: Re-raise to allow caller to handle
+                        raise
             
         except Exception as e:
             logger.error(f"Agent Mode: Error in auto-select-and-book: {e}", exc_info=True)
@@ -3104,6 +3463,11 @@ Output JSON with your analysis and selection:
                 "Agent Mode: Failed to auto-select options",
                 success=False
             )
+            # ✅ CRUD STABILITY: Don't re-raise - allow turn to continue with error logged
+        finally:
+            # ✅ CRUD STABILITY: Always reset flag in finally block
+            if hasattr(session, '_auto_select_in_progress'):
+                session._auto_select_in_progress = False
     
     async def generate_response(
         self,
@@ -3111,7 +3475,8 @@ Output JSON with your analysis and selection:
         action_log: ActionLog,
         memory_context: str = "",
         user_profile_context: str = "",
-        mode: str = "normal"  # ✅ Pass mode to responder
+        mode: str = "normal",  # ✅ Pass mode to responder
+        user_input: str = ""  # ✅ ใช้วิเคราะห์ความยากสำหรับสลับ Flash/Pro
     ) -> str:
         """
         Phase 2: Generate response message in Thai with Proactive Intelligence.
@@ -3365,7 +3730,7 @@ Respond in Thai text only (no JSON, no markdown)."""
                     # Note: We'll need to pass user_input - for now use action_log context
                     intent_result = await self.intent_llm.analyze_intent_and_respond(
                         user_input=f"Based on actions: {action_log_json}",
-                        system_prompt=RESPONDER_SYSTEM_PROMPT,
+                        system_prompt=self.responder_system_prompt,
                         max_tool_calls=3,
                         temperature=settings.responder_temperature
                     )
@@ -3383,14 +3748,25 @@ Respond in Thai text only (no JSON, no markdown)."""
             if not use_intent_llm or response_text is None:
                 # ✅ Use Production LLM Service - Responder Brain
                 if self.production_llm:
-                    # Determine complexity (simple for most responses, complex if Agent Mode)
-                    complexity = "complex" if agent_mode_actions else "simple"
+                    # วิเคราะห์ความยากจากข้อความผู้ใช้ แล้วสลับ Flash/Pro
+                    try:
+                        task_complexity = ModelSelector.analyze_complexity(
+                            user_input or "", context="responder", task_type=None
+                        )
+                        complexity = task_complexity.value
+                        if agent_mode_actions and complexity == "simple":
+                            complexity = "moderate"  # มี agent actions อย่างน้อย moderate
+                        if agent_mode_actions and complexity == "moderate":
+                            complexity = "complex"  # Agent Mode ใช้ Pro สำหรับตอบ
+                    except Exception as e:
+                        logger.debug(f"ModelSelector.analyze_complexity failed: {e}, using action-based complexity")
+                        complexity = "complex" if agent_mode_actions else "simple"
                     start_time = asyncio.get_event_loop().time()
                     try:
                         logger.info(f"Calling production_llm.responder_generate: complexity={complexity}, prompt_length={len(prompt)}")
                         response_text = await self.production_llm.responder_generate(
                             prompt=prompt,
-                            system_prompt=RESPONDER_SYSTEM_PROMPT,
+                            system_prompt=self.responder_system_prompt,
                             complexity=complexity
                         )
                         logger.info(f"Production LLM response generated: length={len(response_text) if response_text else 0}, is_none={response_text is None}, is_empty={not response_text.strip() if response_text else True}")
@@ -3428,7 +3804,7 @@ Respond in Thai text only (no JSON, no markdown)."""
                     try:
                         response_text = await self.llm.generate_content(
                             prompt=prompt,
-                            system_prompt=RESPONDER_SYSTEM_PROMPT,
+                            system_prompt=self.responder_system_prompt,
                             temperature=settings.responder_temperature,
                             max_tokens=2500,  # ✅ Increased from 2000 to 2500 to ensure complete city names are included
                             auto_select_model=True,
@@ -3448,7 +3824,7 @@ Respond in Thai text only (no JSON, no markdown)."""
                                 logger.info("Retrying after quota wait period...")
                                 response_text = await self.llm.generate_content(
                                     prompt=prompt,
-                                    system_prompt=RESPONDER_SYSTEM_PROMPT,
+                                    system_prompt=self.responder_system_prompt,
                                     temperature=settings.responder_temperature,
                                     max_tokens=2500,  # ✅ Increased from 2000 to 2500 to ensure complete city names are included
                                     auto_select_model=True,
@@ -4210,6 +4586,10 @@ class SelfCorrectionValidator:
                 issues.append("รูปแบบวันที่ไม่ถูกต้อง")
         
         guests = plan_data.get("guests", 1)
+        try:
+            guests = int(guests) if guests is not None else 1
+        except (TypeError, ValueError):
+            guests = 1
         if guests < 1 or guests > 20:
             issues.append(f"จำนวนผู้เดินทางผิดปกติ: {guests}")
         

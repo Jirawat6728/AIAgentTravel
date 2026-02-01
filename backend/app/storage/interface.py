@@ -1,6 +1,6 @@
 """
-Storage Interface - Repository Pattern
-Allows easy migration to PostgreSQL or other backends
+อินเทอร์เฟซการจัดเก็บ - แบบ Repository
+รองรับการย้ายไป PostgreSQL หรือ backend อื่นได้ง่าย
 """
 
 from __future__ import annotations

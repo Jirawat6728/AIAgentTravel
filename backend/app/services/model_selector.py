@@ -1,6 +1,6 @@
 """
-Model Selector Service
-Auto-selects optimal Gemini model based on task complexity
+เซอร์วิสเลือกโมเดล
+เลือกโมเดล Gemini ที่เหมาะสมอัตโนมัติตามความซับซ้อนของงาน
 """
 
 from typing import Optional, Literal
@@ -21,10 +21,9 @@ class TaskComplexity(str, Enum):
 
 
 class ModelTier(str, Enum):
-    """Gemini model tiers"""
+    """Gemini model tiers (Flash and Pro only)"""
     FLASH = "flash"   # Fast, cost-effective (gemini-2.5-flash)
     PRO = "pro"       # Balanced performance (gemini-2.5-pro)
-    ULTRA = "ultra"   # Maximum capability (gemini-2.5-pro)
 
 
 class ModelSelector:
@@ -156,8 +155,6 @@ class ModelSelector:
             return settings.gemini_flash_model
         elif tier == ModelTier.PRO:
             return settings.gemini_pro_model
-        elif tier == ModelTier.ULTRA:
-            return settings.gemini_ultra_model
         else:
             return settings.gemini_model_name  # Fallback
     

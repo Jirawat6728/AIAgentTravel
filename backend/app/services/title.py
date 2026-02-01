@@ -1,6 +1,6 @@
 """
-Title Generator Service
-Generates chat titles from conversation start
+เซอร์วิสสร้างหัวข้อแชท
+สร้างหัวข้อแชทจากจุดเริ่มต้นการสนทนา
 """
 
 from __future__ import annotations

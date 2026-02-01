@@ -1,6 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import './UserProfileEditPage.css';
+import '../settings/SettingsPage.css';
 import AppHeader from '../../components/common/AppHeader';
+
+const PROFILE_SECTIONS = [
+  { id: 'personal', name: 'ข้อมูลส่วนตัว', icon: '👤' },
+  { id: 'passport', name: 'ข้อมูลหนังสือเดินทาง', icon: '🛂' },
+  { id: 'visa', name: 'ข้อมูลวีซ่า', icon: '🛂' },
+  { id: 'address_emergency', name: 'ที่อยู่ / ติดต่อฉุกเฉิน', icon: '📍' },
+  { id: 'family', name: 'ผู้จองร่วม', icon: '👨‍👩‍👧‍👦' },
+];
 
 export default function UserProfileEditPage({ 
   user, 
@@ -38,49 +47,58 @@ export default function UserProfileEditPage({
     postal_code: '', // รหัสไปรษณีย์
     country: 'TH', // ประเทศ (default: ประเทศไทย)
     profile_image: '',
-    // Hotel Booking Preferences (Production-ready for Agoda/Traveloka)
     // Emergency Contact
     emergency_contact_name: '',
     emergency_contact_phone: '',
     emergency_contact_relation: '',
     emergency_contact_email: '',
-    // Special Requests / Preferences
-    hotel_early_checkin: false,
-    hotel_late_checkout: false,
-    hotel_smoking_preference: '',
-    hotel_room_type_preference: '',
-    hotel_floor_preference: '',
-    hotel_view_preference: '',
-    hotel_extra_bed: false,
-    hotel_airport_transfer: false,
-    hotel_dietary_requirements: '',
-    hotel_special_occasion: '',
-    hotel_accessibility_needs: false,
-    // Check-in Details
-    hotel_arrival_time: '',
-    hotel_arrival_flight: '',
-    hotel_departure_time: '',
     hotel_number_of_guests: 1,
-    // Payment Information
-    payment_method: '',
-    card_holder_name: '',
-    card_last_4_digits: '',
-    billing_address: '',
-    // Tax Invoice Information
-    company_name: '',
-    tax_id: '',
-    invoice_address: '',
-    // Loyalty Program
-    hotel_loyalty_number: '',
-    airline_frequent_flyer: '',
-    // Additional Notes
-    hotel_booking_notes: '',
   });
 
   const [errors, setErrors] = useState({});
   const [isSaving, setIsSaving] = useState(false);
   const [previewImage, setPreviewImage] = useState(null);
   const [hasVisa, setHasVisa] = useState(false); // State สำหรับตรวจสอบว่ามี visa หรือไม่
+  // Phone OTP flow
+  const [showChangePhone, setShowChangePhone] = useState(false);
+  const [newPhone, setNewPhone] = useState('');
+  const [phoneOtp, setPhoneOtp] = useState('');
+  const [phoneOtpSent, setPhoneOtpSent] = useState(false);
+  const [phoneOtpLoading, setPhoneOtpLoading] = useState(false);
+  // ผู้จองร่วม (สมาชิกในครอบครัว) - ช่องกรอกละเอียดเท่าผู้จองหลัก
+  const emptyFamilyForm = () => ({
+    type: 'adult',
+    first_name: '',
+    last_name: '',
+    first_name_th: '',
+    last_name_th: '',
+    date_of_birth: '',
+    gender: '',
+    national_id: '',
+    passport_no: '',
+    passport_expiry: '',
+    passport_issue_date: '',
+    passport_issuing_country: 'TH',
+    passport_given_names: '',
+    passport_surname: '',
+    place_of_birth: '',
+    passport_type: 'N',
+    nationality: 'TH',
+    // ที่อยู่: same_as_main = ตามผู้จองหลัก, own = กรอกเอง (default)
+    address_option: 'own',
+    address_line1: '',
+    subDistrict: '',
+    district: '',
+    province: '',
+    postal_code: '',
+    country: 'TH',
+  });
+  const [family, setFamily] = useState([]);
+  const [editingFamilyId, setEditingFamilyId] = useState(null);
+  const [familyForm, setFamilyForm] = useState(emptyFamilyForm());
+  const [familyFormErrors, setFamilyFormErrors] = useState({});
+  const [activeSection, setActiveSection] = useState('personal');
+  const [showDeletePopup, setShowDeletePopup] = useState(false);
 
   // ✅ Fetch latest user data from backend when component mounts or user changes
   useEffect(() => {
@@ -138,35 +156,11 @@ export default function UserProfileEditPage({
               postal_code: updatedUser.postal_code || '',
               country: updatedUser.country || 'TH',
               profile_image: profileImage,
-              // Hotel Booking Preferences
               emergency_contact_name: updatedUser.emergency_contact_name || '',
               emergency_contact_phone: updatedUser.emergency_contact_phone || '',
               emergency_contact_relation: updatedUser.emergency_contact_relation || '',
               emergency_contact_email: updatedUser.emergency_contact_email || '',
-              hotel_early_checkin: updatedUser.hotel_early_checkin || false,
-              hotel_late_checkout: updatedUser.hotel_late_checkout || false,
-              hotel_smoking_preference: updatedUser.hotel_smoking_preference || '',
-              hotel_room_type_preference: updatedUser.hotel_room_type_preference || '',
-              hotel_floor_preference: updatedUser.hotel_floor_preference || '',
-              hotel_view_preference: updatedUser.hotel_view_preference || '',
-              hotel_extra_bed: updatedUser.hotel_extra_bed || false,
-              hotel_airport_transfer: updatedUser.hotel_airport_transfer || false,
-              hotel_dietary_requirements: updatedUser.hotel_dietary_requirements || '',
-              hotel_special_occasion: updatedUser.hotel_special_occasion || '',
-              hotel_accessibility_needs: updatedUser.hotel_accessibility_needs || false,
-              hotel_arrival_time: updatedUser.hotel_arrival_time || '',
-              hotel_arrival_flight: updatedUser.hotel_arrival_flight || '',
-              hotel_departure_time: updatedUser.hotel_departure_time || '',
               hotel_number_of_guests: updatedUser.hotel_number_of_guests || 1,
-              payment_method: updatedUser.payment_method || '',
-              card_holder_name: updatedUser.card_holder_name || '',
-              card_last_4_digits: updatedUser.card_last_4_digits || '',
-              company_name: updatedUser.company_name || '',
-              tax_id: updatedUser.tax_id || '',
-              invoice_address: updatedUser.invoice_address || '',
-              hotel_loyalty_number: updatedUser.hotel_loyalty_number || '',
-              airline_frequent_flyer: updatedUser.airline_frequent_flyer || '',
-              hotel_booking_notes: updatedUser.hotel_booking_notes || '',
             });
             
             // ตรวจสอบว่ามี visa หรือไม่
@@ -276,6 +270,7 @@ export default function UserProfileEditPage({
       // ตรวจสอบว่ามี visa หรือไม่ (ถ้ามี visa_type หรือ visa_number แสดงว่ามี visa)
       const hasVisaData = !!(user.visa_type || user.visa_number);
       setHasVisa(hasVisaData);
+      setFamily(Array.isArray(user.family) ? user.family : []);
       
       // Set preview image
       setPreviewImage(profileImage);
@@ -619,18 +614,6 @@ export default function UserProfileEditPage({
       }
     }
 
-    // Hotel Booking Notes
-    if (formData.hotel_booking_notes && formData.hotel_booking_notes.trim().length > 500) {
-      newErrors.hotel_booking_notes = 'หมายเหตุต้องไม่เกิน 500 ตัวอักษร';
-    }
-
-    // Card Last 4 Digits
-    if (formData.card_last_4_digits && formData.card_last_4_digits.trim()) {
-      if (!/^\d{4}$/.test(formData.card_last_4_digits.trim())) {
-        newErrors.card_last_4_digits = 'ต้องเป็นตัวเลข 4 หลักเท่านั้น';
-      }
-    }
-
     // Hotel Number of Guests
     if (formData.hotel_number_of_guests && (formData.hotel_number_of_guests < 1 || formData.hotel_number_of_guests > 20)) {
       newErrors.hotel_number_of_guests = 'จำนวนผู้เข้าพักต้องอยู่ระหว่าง 1-20 คน';
@@ -640,6 +623,175 @@ export default function UserProfileEditPage({
     return Object.keys(newErrors).length === 0;
   };
 
+  const handleOpenDeletePopup = () => {
+    setShowDeletePopup(true);
+  };
+
+  const handleCloseDeletePopup = () => {
+    setShowDeletePopup(false);
+  };
+
+  // ผู้จองร่วม (Family) - เพิ่ม/แก้ไข/ลบ (ช่องกรอกละเอียดเท่าผู้จองหลัก)
+  const makeId = () => (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `fm_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`);
+  const addFamilyMember = (type) => {
+    setFamilyFormErrors({});
+    const base = emptyFamilyForm();
+    const newMember = { id: makeId(), ...base, type };
+    setFamily(prev => [...prev, newMember]);
+    setFamilyForm({ ...base, type });
+    setEditingFamilyId(newMember.id);
+  };
+  const startEditFamily = (member) => {
+    setFamilyFormErrors({});
+    setFamilyForm({
+      type: member.type || 'adult',
+      first_name: member.first_name || '',
+      last_name: member.last_name || '',
+      first_name_th: member.first_name_th || '',
+      last_name_th: member.last_name_th || '',
+      date_of_birth: member.date_of_birth || '',
+      gender: member.gender || '',
+      national_id: member.national_id || '',
+      passport_no: member.passport_no || '',
+      passport_expiry: member.passport_expiry || '',
+      passport_issue_date: member.passport_issue_date || '',
+      passport_issuing_country: member.passport_issuing_country || 'TH',
+      passport_given_names: member.passport_given_names || '',
+      passport_surname: member.passport_surname || '',
+      place_of_birth: member.place_of_birth || '',
+      passport_type: member.passport_type || 'N',
+      nationality: member.nationality || 'TH',
+      address_option: member.address_option || 'own',
+      address_line1: member.address_line1 || '',
+      subDistrict: member.subDistrict || '',
+      district: member.district || '',
+      province: member.province || '',
+      postal_code: member.postal_code || '',
+      country: member.country || 'TH',
+    });
+    setEditingFamilyId(member.id);
+  };
+
+  const validateFamilyForm = (f) => {
+    const err = {};
+    if (!f.first_name || !f.first_name.trim()) {
+      err.first_name = 'กรุณากรอกชื่อ (อังกฤษ)';
+    } else if (!/^[A-Za-z\s\-'\.]+$/.test(f.first_name.trim())) {
+      err.first_name = 'ชื่อต้องเป็นตัวอักษรภาษาอังกฤษเท่านั้น';
+    } else if (f.first_name.trim().length < 2 || f.first_name.trim().length > 50) {
+      err.first_name = 'ชื่อต้องมี 2–50 ตัวอักษร';
+    }
+    if (!f.last_name || !f.last_name.trim()) {
+      err.last_name = 'กรุณากรอกนามสกุล (อังกฤษ)';
+    } else if (!/^[A-Za-z\s\-'\.]+$/.test(f.last_name.trim())) {
+      err.last_name = 'นามสกุลต้องเป็นตัวอักษรภาษาอังกฤษเท่านั้น';
+    } else if (f.last_name.trim().length < 2 || f.last_name.trim().length > 50) {
+      err.last_name = 'นามสกุลต้องมี 2–50 ตัวอักษร';
+    }
+    if (f.first_name_th && f.first_name_th.trim()) {
+      if (!validateThaiName(f.first_name_th)) err.first_name_th = 'ชื่อต้องเป็นภาษาไทยเท่านั้น';
+      else if (f.first_name_th.trim().length < 2 || f.first_name_th.trim().length > 50) err.first_name_th = 'ชื่อต้องมี 2–50 ตัวอักษร';
+    }
+    if (f.last_name_th && f.last_name_th.trim()) {
+      if (!validateThaiName(f.last_name_th)) err.last_name_th = 'นามสกุลต้องเป็นภาษาไทยเท่านั้น';
+      else if (f.last_name_th.trim().length < 2 || f.last_name_th.trim().length > 50) err.last_name_th = 'นามสกุลต้องมี 2–50 ตัวอักษร';
+    }
+    if (f.date_of_birth && f.date_of_birth.trim()) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(f.date_of_birth.trim())) {
+        err.date_of_birth = 'รูปแบบวันเกิดไม่ถูกต้อง (YYYY-MM-DD)';
+      } else {
+        const birth = new Date(f.date_of_birth);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        if (isNaN(birth.getTime())) err.date_of_birth = 'วันเกิดไม่ถูกต้อง';
+        else if (birth > today) err.date_of_birth = 'วันเกิดไม่สามารถเป็นวันอนาคตได้';
+        else {
+          const age = today.getFullYear() - birth.getFullYear();
+          if (age > 120) err.date_of_birth = 'อายุไม่ถูกต้อง (เกิน 120 ปี)';
+        }
+      }
+    }
+    if (f.national_id && f.national_id.trim()) {
+      const cleaned = f.national_id.replace(/[-\s]/g, '');
+      if (cleaned.length !== 13) err.national_id = 'เลขบัตรประชาชนต้องมี 13 หลัก';
+      else if (!/^\d{13}$/.test(cleaned)) err.national_id = 'เลขบัตรประชาชนต้องเป็นตัวเลขเท่านั้น';
+      else if (!validateThaiNationalID(cleaned)) err.national_id = 'เลขบัตรประชาชนไม่ถูกต้อง (checksum ไม่ผ่าน)';
+    }
+    if (f.passport_no && f.passport_no.trim()) {
+      if (f.passport_no.trim().length < 6) err.passport_no = 'เลขหนังสือเดินทางต้องมีอย่างน้อย 6 ตัวอักษร';
+      else if (!/^[A-Z0-9]+$/i.test(f.passport_no.trim())) err.passport_no = 'เลขหนังสือเดินทางต้องเป็นตัวอักษรและตัวเลขเท่านั้น';
+    }
+    if (f.passport_issue_date && f.passport_issue_date.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(f.passport_issue_date.trim())) {
+      err.passport_issue_date = 'รูปแบบวันออกหนังสือเดินทางไม่ถูกต้อง (YYYY-MM-DD)';
+    }
+    if (f.passport_expiry && f.passport_expiry.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(f.passport_expiry.trim())) {
+      err.passport_expiry = 'รูปแบบวันหมดอายุไม่ถูกต้อง (YYYY-MM-DD)';
+    }
+    if (f.passport_issue_date && f.passport_expiry) {
+      const issue = new Date(f.passport_issue_date);
+      const expiry = new Date(f.passport_expiry);
+      if (!isNaN(issue.getTime()) && !isNaN(expiry.getTime()) && expiry <= issue) {
+        err.passport_expiry = 'วันหมดอายุต้องหลังวันออกหนังสือเดินทาง';
+      }
+    }
+    if (!err.passport_expiry && f.passport_expiry && f.passport_expiry.trim() && /^\d{4}-\d{2}-\d{2}$/.test(f.passport_expiry.trim())) {
+      const expiry = new Date(f.passport_expiry);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      if (!isNaN(expiry.getTime()) && expiry < today) {
+        err.passport_expiry = 'หนังสือเดินทางหมดอายุแล้ว';
+      }
+    }
+    // ที่อยู่ (เมื่อเลือกกรอกเอง): รหัสไปรษณีย์ไทย 5 หลัก
+    if (f.address_option === 'own' && f.postal_code && f.postal_code.trim() && (f.country === 'TH' || !f.country)) {
+      const pc = f.postal_code.replace(/[-\s]/g, '');
+      if (pc.length !== 5 || !/^\d{5}$/.test(pc)) {
+        err.postal_code = 'รหัสไปรษณีย์ไทยต้องเป็นตัวเลข 5 หลัก';
+      }
+    }
+    return err;
+  };
+
+  /** ตรวจสอบรายการผู้จองร่วมทั้งหมดก่อนบันทึกโปรไฟล์ */
+  const validateFamilyList = (list) => {
+    for (let i = 0; i < list.length; i++) {
+      const member = list[i];
+      const err = validateFamilyForm(member);
+      if (Object.keys(err).length > 0) {
+        const firstError = Object.values(err)[0];
+        return { valid: false, index: i, message: firstError, errors: err };
+      }
+    }
+    return { valid: true };
+  };
+
+  const saveFamilyEdit = () => {
+    if (!editingFamilyId) return;
+    const err = validateFamilyForm(familyForm);
+    if (Object.keys(err).length > 0) {
+      setFamilyFormErrors(err);
+      return;
+    }
+    setFamilyFormErrors({});
+    setFamily(prev => prev.map(m => m.id === editingFamilyId ? { ...m, ...familyForm } : m));
+    setEditingFamilyId(null);
+    setFamilyForm(emptyFamilyForm());
+  };
+  const cancelFamilyEdit = () => {
+    setFamilyFormErrors({});
+    const id = editingFamilyId;
+    setEditingFamilyId(null);
+    if (id) {
+      const member = family.find(m => m.id === id);
+      if (member && !member.first_name && !member.last_name) setFamily(prev => prev.filter(m => m.id !== id));
+    }
+    setFamilyForm(emptyFamilyForm());
+  };
+  const deleteFamilyMember = (id) => {
+    setFamily(prev => prev.filter(m => m.id !== id));
+    if (editingFamilyId === id) setEditingFamilyId(null);
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     
@@ -647,9 +799,31 @@ export default function UserProfileEditPage({
       return;
     }
 
+    // ตรวจสอบข้อมูลผู้จองร่วมทุกคนก่อนบันทึก
+    if (family.length > 0) {
+      const familyCheck = validateFamilyList(family);
+      if (!familyCheck.valid) {
+        setActiveSection('family');
+        const name = family[familyCheck.index]?.first_name || family[familyCheck.index]?.first_name_th || `รายการที่ ${familyCheck.index + 1}`;
+        alert(`ข้อมูลผู้จองร่วมไม่ครบหรือไม่ถูกต้อง (${name}): ${familyCheck.message}\nกรุณากด "แก้ไข" ที่รายการนั้นแล้วกรอกให้ถูกต้อง`);
+        return;
+      }
+    }
+
+    // ถ้ากำลังแก้ไขผู้จองร่วมแต่ยังไม่กดบันทึกใน card นั้น → แจ้งให้บันทึกรายการนั้นก่อน
+    if (editingFamilyId) {
+      const err = validateFamilyForm(familyForm);
+      if (Object.keys(err).length > 0) {
+        setFamilyFormErrors(err);
+        setActiveSection('family');
+        alert('กรุณากรอกข้อมูลผู้จองร่วมให้ครบและถูกต้อง แล้วกด "บันทึก" ที่รายการที่กำลังแก้ไขก่อน');
+        return;
+      }
+    }
+    
     setIsSaving(true);
     try {
-      await onSave(formData);
+      await onSave({ ...formData, family });
     } catch (error) {
       console.error('Error saving profile:', error);
       alert('เกิดข้อผิดพลาดในการบันทึกข้อมูล: ' + (error.message || 'Unknown error'));
@@ -726,8 +900,7 @@ export default function UserProfileEditPage({
 
 
   return (
-    <div className="profile-edit-wrapper">
-      {/* ✅ Header */}
+    <div className="profile-edit-wrapper settings-page">
       {onNavigateToHome && (
         <AppHeader
           activeTab="profile"
@@ -744,36 +917,37 @@ export default function UserProfileEditPage({
           notificationCount={notificationCount}
         />
       )}
-      
-      <div className="profile-edit-container">
-        <div className="profile-edit-card">
-          <div className="profile-edit-header">
-            <button
-              type="button"
-              onClick={onCancel}
-              className="btn-back"
-              title="ย้อนกลับ"
-            >
-              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
+
+      <div className="settings-container">
+        <aside className="settings-sidebar">
+          <h2>แก้ไขโปรไฟล์</h2>
+          <nav className="settings-nav">
+            {PROFILE_SECTIONS.map((section) => (
+              <button
+                key={section.id}
+                type="button"
+                className={`settings-nav-item ${activeSection === section.id ? 'active' : ''}`}
+                onClick={() => setActiveSection(section.id)}
+              >
+                <span className="settings-nav-icon">{section.icon}</span>
+                <span>{section.name}</span>
+              </button>
+            ))}
+          </nav>
+        </aside>
+
+        <div className="settings-content">
+          <div className="profile-edit-content-header">
+            <button type="button" onClick={onCancel} className="btn-secondary" style={{ marginBottom: '20px' }}>
+              ← ย้อนกลับ
             </button>
-            <div className="profile-edit-header-content">
-              <div className="profile-edit-icon">
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="32" height="32">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                </svg>
-              </div>
-              <h2>แก้ไขข้อมูลส่วนตัว</h2>
-              <p className="profile-edit-subtitle">
-                กรุณากรอกข้อมูลให้ครบถ้วนเพื่อความสะดวกในการจองทริป
-              </p>
-            </div>
           </div>
 
         <form onSubmit={handleSubmit} className="profile-edit-form">
-          {/* Profile Image Section */}
-          <div className="form-section profile-image-section">
+          {/* ข้อมูลส่วนตัว: รูป + ข้อมูลพื้นฐาน + passport + visa */}
+          {activeSection === 'personal' && (
+          <>
+          <div id="section-personal" className="form-section profile-image-section">
             <h3 className="form-section-title">📷 รูปโปรไฟล์</h3>
             <div className="profile-image-container">
               <div className="profile-image-wrapper">
@@ -873,8 +1047,8 @@ export default function UserProfileEditPage({
                   id="first_name"
                   name="first_name"
                   value={formData.first_name}
-                  onChange={handleChange}
-                  className={`form-input ${errors.first_name ? 'error' : ''}`}
+                  readOnly
+                  className={`form-input form-input-readonly ${errors.first_name ? 'error' : ''}`}
                   placeholder="First Name"
                 />
                 {errors.first_name && <span className="error-message">{errors.first_name}</span>}
@@ -889,8 +1063,8 @@ export default function UserProfileEditPage({
                   id="last_name"
                   name="last_name"
                   value={formData.last_name}
-                  onChange={handleChange}
-                  className={`form-input ${errors.last_name ? 'error' : ''}`}
+                  readOnly
+                  className={`form-input form-input-readonly ${errors.last_name ? 'error' : ''}`}
                   placeholder="Last Name"
                 />
                 {errors.last_name && <span className="error-message">{errors.last_name}</span>}
@@ -946,7 +1120,6 @@ export default function UserProfileEditPage({
                 maxLength="13"
               />
               {errors.national_id && <span className="error-message">{errors.national_id}</span>}
-              <small className="form-hint">สำหรับใช้เดินทางภายในประเทศ (ถ้ามี)</small>
             </div>
 
             <div className="form-row">
@@ -959,26 +1132,140 @@ export default function UserProfileEditPage({
                   id="email"
                   name="email"
                   value={formData.email}
-                  onChange={handleChange}
+                  readOnly
+                  disabled
                   className={`form-input ${errors.email ? 'error' : ''}`}
                   placeholder="example@email.com"
+                  style={{ backgroundColor: '#f5f5f5', cursor: 'not-allowed' }}
                 />
                 {errors.email && <span className="error-message">{errors.email}</span>}
+                
               </div>
 
               <div className="form-group">
                 <label htmlFor="phone" className="form-label">
                   เบอร์โทรศัพท์ <span className="required">*</span>
                 </label>
-                <input
-                  type="tel"
-                  id="phone"
-                  name="phone"
-                  value={formData.phone}
-                  onChange={handleChange}
-                  className={`form-input ${errors.phone ? 'error' : ''}`}
-                  placeholder="0812345678"
-                />
+                {!showChangePhone ? (
+                  <>
+                    <input
+                      type="tel"
+                      id="phone"
+                      name="phone"
+                      value={formData.phone}
+                      readOnly
+                      disabled
+                      className="form-input"
+                      placeholder="0812345678"
+                      style={{ backgroundColor: '#f5f5f5', cursor: 'not-allowed' }}
+                    />
+                  </>
+                ) : (
+                  <div className="phone-otp-flow" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    {!phoneOtpSent ? (
+                      <>
+                        <input
+                          type="tel"
+                          value={newPhone}
+                          onChange={(e) => setNewPhone(e.target.value)}
+                          placeholder="เบอร์ใหม่ เช่น 0812345678"
+                          className={`form-input ${errors.newPhone ? 'error' : ''}`}
+                        />
+                        {errors.newPhone && <span className="error-message">{errors.newPhone}</span>}
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <button
+                            type="button"
+                            className="btn-primary"
+                            disabled={phoneOtpLoading || !newPhone.replace(/[-\s()]/g, '').match(/^0[689]\d{8}$|^0[2-9]\d{7,8}$/)}
+                            onClick={async () => {
+                              const cleaned = newPhone.replace(/[-\s()]/g, '');
+                              if (!/^0[689]\d{8}$|^0[2-9]\d{7,8}$/.test(cleaned)) {
+                                setErrors(prev => ({ ...prev, newPhone: 'รูปแบบเบอร์โทรไม่ถูกต้อง (เช่น 0812345678)' }));
+                                return;
+                              }
+                              setPhoneOtpLoading(true);
+                              setErrors(prev => ({ ...prev, newPhone: '', phoneOtp: '' }));
+                              try {
+                                const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+                                const res = await fetch(`${API_BASE_URL}/api/auth/send-phone-otp`, {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  credentials: 'include',
+                                  body: JSON.stringify({ new_phone: cleaned }),
+                                });
+                                const data = await res.json();
+                                if (res.ok && data.ok) {
+                                  setPhoneOtpSent(true);
+                                  setPhoneOtp('');
+                                } else {
+                                  setErrors(prev => ({ ...prev, newPhone: data.detail || 'ส่ง OTP ไม่สำเร็จ' }));
+                                }
+                              } catch (err) {
+                                setErrors(prev => ({ ...prev, newPhone: err.message || 'ส่ง OTP ไม่สำเร็จ' }));
+                              } finally {
+                                setPhoneOtpLoading(false);
+                              }
+                            }}
+                          >
+                            {phoneOtpLoading ? 'กำลังส่ง...' : 'ส่ง OTP'}
+                          </button>
+                          <button type="button" className="btn-secondary" onClick={() => { setShowChangePhone(false); setNewPhone(''); setPhoneOtpSent(false); }}>ยกเลิก</button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <input
+                          type="text"
+                          value={phoneOtp}
+                          onChange={(e) => setPhoneOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          placeholder="รหัส OTP 6 หลัก"
+                          className={`form-input ${errors.phoneOtp ? 'error' : ''}`}
+                          maxLength={6}
+                        />
+                        {errors.phoneOtp && <span className="error-message">{errors.phoneOtp}</span>}
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <button
+                            type="button"
+                            className="btn-primary"
+                            disabled={phoneOtpLoading || phoneOtp.length !== 6}
+                            onClick={async () => {
+                              setPhoneOtpLoading(true);
+                              setErrors(prev => ({ ...prev, phoneOtp: '' }));
+                              try {
+                                const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+                                const res = await fetch(`${API_BASE_URL}/api/auth/verify-phone`, {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  credentials: 'include',
+                                  body: JSON.stringify({ otp: phoneOtp }),
+                                });
+                                const data = await res.json();
+                                if (res.ok && data.ok) {
+                                  setFormData(prev => ({ ...prev, phone: data.user?.phone || newPhone }));
+                                  setShowChangePhone(false);
+                                  setNewPhone('');
+                                  setPhoneOtp('');
+                                  setPhoneOtpSent(false);
+                                  if (onRefreshUser) onRefreshUser();
+                                } else {
+                                  setErrors(prev => ({ ...prev, phoneOtp: data.detail || 'รหัส OTP ไม่ถูกต้อง' }));
+                                }
+                              } catch (err) {
+                                setErrors(prev => ({ ...prev, phoneOtp: err.message || 'ยืนยัน OTP ไม่สำเร็จ' }));
+                              } finally {
+                                setPhoneOtpLoading(false);
+                              }
+                            }}
+                          >
+                            {phoneOtpLoading ? 'กำลังยืนยัน...' : 'ยืนยัน OTP'}
+                          </button>
+                          <button type="button" className="btn-secondary" onClick={() => { setPhoneOtpSent(false); setPhoneOtp(''); }}>ส่ง OTP ใหม่</button>
+                          <button type="button" className="btn-secondary" onClick={() => { setShowChangePhone(false); setNewPhone(''); setPhoneOtp(''); setPhoneOtpSent(false); }}>ยกเลิก</button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
                 {errors.phone && <span className="error-message">{errors.phone}</span>}
               </div>
             </div>
@@ -1015,8 +1302,12 @@ export default function UserProfileEditPage({
             </div>
           </div>
 
-          {/* ข้อมูลหนังสือเดินทาง */}
-          <div className="form-section">
+          </>
+          )}
+
+          {/* ข้อมูลหนังสือเดินทาง - หมวดแยก */}
+          {activeSection === 'passport' && (
+          <div id="section-passport" className="form-section">
             <h3 className="form-section-title">🛂 ข้อมูลหนังสือเดินทาง (สำหรับเที่ยวบินระหว่างประเทศ)</h3>
             
             {/* Passport Number & Type */}
@@ -1180,9 +1471,11 @@ export default function UserProfileEditPage({
               <small className="form-hint">ระบุเมืองและประเทศ เช่น กรุงเทพมหานคร, ประเทศไทย หรือ Bangkok, Thailand</small>
             </div>
           </div>
+          )}
 
-          {/* ข้อมูลวีซ่า */}
-          <div className="form-section">
+          {/* ข้อมูลวีซ่า - หมวดแยก */}
+          {activeSection === 'visa' && (
+          <div id="section-visa" className="form-section">
             <h3 className="form-section-title">🛂 ข้อมูลวีซ่า (สำหรับเที่ยวบินระหว่างประเทศ)</h3>
             
             {/* Checkbox สำหรับเลือกว่ามี Visa หรือไม่ */}
@@ -1344,9 +1637,12 @@ export default function UserProfileEditPage({
               </>
             )}
           </div>
+          )}
 
-          {/* ที่อยู่ */}
-          <div className="form-section">
+          {/* ที่อยู่ + ติดต่อฉุกเฉิน / ผู้จองร่วม (รวมในหมวดเดียวกัน) */}
+          {activeSection === 'address_emergency' && (
+          <>
+          <div id="section-address" className="form-section">
             <h3 className="form-section-title">📍 ที่อยู่</h3>
             <div className="form-group">
               <label htmlFor="address_line1" className="form-label">ที่อยู่ (เลขที่, หมู่, ถนน)</label>
@@ -1447,11 +1743,8 @@ export default function UserProfileEditPage({
 
           </div>
 
-          {/* ข้อมูลสำหรับการจองโรงแรม (Hotel Booking Preferences) */}
-          <div className="form-section">
-            <h3 className="form-section-title">🏨 ข้อมูลสำหรับการจองโรงแรม</h3>
-
-            {/* Emergency Contact */}
+          {/* ติดต่อฉุกเฉิน + ผู้จองร่วม (Family) */}
+          <div id="section-emergency" className="form-section">
             <div className="form-section-subtitle" style={{ marginTop: '20px', marginBottom: '12px', fontSize: '16px', fontWeight: '600', color: '#1e40af' }}>
               📞 ข้อมูลติดต่อฉุกเฉิน
             </div>
@@ -1521,287 +1814,225 @@ export default function UserProfileEditPage({
               </div>
             </div>
 
-            {/* Special Requests / Preferences */}
-            <div className="form-section-subtitle" style={{ marginTop: '24px', marginBottom: '12px', fontSize: '16px', fontWeight: '600', color: '#1e40af' }}>
-              ⭐ ความต้องการพิเศษ (Special Requests)
-            </div>
-            
-            <div className="form-row">
-              <div className="form-group">
-                <label className="form-label">
-                  <input
-                    type="checkbox"
-                    name="hotel_early_checkin"
-                    checked={formData.hotel_early_checkin}
-                    onChange={handleChange}
-                    style={{ marginRight: '8px' }}
-                  />
-                  ต้องการ Early Check-in
-                </label>
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">
-                  <input
-                    type="checkbox"
-                    name="hotel_late_checkout"
-                    checked={formData.hotel_late_checkout}
-                    onChange={handleChange}
-                    style={{ marginRight: '8px' }}
-                  />
-                  ต้องการ Late Check-out
-                </label>
-              </div>
-            </div>
-
-            <div className="form-row">
-              <div className="form-group">
-                <label htmlFor="hotel_smoking_preference" className="form-label">ความต้องการเรื่องบุหรี่</label>
-                <select
-                  id="hotel_smoking_preference"
-                  name="hotel_smoking_preference"
-                  value={formData.hotel_smoking_preference}
-                  onChange={handleChange}
-                  className="form-input"
-                >
-                  <option value="">-- เลือก --</option>
-                  <option value="NON_SMOKING">ไม่สูบบุหรี่ (Non-smoking)</option>
-                  <option value="SMOKING">สูบบุหรี่ได้ (Smoking)</option>
-                </select>
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="hotel_room_type_preference" className="form-label">ประเภทห้องที่ต้องการ</label>
-                <select
-                  id="hotel_room_type_preference"
-                  name="hotel_room_type_preference"
-                  value={formData.hotel_room_type_preference}
-                  onChange={handleChange}
-                  className="form-input"
-                >
-                  <option value="">-- เลือก --</option>
-                  <option value="STANDARD">Standard</option>
-                  <option value="DELUXE">Deluxe</option>
-                  <option value="SUITE">Suite</option>
-                  <option value="EXECUTIVE">Executive</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="form-row">
-              <div className="form-group">
-                <label htmlFor="hotel_floor_preference" className="form-label">ชั้นที่ต้องการ</label>
-                <select
-                  id="hotel_floor_preference"
-                  name="hotel_floor_preference"
-                  value={formData.hotel_floor_preference}
-                  onChange={handleChange}
-                  className="form-input"
-                >
-                  <option value="">-- เลือก --</option>
-                  <option value="HIGH">ชั้นสูง</option>
-                  <option value="LOW">ชั้นต่ำ</option>
-                  <option value="ANY">ไม่ระบุ</option>
-                </select>
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="hotel_view_preference" className="form-label">วิวที่ต้องการ</label>
-                <select
-                  id="hotel_view_preference"
-                  name="hotel_view_preference"
-                  value={formData.hotel_view_preference}
-                  onChange={handleChange}
-                  className="form-input"
-                >
-                  <option value="">-- เลือก --</option>
-                  <option value="SEA">วิวทะเล</option>
-                  <option value="CITY">วิวเมือง</option>
-                  <option value="GARDEN">วิวสวน</option>
-                  <option value="ANY">ไม่ระบุ</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="form-row">
-              <div className="form-group">
-                <label className="form-label">
-                  <input
-                    type="checkbox"
-                    name="hotel_extra_bed"
-                    checked={formData.hotel_extra_bed}
-                    onChange={handleChange}
-                    style={{ marginRight: '8px' }}
-                  />
-                  ต้องการเตียงเสริม (Extra Bed/Cot)
-                </label>
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">
-                  <input
-                    type="checkbox"
-                    name="hotel_airport_transfer"
-                    checked={formData.hotel_airport_transfer}
-                    onChange={handleChange}
-                    style={{ marginRight: '8px' }}
-                  />
-                  ต้องการรถรับส่งสนามบิน
-                </label>
-              </div>
-            </div>
-
-            <div className="form-row">
-              <div className="form-group">
-                <label htmlFor="hotel_dietary_requirements" className="form-label">อาหารพิเศษ</label>
-                <select
-                  id="hotel_dietary_requirements"
-                  name="hotel_dietary_requirements"
-                  value={formData.hotel_dietary_requirements}
-                  onChange={handleChange}
-                  className="form-input"
-                >
-                  <option value="">-- เลือก --</option>
-                  <option value="NONE">ไม่มี</option>
-                  <option value="VEGETARIAN">Vegetarian</option>
-                  <option value="VEGAN">Vegan</option>
-                  <option value="HALAL">Halal</option>
-                  <option value="ALLERGIES">มีอาการแพ้ (ระบุในหมายเหตุ)</option>
-                </select>
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="hotel_special_occasion" className="form-label">โอกาสพิเศษ</label>
-                <select
-                  id="hotel_special_occasion"
-                  name="hotel_special_occasion"
-                  value={formData.hotel_special_occasion}
-                  onChange={handleChange}
-                  className="form-input"
-                >
-                  <option value="">-- เลือก --</option>
-                  <option value="NONE">ไม่มี</option>
-                  <option value="BIRTHDAY">วันเกิด</option>
-                  <option value="HONEYMOON">ฮันนีมูน</option>
-                  <option value="ANNIVERSARY">วันครบรอบ</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="form-group">
-              <label className="form-label">
-                <input
-                  type="checkbox"
-                  name="hotel_accessibility_needs"
-                  checked={formData.hotel_accessibility_needs}
-                  onChange={handleChange}
-                  style={{ marginRight: '8px' }}
-                />
-                ต้องการห้องสำหรับผู้พิการ (Accessibility Needs)
-              </label>
-            </div>
-
-            
-            {/* Tax Invoice Information */}
-            <div className="form-section-subtitle" style={{ marginTop: '24px', marginBottom: '12px', fontSize: '16px', fontWeight: '600', color: '#1e40af' }}>
-              🧾 ข้อมูลสำหรับออกใบกำกับภาษี
-            </div>
-            <div className="form-row">
-              <div className="form-group">
-                <label htmlFor="company_name" className="form-label">ชื่อบริษัท/องค์กร</label>
-                <input
-                  type="text"
-                  id="company_name"
-                  name="company_name"
-                  value={formData.company_name}
-                  onChange={handleChange}
-                  className="form-input"
-                  placeholder="สำหรับการจองธุรกิจ"
-                  maxLength="100"
-                />
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="tax_id" className="form-label">เลขประจำตัวผู้เสียภาษี</label>
-                <input
-                  type="text"
-                  id="tax_id"
-                  name="tax_id"
-                  value={formData.tax_id}
-                  onChange={handleChange}
-                  className="form-input"
-                  placeholder="เลขประจำตัวผู้เสียภาษี"
-                  maxLength="20"
-                />
-              </div>
-            </div>
-
-            <div className="form-group">
-              <label htmlFor="invoice_address" className="form-label">ที่อยู่สำหรับออกใบกำกับภาษี</label>
-              <input
-                type="text"
-                id="invoice_address"
-                name="invoice_address"
-                value={formData.invoice_address}
-                onChange={handleChange}
-                className="form-input"
-                placeholder="ถ้าไม่ใช่ที่อยู่หลัก"
-                maxLength="200"
-              />
-            </div>
-
-            {/* Loyalty Program */}
-            <div className="form-section-subtitle" style={{ marginTop: '24px', marginBottom: '12px', fontSize: '16px', fontWeight: '600', color: '#1e40af' }}>
-              🎁 โปรแกรมสะสมแต้ม/ไมล์
-            </div>
-            <div className="form-row">
-              <div className="form-group">
-                <label htmlFor="hotel_loyalty_number" className="form-label">เลขสมาชิกโรงแรม</label>
-                <input
-                  type="text"
-                  id="hotel_loyalty_number"
-                  name="hotel_loyalty_number"
-                  value={formData.hotel_loyalty_number}
-                  onChange={handleChange}
-                  className="form-input"
-                  placeholder="เช่น Marriott Bonvoy, Hilton Honors"
-                  maxLength="50"
-                />
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="airline_frequent_flyer" className="form-label">เลขสมาชิกสายการบิน</label>
-                <input
-                  type="text"
-                  id="airline_frequent_flyer"
-                  name="airline_frequent_flyer"
-                  value={formData.airline_frequent_flyer}
-                  onChange={handleChange}
-                  className="form-input"
-                  placeholder="สำหรับสะสมไมล์"
-                  maxLength="50"
-                />
-              </div>
-            </div>
-
-            {/* Additional Notes */}
-            <div className="form-group" style={{ marginTop: '24px' }}>
-              <label htmlFor="hotel_booking_notes" className="form-label">หมายเหตุเพิ่มเติม</label>
-              <textarea
-                id="hotel_booking_notes"
-                name="hotel_booking_notes"
-                value={formData.hotel_booking_notes}
-                onChange={handleChange}
-                className="form-input"
-                placeholder="ระบุความต้องการพิเศษอื่นๆ หรือข้อมูลเพิ่มเติม"
-                rows="4"
-                maxLength="500"
-              />
-              <small className="form-hint">สูงสุด 500 ตัวอักษร</small>
-            </div>
           </div>
+          </>
+          )}
 
-          {/* Buttons */}
+          {/* ผู้จองร่วม (สมาชิกในครอบครัว) - หมวดแยก */}
+          {activeSection === 'family' && (
+          <div id="section-family" className="form-section">
+            <h3 className="form-section-title">👨‍👩‍👧‍👦 ผู้จองร่วม (สมาชิกในครอบครัว)</h3>
+            <p className="form-hint" style={{ marginBottom: '12px', color: '#6b7280', fontSize: '14px' }}>
+              เพิ่มชื่อผู้ใหญ่หรือเด็กที่มักเดินทางด้วย ตอนจองมากกว่า 1 คนจะเลือกจากรายการนี้ได้
+            </p>
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
+              <button type="button" className="btn-secondary" onClick={() => addFamilyMember('adult')} style={{ padding: '8px 16px', borderRadius: '8px', border: '1px solid #3b82f6', background: '#eff6ff', color: '#1d4ed8', fontWeight: 500 }}>
+                + เพิ่มผู้ใหญ่
+              </button>
+              <button type="button" className="btn-secondary" onClick={() => addFamilyMember('child')} style={{ padding: '8px 16px', borderRadius: '8px', border: '1px solid #10b981', background: '#ecfdf5', color: '#059669', fontWeight: 500 }}>
+                + เพิ่มเด็ก
+              </button>
+            </div>
+            {family.length === 0 ? (
+              <div style={{ padding: '16px', background: '#f9fafb', borderRadius: '8px', color: '#6b7280', fontSize: '14px' }}>
+                ยังไม่มีรายชื่อผู้จองร่วม กดปุ่มด้านบนเพื่อเพิ่ม
+              </div>
+            ) : (
+              <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                {family.map((member) => (
+                    <li key={member.id} style={{ marginBottom: '12px', padding: '12px', background: '#f9fafb', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
+                      {editingFamilyId === member.id ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                          {/* ชื่อ-นามสกุล (EN/TH) — ประเภทเลือกจากปุ่ม + เพิ่มผู้ใหญ่ / + เพิ่มเด็ก แล้ว */}
+                          <div className="form-row" style={{ flexWrap: 'wrap', gap: '12px' }}>
+                            <div className="form-group" style={{ minWidth: '120px' }}>
+                              <label className="form-label">ชื่อ (อังกฤษ) <span className="required">*</span></label>
+                              <input type="text" value={familyForm.first_name} onChange={(e) => setFamilyForm(f => ({ ...f, first_name: e.target.value }))} className={`form-input ${familyFormErrors.first_name ? 'error' : ''}`} placeholder="First name" />
+                              {familyFormErrors.first_name && <span className="error-message">{familyFormErrors.first_name}</span>}
+                            </div>
+                            <div className="form-group" style={{ minWidth: '120px' }}>
+                              <label className="form-label">นามสกุล (อังกฤษ) <span className="required">*</span></label>
+                              <input type="text" value={familyForm.last_name} onChange={(e) => setFamilyForm(f => ({ ...f, last_name: e.target.value }))} className={`form-input ${familyFormErrors.last_name ? 'error' : ''}`} placeholder="Last name" />
+                              {familyFormErrors.last_name && <span className="error-message">{familyFormErrors.last_name}</span>}
+                            </div>
+                            <div className="form-group" style={{ minWidth: '100px' }}>
+                              <label className="form-label">ชื่อ (ไทย)</label>
+                              <input type="text" value={familyForm.first_name_th} onChange={(e) => setFamilyForm(f => ({ ...f, first_name_th: e.target.value }))} className={`form-input ${familyFormErrors.first_name_th ? 'error' : ''}`} placeholder="ชื่อไทย" />
+                              {familyFormErrors.first_name_th && <span className="error-message">{familyFormErrors.first_name_th}</span>}
+                            </div>
+                            <div className="form-group" style={{ minWidth: '100px' }}>
+                              <label className="form-label">นามสกุล (ไทย)</label>
+                              <input type="text" value={familyForm.last_name_th} onChange={(e) => setFamilyForm(f => ({ ...f, last_name_th: e.target.value }))} className={`form-input ${familyFormErrors.last_name_th ? 'error' : ''}`} placeholder="นามสกุลไทย" />
+                              {familyFormErrors.last_name_th && <span className="error-message">{familyFormErrors.last_name_th}</span>}
+                            </div>
+                          </div>
+                          {/* วันเกิด + เพศ + เลขบัตรประชาชน */}
+                          <div className="form-row" style={{ flexWrap: 'wrap', gap: '12px' }}>
+                            <div className="form-group" style={{ minWidth: '140px' }}>
+                              <label className="form-label">วันเกิด</label>
+                              <input type="date" value={familyForm.date_of_birth} onChange={(e) => setFamilyForm(f => ({ ...f, date_of_birth: e.target.value }))} className={`form-input ${familyFormErrors.date_of_birth ? 'error' : ''}`} />
+                              {familyFormErrors.date_of_birth && <span className="error-message">{familyFormErrors.date_of_birth}</span>}
+                            </div>
+                            <div className="form-group" style={{ minWidth: '100px' }}>
+                              <label className="form-label">เพศ</label>
+                              <select value={familyForm.gender} onChange={(e) => setFamilyForm(f => ({ ...f, gender: e.target.value }))} className="form-input">
+                                <option value="">-- เลือก --</option>
+                                <option value="M">ชาย</option>
+                                <option value="F">หญิง</option>
+                                <option value="O">อื่นๆ</option>
+                              </select>
+                            </div>
+                            <div className="form-group" style={{ minWidth: '160px' }}>
+                              <label className="form-label">เลขบัตรประชาชน</label>
+                              <input type="text" value={familyForm.national_id} onChange={(e) => setFamilyForm(f => ({ ...f, national_id: e.target.value }))} className={`form-input ${familyFormErrors.national_id ? 'error' : ''}`} placeholder="13 หลัก" maxLength="13" />
+                              {familyFormErrors.national_id && <span className="error-message">{familyFormErrors.national_id}</span>}
+                            </div>
+                          </div>
+                          {/* หนังสือเดินทาง: เลข + ประเภท + วันออก + หมดอายุ */}
+                          <div className="form-row" style={{ flexWrap: 'wrap', gap: '12px' }}>
+                            <div className="form-group" style={{ minWidth: '140px' }}>
+                              <label className="form-label">เลขหนังสือเดินทาง</label>
+                              <input type="text" value={familyForm.passport_no} onChange={(e) => setFamilyForm(f => ({ ...f, passport_no: e.target.value }))} className={`form-input ${familyFormErrors.passport_no ? 'error' : ''}`} placeholder="A12345678" />
+                              {familyFormErrors.passport_no && <span className="error-message">{familyFormErrors.passport_no}</span>}
+                            </div>
+                            <div className="form-group" style={{ minWidth: '120px' }}>
+                              <label className="form-label">ประเภทหนังสือเดินทาง</label>
+                              <select value={familyForm.passport_type} onChange={(e) => setFamilyForm(f => ({ ...f, passport_type: e.target.value }))} className="form-input">
+                                <option value="N">ทั่วไป</option>
+                                <option value="D">ทางการทูต</option>
+                                <option value="O">ราชการ</option>
+                                <option value="S">บริการ</option>
+                              </select>
+                            </div>
+                            <div className="form-group" style={{ minWidth: '140px' }}>
+                              <label className="form-label">วันออกหนังสือเดินทาง</label>
+                              <input type="date" value={familyForm.passport_issue_date} onChange={(e) => setFamilyForm(f => ({ ...f, passport_issue_date: e.target.value }))} className={`form-input ${familyFormErrors.passport_issue_date ? 'error' : ''}`} />
+                              {familyFormErrors.passport_issue_date && <span className="error-message">{familyFormErrors.passport_issue_date}</span>}
+                            </div>
+                            <div className="form-group" style={{ minWidth: '140px' }}>
+                              <label className="form-label">วันหมดอายุ</label>
+                              <input type="date" value={familyForm.passport_expiry} onChange={(e) => setFamilyForm(f => ({ ...f, passport_expiry: e.target.value }))} className={`form-input ${familyFormErrors.passport_expiry ? 'error' : ''}`} />
+                              {familyFormErrors.passport_expiry && <span className="error-message">{familyFormErrors.passport_expiry}</span>}
+                            </div>
+                          </div>
+                          {/* ประเทศที่ออก + สัญชาติ */}
+                          <div className="form-row" style={{ flexWrap: 'wrap', gap: '12px' }}>
+                            <div className="form-group" style={{ minWidth: '180px' }}>
+                              <label className="form-label">ประเทศที่ออกหนังสือเดินทาง</label>
+                              <select value={familyForm.passport_issuing_country} onChange={(e) => setFamilyForm(f => ({ ...f, passport_issuing_country: e.target.value }))} className="form-input">
+                                {countries.map(c => (<option key={c.code} value={c.code}>{c.name}</option>))}
+                              </select>
+                            </div>
+                            <div className="form-group" style={{ minWidth: '180px' }}>
+                              <label className="form-label">สัญชาติ</label>
+                              <select value={familyForm.nationality} onChange={(e) => setFamilyForm(f => ({ ...f, nationality: e.target.value }))} className="form-input">
+                                {countries.map(c => (<option key={c.code} value={c.code}>{c.name}</option>))}
+                              </select>
+                            </div>
+                          </div>
+                          {/* ชื่อ-นามสกุลตามหนังสือเดินทาง (อังกฤษ) + สถานที่เกิด */}
+                          <div className="form-row" style={{ flexWrap: 'wrap', gap: '12px' }}>
+                            <div className="form-group" style={{ minWidth: '160px' }}>
+                              <label className="form-label">ชื่อตามหนังสือเดินทาง (อังกฤษ)</label>
+                              <input type="text" value={familyForm.passport_given_names} onChange={(e) => setFamilyForm(f => ({ ...f, passport_given_names: e.target.value }))} className="form-input" placeholder="First name" />
+                            </div>
+                            <div className="form-group" style={{ minWidth: '160px' }}>
+                              <label className="form-label">นามสกุลตามหนังสือเดินทาง (อังกฤษ)</label>
+                              <input type="text" value={familyForm.passport_surname} onChange={(e) => setFamilyForm(f => ({ ...f, passport_surname: e.target.value }))} className="form-input" placeholder="Last name" />
+                            </div>
+                            <div className="form-group" style={{ minWidth: '200px' }}>
+                              <label className="form-label">สถานที่เกิด</label>
+                              <input type="text" value={familyForm.place_of_birth} onChange={(e) => setFamilyForm(f => ({ ...f, place_of_birth: e.target.value }))} className="form-input" placeholder="เมือง, ประเทศ" />
+                            </div>
+                          </div>
+                          {/* ที่อยู่: default กรอกเอง, มีตัวเลือกติ๊ก "ตามผู้จองหลัก" เท่านั้น */}
+                          <div className="form-row" style={{ flexWrap: 'wrap', gap: '16px', marginTop: '16px', paddingTop: '16px', borderTop: '1px solid #e5e7eb' }}>
+                            <div className="form-group" style={{ width: '100%' }}>
+                              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                                <input type="checkbox" checked={familyForm.address_option === 'same_as_main'} onChange={(e) => setFamilyForm(f => ({ ...f, address_option: e.target.checked ? 'same_as_main' : 'own' }))} />
+                                <span className="form-label" style={{ marginBottom: 0 }}>ใช้ที่อยู่ตามผู้จองหลัก</span>
+                              </label>
+                              {familyForm.address_option === 'same_as_main' && (
+                                <p style={{ marginTop: '8px', fontSize: '13px', color: '#6b7280' }}>
+                                  ใช้ที่อยู่เดียวกับผู้จองหลัก{formData.address_line1 || formData.province || formData.postal_code ? ` (${[formData.address_line1, formData.subDistrict, formData.district, formData.province, formData.postal_code].filter(Boolean).join(', ')})` : ''}
+                                </p>
+                              )}
+                            </div>
+                            {familyForm.address_option === 'own' && (
+                              <>
+                                <div className="form-group" style={{ width: '100%' }}>
+                                  <label className="form-label">ที่อยู่ (เลขที่, หมู่, ถนน)</label>
+                                  <input type="text" value={familyForm.address_line1} onChange={(e) => setFamilyForm(f => ({ ...f, address_line1: e.target.value }))} className="form-input" placeholder="เลขที่, หมู่, ถนน" maxLength="200" />
+                                </div>
+                                <div className="form-row" style={{ flexWrap: 'wrap', gap: '12px', width: '100%' }}>
+                                  <div className="form-group" style={{ minWidth: '120px' }}>
+                                    <label className="form-label">ตำบล/แขวง</label>
+                                    <input type="text" value={familyForm.subDistrict} onChange={(e) => setFamilyForm(f => ({ ...f, subDistrict: e.target.value }))} className="form-input" placeholder="ตำบล/แขวง" maxLength="100" />
+                                  </div>
+                                  <div className="form-group" style={{ minWidth: '120px' }}>
+                                    <label className="form-label">อำเภอ/เขต</label>
+                                    <input type="text" value={familyForm.district} onChange={(e) => setFamilyForm(f => ({ ...f, district: e.target.value }))} className="form-input" placeholder="อำเภอ/เขต" maxLength="100" />
+                                  </div>
+                                </div>
+                                <div className="form-row" style={{ flexWrap: 'wrap', gap: '12px', width: '100%' }}>
+                                  <div className="form-group" style={{ minWidth: '120px' }}>
+                                    <label className="form-label">จังหวัด</label>
+                                    <input type="text" value={familyForm.province} onChange={(e) => setFamilyForm(f => ({ ...f, province: e.target.value }))} className="form-input" placeholder="จังหวัด" maxLength="100" />
+                                  </div>
+                                  <div className="form-group" style={{ minWidth: '100px' }}>
+                                    <label className="form-label">รหัสไปรษณีย์</label>
+                                    <input type="text" value={familyForm.postal_code} onChange={(e) => setFamilyForm(f => ({ ...f, postal_code: e.target.value }))} className={`form-input ${familyFormErrors.postal_code ? 'error' : ''}`} placeholder="10110" maxLength="10" />
+                                    {familyFormErrors.postal_code && <span className="error-message">{familyFormErrors.postal_code}</span>}
+                                  </div>
+                                </div>
+                                <div className="form-group" style={{ minWidth: '140px' }}>
+                                  <label className="form-label">ประเทศ</label>
+                                  <select value={familyForm.country} onChange={(e) => setFamilyForm(f => ({ ...f, country: e.target.value }))} className="form-input">
+                                    {countries.map(c => (<option key={c.code} value={c.code}>{c.name}</option>))}
+                                  </select>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <button type="button" onClick={saveFamilyEdit} className="btn-primary" style={{ padding: '8px 14px', fontSize: '14px' }}>บันทึก</button>
+                            <button type="button" onClick={cancelFamilyEdit} className="btn-secondary" style={{ padding: '8px 14px', fontSize: '14px' }}>ยกเลิก</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                          <div>
+                            <span style={{ fontWeight: 600 }}>
+                              {(member.first_name_th && member.last_name_th) ? `${member.first_name_th} ${member.last_name_th}` : (member.first_name || '(ยังไม่ระบุ)') + ' ' + (member.last_name || '')}
+                            </span>
+                            <span style={{ marginLeft: '8px', fontSize: '12px', padding: '2px 8px', borderRadius: '6px', background: member.type === 'adult' ? '#dbeafe' : '#d1fae5', color: member.type === 'adult' ? '#1d4ed8' : '#059669' }}>
+                              {member.type === 'adult' ? 'ผู้ใหญ่' : 'เด็ก'}
+                            </span>
+                            {(member.date_of_birth || member.passport_no || member.national_id || member.address_option) && (
+                              <span style={{ marginLeft: '8px', fontSize: '12px', color: '#6b7280' }}>
+                                {member.date_of_birth && `วันเกิด ${member.date_of_birth}`}
+                                {member.passport_no && ` • พาสปอร์ต ${member.passport_no}`}
+                                {member.national_id && ` • บัตรประชาชน`}
+                                {member.address_option === 'same_as_main' && ` • ที่อยู่: ตามผู้จองหลัก`}
+                                {member.address_option === 'own' && (member.address_line1 || member.province || member.postal_code) && ` • ที่อยู่: กรอกเอง`}
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            <button type="button" onClick={() => startEditFamily(member)} style={{ padding: '6px 12px', fontSize: '13px', border: '1px solid #d1d5db', borderRadius: '6px', background: '#fff', color: '#374151' }}>แก้ไข</button>
+                            <button type="button" onClick={() => deleteFamilyMember(member.id)} style={{ padding: '6px 12px', fontSize: '13px', border: '1px solid #fecaca', borderRadius: '6px', background: '#fef2f2', color: '#dc2626' }}>ลบ</button>
+                          </div>
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+          </div>
+          )}
+
+          {/* Buttons - แสดงเมื่ออยู่หมวด ข้อมูลส่วนตัว / ที่อยู่ & ติดต่อฉุกเฉิน / ผู้จองร่วม */}
+          {(activeSection === 'personal' || activeSection === 'passport' || activeSection === 'visa' || activeSection === 'address_emergency' || activeSection === 'family') && (
           <div className="form-actions">
             <button
               type="button"
@@ -1819,6 +2050,133 @@ export default function UserProfileEditPage({
               {isSaving ? 'กำลังบันทึก...' : 'บันทึกข้อมูล'}
             </button>
           </div>
+          )}
+          
+          {/* ลบบัญชี - แสดงเมื่ออยู่หมวด ลบบัญชี */}
+          {activeSection === 'delete' && (
+          <div className="delete-account-section" style={{ marginTop: '40px', paddingTop: '40px', borderTop: '2px solid #e0e0e0' }}>
+            <button
+              type="button"
+              onClick={handleOpenDeletePopup}
+              className="btn-delete"
+              disabled={isSaving}
+              style={{
+                backgroundColor: '#d32f2f',
+                color: 'white',
+                border: 'none',
+                padding: '12px 24px',
+                borderRadius: '6px',
+                cursor: isDeleting ? 'not-allowed' : 'pointer',
+                opacity: isDeleting ? 0.6 : 1,
+                fontWeight: 'bold'
+              }}
+            >
+              ลบบัญชี
+            </button>
+          </div>
+          )}
+          
+          {/* Delete Account Popup */}
+          {showDeletePopup && (
+            <div 
+              className="delete-account-popup-overlay"
+              style={{
+                position: 'fixed',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: 1000
+              }}
+              onClick={handleCloseDeletePopup}
+            >
+              <div 
+                className="delete-account-popup"
+                style={{
+                  backgroundColor: 'white',
+                  borderRadius: '12px',
+                  padding: '32px',
+                  maxWidth: '500px',
+                  width: '90%',
+                  maxHeight: '90vh',
+                  overflow: 'auto',
+                  boxShadow: '0 4px 20px rgba(0, 0, 0, 0.3)'
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h3 style={{ color: '#d32f2f', marginBottom: '16px', fontSize: '20px', fontWeight: 'bold' }}>
+                  🗑️ ลบบัญชี
+                </h3>
+                <p style={{ color: '#666', marginBottom: '20px', fontSize: '14px', lineHeight: '1.6' }}>
+                  การลบบัญชีจะลบข้อมูลทั้งหมดของคุณอย่างถาวร รวมถึง:
+                </p>
+                <ul style={{ marginTop: '10px', marginBottom: '20px', paddingLeft: '20px', color: '#666', fontSize: '14px', lineHeight: '1.8' }}>
+                  <li>ข้อมูลโปรไฟล์</li>
+                  <li>ประวัติการจองทั้งหมด</li>
+                  <li>ประวัติการสนทนา</li>
+                  <li>ความจำและความชอบ</li>
+                  <li>การแจ้งเตือนทั้งหมด</li>
+                </ul>
+                <div style={{ 
+                  backgroundColor: '#fff3cd', 
+                  border: '1px solid #ffc107', 
+                  borderRadius: '6px', 
+                  padding: '12px', 
+                  marginBottom: '24px',
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '8px'
+                }}>
+                  <span style={{ color: '#d32f2f', fontSize: '18px' }}>⚠️</span>
+                  <strong style={{ color: '#d32f2f', fontSize: '14px' }}>
+                    การกระทำนี้ไม่สามารถยกเลิกได้!
+                  </strong>
+                </div>
+                <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+                  <button
+                    type="button"
+                    onClick={handleCloseDeletePopup}
+                    disabled={isDeleting}
+                    style={{
+                      backgroundColor: '#f5f5f5',
+                      color: '#333',
+                      border: '1px solid #ddd',
+                      padding: '12px 24px',
+                      borderRadius: '6px',
+                      cursor: isDeleting ? 'not-allowed' : 'pointer',
+                      opacity: isDeleting ? 0.6 : 1,
+                      fontWeight: '500',
+                      fontSize: '14px'
+                    }}
+                  >
+                    ยกเลิก
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmDeleteAccount}
+                    disabled={isDeleting}
+                    style={{
+                      backgroundColor: '#d32f2f',
+                      color: 'white',
+                      border: 'none',
+                      padding: '12px 24px',
+                      borderRadius: '6px',
+                      cursor: isDeleting ? 'not-allowed' : 'pointer',
+                      opacity: isDeleting ? 0.6 : 1,
+                      fontWeight: 'bold',
+                      fontSize: '14px'
+                    }}
+                  >
+                    {isDeleting ? 'กำลังลบบัญชี...' : 'ยืนยันลบบัญชี'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </form>
         </div>
       </div>

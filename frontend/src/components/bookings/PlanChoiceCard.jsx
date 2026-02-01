@@ -661,7 +661,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
           
           <div className="plan-card-section-title">✈️ รายละเอียดเที่ยวบิน</div>
             <div className="plan-card-section-body">
-              {/* ✅ Google Flights Style Header - Airline, Times, Route, Type */}
+              {/* Header - Airline, Times, Route, Type */}
               {firstSeg && lastSeg && (
                 <div style={{
                   marginBottom: '16px',

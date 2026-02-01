@@ -1,6 +1,6 @@
 """
-Hybrid Storage Implementation
-Combines Redis (Speed) and MongoDB (Persistence)
+การจัดเก็บแบบไฮบริด
+รวม Redis (ความเร็ว) และ MongoDB (ความคงอยู่ของข้อมูล)
 """
 
 import asyncio
@@ -102,6 +102,17 @@ class HybridStorage(StorageInterface):
             
         # Return True only if Mongo succeeded (Primary Source of Truth)
         # Redis failure is acceptable (just performance hit)
+        
+        # ✅ Sync to long-term memory in background
+        # Extract important information and consolidate to memories collection
+        if mongo_res:
+            try:
+                from app.storage.redis_sync import redis_sync_service
+                # Trigger sync to long-term memory in background
+                asyncio.create_task(redis_sync_service.sync_session_with_history(session.session_id))
+            except Exception as e:
+                logger.debug(f"Background long-term memory sync trigger failed (non-critical): {e}")
+        
         return bool(mongo_res)
 
     async def clear_session_data(self, session_id: str) -> bool:
@@ -144,6 +155,15 @@ class HybridStorage(StorageInterface):
         except Exception as e:
             logger.warning(f"Failed to queue Redis save for session {session_id}: {e}")
             # Don't fail if Redis save fails - MongoDB is the source of truth
+        
+        # ✅ Sync to long-term memory in background
+        # Extract important conversation information and consolidate to memories collection
+        try:
+            from app.storage.redis_sync import redis_sync_service
+            # Trigger sync to long-term memory in background
+            asyncio.create_task(redis_sync_service.sync_chat_history_to_long_term_memory(session_id))
+        except Exception as e:
+            logger.debug(f"Background long-term memory sync trigger failed (non-critical): {e}")
         
         logger.debug(f"Message saved successfully to MongoDB for session {session_id}")
         return True

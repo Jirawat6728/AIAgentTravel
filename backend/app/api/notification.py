@@ -1,6 +1,6 @@
 """
-Notification API Router
-Handles user notifications (booking created, payment status, etc.)
+เราเตอร์ API การแจ้งเตือน
+จัดการการแจ้งเตือนผู้ใช้ (จองสร้างแล้ว สถานะการชำระเงิน ฯลฯ)
 """
 
 from fastapi import APIRouter, HTTPException, Request
@@ -50,8 +50,29 @@ async def list_notifications(request: Request):
         # ✅ SECURITY: Query only notifications for this specific user_id
         query = {"user_id": user_id}
         
-        cursor = notifications_collection.find(query).sort("created_at", -1).limit(50)
-        notifications = await cursor.to_list(length=50)
+        # ✅ CRUD STABILITY: Query with timeout protection
+        import asyncio
+        try:
+            cursor = notifications_collection.find(query).sort("created_at", -1).limit(50)
+            notifications = await asyncio.wait_for(cursor.to_list(length=50), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.error(f"Notifications query timeout for user: {user_id}")
+            return {
+                "ok": False,
+                "notifications": [],
+                "count": 0,
+                "unread_count": 0,
+                "error": "Query timeout"
+            }
+        except Exception as query_error:
+            logger.error(f"Notifications query error for user {user_id}: {query_error}", exc_info=True)
+            return {
+                "ok": False,
+                "notifications": [],
+                "count": 0,
+                "unread_count": 0,
+                "error": "Failed to retrieve notifications"
+            }
         
         # Convert ObjectId to string and format
         formatted_notifications = []
@@ -157,22 +178,28 @@ async def mark_notification_read(request: Request, notification_id: str):
         
         notifications_collection = storage.db.get_collection("notifications")
         
-        # ✅ SECURITY: Only update notification if it belongs to this user
+        # ✅ CRUD STABILITY: Only update notification if it belongs to this user (atomic operation)
         from bson import ObjectId
-        result = await notifications_collection.update_one(
-            {
-                "_id": ObjectId(notification_id),
-                "user_id": user_id  # ✅ CRITICAL: Ensure user owns this notification
-            },
-            {
-                "$set": {
-                    "read": True,
-                    "read_at": datetime.utcnow().isoformat()
+        try:
+            result = await notifications_collection.update_one(
+                {
+                    "_id": ObjectId(notification_id),
+                    "user_id": user_id  # ✅ CRITICAL: Ensure user owns this notification
+                },
+                {
+                    "$set": {
+                        "read": True,
+                        "read_at": datetime.utcnow().isoformat()
+                    }
                 }
-            }
-        )
+            )
+        except Exception as obj_id_error:
+            # ✅ CRUD STABILITY: Handle invalid ObjectId format
+            logger.warning(f"Invalid notification_id format: {notification_id}, error: {obj_id_error}")
+            raise HTTPException(status_code=400, detail="Invalid notification ID format")
         
         if result.matched_count == 0:
+            logger.warning(f"Notification not found or access denied: notification_id={notification_id}, user_id={user_id}")
             raise HTTPException(status_code=404, detail="Notification not found or access denied")
         
         return {

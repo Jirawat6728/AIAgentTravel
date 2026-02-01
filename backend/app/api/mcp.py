@@ -1,6 +1,6 @@
 """
-MCP (Model Context Protocol) API Endpoints
-Exposes MCP tools as REST API for testing and external use
+Endpoint API ของ MCP (Model Context Protocol)
+เปิด MCP tools เป็น REST API สำหรับทดสอบและใช้งานภายนอก
 """
 
 from fastapi import APIRouter, HTTPException

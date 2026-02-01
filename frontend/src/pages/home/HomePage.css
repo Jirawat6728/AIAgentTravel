@@ -6,6 +6,241 @@
   background: #ffffff;
 }
 
+/* Travel Search Section - ค้นหาเที่ยวบิน โรงแรม และอื่นๆ */
+.travel-search-section {
+  padding: 2.5rem 1.5rem 3rem;
+  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.travel-search-content {
+  max-width: 48rem;
+  margin: 0 auto;
+}
+
+.travel-search-title {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: #0f172a;
+  margin: 0 0 0.5rem;
+}
+
+.travel-search-subtitle {
+  font-size: 0.95rem;
+  color: #64748b;
+  margin: 0 0 1.5rem;
+}
+
+.travel-search-form {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.travel-search-input-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 0 1rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+
+.travel-search-icon {
+  font-size: 1.25rem;
+  opacity: 0.7;
+}
+
+.travel-search-input {
+  flex: 1;
+  border: none;
+  padding: 0.875rem 0;
+  font-size: 1rem;
+  color: #0f172a;
+  outline: none;
+}
+
+.travel-search-input::placeholder {
+  color: #94a3b8;
+}
+
+.travel-search-submit {
+  padding: 0.875rem 1.5rem;
+  background: #2563eb;
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.95rem;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.2s;
+}
+
+.travel-search-submit:hover {
+  background: #1d4ed8;
+}
+
+.travel-categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: center;
+}
+
+.travel-category-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1rem;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  font-size: 0.9rem;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.travel-category-btn:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #0f172a;
+}
+
+.travel-category-icon {
+  font-size: 1.1rem;
+}
+
+.travel-category-label {
+  font-weight: 500;
+}
+
+/* จุดหมายยอดนิยม */
+.popular-destinations-section {
+  padding: 3rem 1.5rem;
+  background: #ffffff;
+}
+
+.popular-destinations-content {
+  max-width: 72rem;
+  margin: 0 auto;
+}
+
+.popular-destinations-header {
+  margin-bottom: 2rem;
+}
+
+.popular-destinations-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #0f172a;
+  margin: 0 0 0.35rem;
+}
+
+.popular-destinations-subtitle {
+  font-size: 0.9rem;
+  color: #64748b;
+  margin: 0;
+}
+
+.popular-destinations-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1.5rem;
+}
+
+.destination-card {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  transition: box-shadow 0.2s, transform 0.2s;
+}
+
+.destination-card:hover {
+  box-shadow: 0 10px 25px rgba(0,0,0,0.08);
+  transform: translateY(-2px);
+}
+
+.destination-card-image {
+  height: 140px;
+  background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 50%, #7dd3fc 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.destination-card-image-placeholder {
+  font-size: 4rem;
+  opacity: 0.9;
+}
+
+.destination-card-body {
+  padding: 1.25rem;
+}
+
+.destination-card-title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: #0f172a;
+  margin: 0 0 0.35rem;
+}
+
+.destination-card-dates {
+  font-size: 0.85rem;
+  color: #64748b;
+  margin: 0 0 0.5rem;
+}
+
+.destination-card-description {
+  font-size: 0.9rem;
+  color: #475569;
+  line-height: 1.5;
+  margin: 0 0 1rem;
+}
+
+.destination-card-prices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.destination-price {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.destination-price-icon {
+  font-size: 1rem;
+}
+
+.destination-card-cta {
+  width: 100%;
+  padding: 0.65rem 1rem;
+  background: #2563eb;
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.9rem;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.destination-card-cta:hover {
+  background: #1d4ed8;
+}
+
 /* Hero Section */
 .hero-section {
   position: relative;
@@ -559,6 +794,18 @@
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 3rem;
   margin-bottom: 3rem;
+}
+
+.footer-logo {
+  display: flex;
+  align-items: center;
+}
+
+.footer-logo-img {
+  height: 2.5rem;
+  width: auto;
+  max-width: 200px;
+  object-fit: contain;
 }
 
 .footer-section .logo-icon {

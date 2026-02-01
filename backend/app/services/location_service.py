@@ -1,7 +1,7 @@
 """
-Location Service Module
-Production-grade integration with Google Maps and Amadeus APIs
-Supports geocoding, activities search, transfers, and IATA code conversion
+โมดูลเซอร์วิสสถานที่
+รวม Google Maps และ Amadeus APIs ระดับ production
+รองรับ geocoding การค้นหากิจกรรม การรับส่ง และการแปลงรหัส IATA
 """
 
 from __future__ import annotations

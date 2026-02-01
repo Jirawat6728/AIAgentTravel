@@ -1,6 +1,6 @@
 """
-Chat API Router
-Production-grade endpoint with error handling and background tasks
+เราเตอร์ API แชท
+Endpoint ระดับ production พร้อมจัดการข้อผิดพลาดและงานพื้นหลัง
 """
 
 from fastapi import APIRouter, HTTPException, Header, BackgroundTasks, Request, WebSocket, WebSocketDisconnect
@@ -14,14 +14,13 @@ from app.models import UserSession, TripPlan
 from app.models.trip_plan import SegmentStatus
 from app.engine.agent import TravelAgent
 from app.services.llm import LLMServiceWithMCP
-from app.services.intent_llm import IntentBasedLLM
+from app.services.llm import IntentBasedLLM
 from app.services.title import generate_chat_title
 from app.storage.hybrid_storage import HybridStorage
 from app.core.logging import get_logger, set_logging_context, clear_logging_context
 from app.core.exceptions import AgentException, StorageException, LLMException
 from app.core.config import settings
 from app.services.options_cache import get_options_cache
-from app.engine.workflow_validator import get_workflow_validator, WorkflowStep
 from app.services.tts_service import TTSService
 from app.services.live_audio_service import LiveAudioService
 from fastapi.responses import Response
@@ -37,13 +36,16 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 def _write_debug_log(data: dict):
     """Safely write debug log, creating directory if needed"""
     try:
-        import os
-        debug_log_path = r'c:\Users\Juins\Desktop\DEMO\AITravelAgent\.cursor\debug.log'
-        debug_log_dir = os.path.dirname(debug_log_path)
-        os.makedirs(debug_log_dir, exist_ok=True)
+        from pathlib import Path
+        # Use relative path from backend root
+        debug_log_dir = Path(__file__).parent.parent.parent / 'data' / 'logs' / 'debug'
+        debug_log_dir.mkdir(parents=True, exist_ok=True)
+        debug_log_path = debug_log_dir / 'chat_debug.log'
+        
         with open(debug_log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(data, ensure_ascii=False) + '\n')
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Failed to write debug log: {e}")
         pass  # Silently ignore debug log errors
 
 # Initialize TTS service
@@ -86,14 +88,26 @@ class ChatResponse(BaseModel):
     trip_title: Optional[str] = None
 
 
-def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_context: str = None) -> Dict[str, Any]:
+def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_context: str = None, user_visa_profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Map internal StandardizedItem fields to Frontend-friendly UI Card props.
-    Ensures that cards display Title, Price, and Details correctly.
+    Ensures that cards display Title, Price, and Details correctly (~90% accuracy).
+    user_visa_profile: Optional dict with has_visa, visa_type, visa_expiry_date, etc. for visa_warning personalization.
     """
+    # ✅ Defensive: ensure option is dict and required keys have safe defaults
+    if not isinstance(option, dict):
+        option = {}
+    raw_data = option.get("raw_data")
+    if raw_data is not None and not isinstance(raw_data, dict):
+        raw_data = {}
+    option = dict(option)
+    if raw_data is not None:
+        option["raw_data"] = raw_data
     # 1. Base props
-    tags = option.get("tags", [])
-    recommended = option.get("recommended", False)
+    tags = option.get("tags")
+    if not isinstance(tags, list):
+        tags = []
+    recommended = bool(option.get("recommended", False))
     category = option.get("category")
     
     # Smart Label based on category
@@ -116,24 +130,31 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
     original_id = option.get("id")
     numeric_id = str(index + 1)  # 1-based index for display
     
+    # ✅ Defensive: price/currency always valid for display
+    try:
+        price_val = float(option.get("price_amount", 0) or 0)
+    except (TypeError, ValueError):
+        price_val = 0.0
+    currency_val = option.get("currency") or "THB"
+    if not isinstance(currency_val, str):
+        currency_val = "THB"
     ui_option = {
-        "id": numeric_id,  # ✅ Use numeric index instead of long IDs (e.g., place_id)
+        "id": numeric_id,
         "title": f"{type_label} {index + 1}{tags_suffix}",
-        "subtitle": option.get("provider", ""),
-        "price": option.get("price_amount", 0),
-        "currency": option.get("currency", "THB"),
-        "description": final_description if category != "flight" else None, # รวมชื่อและคำอธิบาย
+        "subtitle": str(option.get("provider") or ""),
+        "price": price_val,
+        "total_price": price_val if price_val > 0 else None,
+        "currency": currency_val,
+        "description": final_description if category != "flight" else None,
         "details": [],
         "image": option.get("image_url"),
         "tags": tags,
         "recommended": recommended,
         "raw": option,
-        "category": category, # Pass category for frontend logic
-        "_original_id": original_id  # ✅ Store original ID for backend reference if needed
+        "category": category,
+        "_original_id": original_id,
     }
-
-    raw_data = option.get("raw_data", {})
-    category = option.get("category")
+    raw_data = option.get("raw_data") or {}
 
     # 2. Category-specific mapping for rich UI (PlanChoiceCard.jsx)
     if category == "flight":
@@ -184,11 +205,26 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
                 for i in range(2, len(itineraries)):
                      process_itinerary(itineraries[i], f"Flight {i+1}")
 
+            flight_price = option.get("price_amount")
+            if flight_price is None and raw_data:
+                price_dict = raw_data.get("price", {})
+                flight_price = price_dict.get("total") or price_dict.get("grandTotal")
+                if flight_price is not None:
+                    try:
+                        flight_price = float(flight_price)
+                    except (TypeError, ValueError):
+                        flight_price = None
             ui_option["flight"] = {
-                "price_total": option.get("price_amount"),
-                "currency": option.get("currency"),
+                "price_total": flight_price,
+                "currency": option.get("currency") or (raw_data.get("price", {}) or {}).get("currency") or "THB",
                 "segments": mapped_segments
             }
+            # ชื่อการ์ดชัดเจน: เที่ยวบิน 1: BKK → NRT
+            if mapped_segments:
+                first_from = mapped_segments[0].get("from") or ""
+                last_to = mapped_segments[-1].get("to") or ""
+                if first_from and last_to:
+                    ui_option["title"] = f"{type_label} {index + 1}: {first_from} → {last_to}{tags_suffix}"
             
             # Enhanced Info from Data Aggregator
             enhanced_info = raw_data.get("enhanced_info", {})
@@ -217,21 +253,25 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
                 "promotions": [] # Placeholder
             }
 
-            # Transit Visa Warning Logic
-            # If flight has legs with stops in different countries than Origin/Dest
-            # We should warn about visa requirements.
-            # Simplified logic: If stops > 0, add a generic transit warning flag.
+            # Transit Visa Warning Logic + 🛂 Profile-based visa hint for search/planning
+            # If flight has legs with stops in different countries than Origin/Dest, warn about visa.
+            base_warning = None
             if len(mapped_segments) > 1:
-                 # Check if any connecting point is a different country (Requires country code logic, simplifying for now)
-                 # Just adding a generic warning for any connection for now
                  if enhanced_info.get("transit_warning"):
-                     ui_option["flight"]["visa_warning"] = enhanced_info.get("transit_warning")
+                     base_warning = enhanced_info.get("transit_warning")
                  else:
-                     ui_option["flight"]["visa_warning"] = "ตรวจสอบวีซ่า Transit"
-            
-            # Check for Self-Transfer tag
+                     base_warning = "ตรวจสอบวีซ่า Transit"
             if "Self-Transfer" in tags:
-                 ui_option["flight"]["visa_warning"] = "⚠️ Self-Transfer: ต้องใช้วีซ่า / รับกระเป๋าเอง"
+                 base_warning = "⚠️ Self-Transfer: ต้องใช้วีซ่า / รับกระเป๋าเอง"
+            if base_warning:
+                 # Personalize using user profile (visa transfer section) for filtering/planning
+                 profile = user_visa_profile or {}
+                 if profile.get("has_visa"):
+                     expiry = profile.get("visa_expiry_date") or ""
+                     hint = f"คุณมีวีซ่าในโปรไฟล์" + (f" (หมดอายุ {expiry})" if expiry else "") + " - ตรวจสอบประเทศปลายทาง/Transit ว่าครอบคลุมหรือไม่"
+                     ui_option["flight"]["visa_warning"] = f"{base_warning}\n💡 {hint}"
+                 else:
+                     ui_option["flight"]["visa_warning"] = f"{base_warning}\n💡 คุณยังไม่มีวีซ่าในโปรไฟล์ - อัพเดทได้ที่ Profile เพื่อช่วยกรองเที่ยวบิน"
 
     elif category == "hotel":
         # Support for: 1. MergedHotelOption, 2. Google discovery, 3. Basic Amadeus
@@ -243,23 +283,42 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
             visuals = raw_data.get("visuals", {})
             loc = raw_data.get("location", {})
             
+            addr = loc.get("address") or ""
+            star = raw_data.get("star_rating") or visuals.get("review_score")
+            hotel_total = pricing.get("total_amount") or option.get("price_amount")
+            if hotel_total is not None:
+                try:
+                    hotel_total = float(hotel_total)
+                except (TypeError, ValueError):
+                    hotel_total = pricing.get("total_amount")
             ui_option["hotel"] = {
                 "hotelName": raw_data.get("hotel_name"),
-                "address": loc.get("address"),
-                "price_total": pricing.get("total_amount"),
-                "currency": pricing.get("currency"),
-                "rating": visuals.get("review_score") or raw_data.get("star_rating"),
-                "visuals": visuals
+                "address": addr,
+                "location": {"address": addr},
+                "price_total": hotel_total,
+                "currency": pricing.get("currency") or option.get("currency") or "THB",
+                "rating": visuals.get("review_score") or star,
+                "star_rating": star,
+                "visuals": visuals,
+                "booking": {
+                    "room": booking.get("room", {}),
+                    "policies": {
+                        "meal_plan": booking.get("policies", {}).get("meal_plan"),
+                        "is_refundable": booking.get("policies", {}).get("is_refundable"),
+                    },
+                    "pricing": {
+                        "price_per_night": pricing.get("price_per_night"),
+                        "taxes_and_fees": pricing.get("taxes_and_fees"),
+                        "total_amount": pricing.get("total_amount"),
+                        "currency": pricing.get("currency"),
+                    },
+                },
             }
             ui_option["price"] = pricing.get("total_amount")
             ui_option["currency"] = pricing.get("currency")
             if visuals.get("image_urls"):
                 ui_option["image"] = visuals["image_urls"][0]
-            
-            # Enrich subtitle with Amadeus vs Google info
-            ui_option["subtitle"] = f"จองผ่าน Amadeus – ข้อมูลโดย Google"
-            
-            # Build details list for rich display
+            ui_option["subtitle"] = "จองผ่าน Amadeus – ข้อมูลโดย Google"
             details = []
             if pricing.get("price_per_night"):
                 details.append(f"฿{pricing['price_per_night']:,}/คืน")
@@ -268,54 +327,136 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
             if booking.get("policies", {}).get("meal_plan"):
                 details.append(f"🍴 {booking['policies']['meal_plan']}")
             ui_option["details"] = details
+            hotel_name_short = (raw_data.get("hotel_name") or "")[:36]
+            if hotel_name_short:
+                ui_option["title"] = f"{type_label} {index + 1}: {hotel_name_short}{tags_suffix}"
 
         elif raw_data.get("google_place"):
-            # ⚠️ Fallback: Google Discovery (No price)
             place = raw_data.get("google_place", {})
+            addr = place.get("formatted_address") or ""
             ui_option["hotel"] = {
                 "hotelName": place.get("name") or ui_option["title"],
                 "cityCode": place.get("_resolved_city"),
-                "address": place.get("formatted_address") or "",
-                "price_total": None, 
+                "address": addr,
+                "location": {"address": addr},
+                "price_total": None,
                 "currency": ui_option["currency"],
                 "rating": place.get("rating"),
                 "visuals": {
                     "review_score": place.get("rating"),
-                    "review_count": place.get("user_ratings_total")
-                }
+                    "review_count": place.get("user_ratings_total"),
+                },
             }
             ui_option["subtitle"] = "Google Places (ไม่ใช่ราคาจองจริง)"
+            name_short = (place.get("name") or "")[:36]
+            if name_short:
+                ui_option["title"] = f"{type_label} {index + 1}: {name_short}{tags_suffix}"
         else:
-            # 🏨 Basic Amadeus (Legacy/Fallback)
             hotel_data = raw_data.get("hotel", {})
             offers = raw_data.get("offers", [])
             first_offer = offers[0] if offers else {}
-            
+            price_from_offer = first_offer.get("price", {}) if first_offer else {}
+            hotel_price_real = (price_from_offer.get("total") or price_from_offer.get("total_amount") or option.get("price_amount") or ui_option["price"])
+            if hotel_price_real is not None:
+                try:
+                    hotel_price_real = float(hotel_price_real)
+                except (TypeError, ValueError):
+                    hotel_price_real = ui_option["price"]
+            addr = ", ".join(hotel_data.get("address", {}).get("lines", []))
             ui_option["hotel"] = {
                 "hotelName": hotel_data.get("name") or ui_option["title"],
                 "cityCode": hotel_data.get("cityCode"),
-                "address": ", ".join(hotel_data.get("address", {}).get("lines", [])),
-                "price_total": ui_option["price"],
+                "address": addr,
+                "location": {"address": addr},
+                "price_total": hotel_price_real,
                 "currency": ui_option["currency"],
-                "rating": hotel_data.get("rating")
+                "rating": hotel_data.get("rating"),
             }
-        
-        # Add nights if available in requirements (from parent segment)
-        # Note: In a real scenario, we'd get this from the session/plan
-        
-    # 3. Build Details tags for generic display
-    details = []
-    if option.get("duration"):
-        details.append(f"⏱ {option['duration']}")
-    if option.get("rating"):
-        details.append(f"⭐ {option['rating']}")
-    if option.get("start_time"):
-        time_str = option['start_time'].split('T')[-1][:5] if 'T' in option['start_time'] else option['start_time']
-        details.append(f"🕒 {time_str}")
+            name_short = (hotel_data.get("name") or "")[:36]
+            if name_short:
+                ui_option["title"] = f"{type_label} {index + 1}: {name_short}{tags_suffix}"
 
-    ui_option["details"] = details
+    elif category in ("transfer", "transport"):
+        raw_data = option.get("raw_data", {}) or option
+        route_parts = []
+        if option.get("display_name"):
+            route_parts.append(option["display_name"])
+        origin = raw_data.get("origin") or option.get("origin")
+        dest = raw_data.get("destination") or option.get("destination")
+        if origin and dest:
+            route_parts.append(f"{origin} → {dest}")
+        route = " | ".join(route_parts) if route_parts else (raw_data.get("route") or (option.get("description") or "")[:80])
+        ui_option["transport"] = {
+            "type": raw_data.get("type") or option.get("category") or "transfer",
+            "route": route or (option.get("description") or "")[:80],
+            "price": option.get("price_amount") or raw_data.get("price") or option.get("price"),
+            "price_amount": option.get("price_amount") or raw_data.get("price"),
+            "currency": option.get("currency") or raw_data.get("currency") or "THB",
+            "duration": raw_data.get("duration") or option.get("duration"),
+            "distance": raw_data.get("distance") or option.get("distance"),
+            "provider": raw_data.get("provider") or option.get("provider") or raw_data.get("company"),
+            "company": raw_data.get("company") or option.get("company"),
+            "vehicle_type": raw_data.get("vehicle_type") or option.get("vehicle_type") or raw_data.get("car_type"),
+            "car_type": raw_data.get("car_type") or option.get("car_type"),
+            "seats": raw_data.get("seats") or option.get("seats") or raw_data.get("capacity"),
+            "capacity": raw_data.get("capacity") or option.get("capacity"),
+            "price_per_day": raw_data.get("price_per_day") or option.get("price_per_day"),
+            "details": raw_data.get("details") or option.get("details"),
+            "features": raw_data.get("features") or raw_data.get("amenities") or option.get("amenities"),
+            "amenities": raw_data.get("amenities") or raw_data.get("features"),
+            "note": raw_data.get("note") or option.get("note"),
+            "description": option.get("description") or raw_data.get("description") or option.get("display_name"),
+        }
+        if option.get("description") and not ui_option["transport"]["route"]:
+            ui_option["transport"]["route"] = (option["description"] or "")[:120]
+        ui_option["price"] = ui_option["transport"].get("price") or ui_option["transport"].get("price_amount") or ui_option["price"]
+        route_short = (ui_option["transport"].get("route") or "")[:40]
+        if route_short:
+            ui_option["title"] = f"{type_label} {index + 1}: {route_short}{tags_suffix}"
+
+    # 3. Build Details tags for generic display (do not overwrite category-specific details)
+    existing_details = ui_option.get("details", [])
+    if not (category == "hotel" and len(existing_details) > 0):
+        details = []
+        if option.get("duration"):
+            details.append(f"⏱ {option['duration']}")
+        if option.get("rating"):
+            details.append(f"⭐ {option['rating']}")
+        if option.get("start_time"):
+            time_str = option['start_time'].split('T')[-1][:5] if 'T' in str(option.get('start_time', '')) else str(option.get("start_time", ""))
+            details.append(f"🕒 {time_str}")
+        ui_option["details"] = details if details else existing_details
 
     return ui_option
+
+
+async def _get_user_visa_profile(storage, user_id: str) -> Dict[str, Any]:
+    """Fetch user visa section from profile for flight/transfer visa filtering and warnings."""
+    if not user_id or user_id == "anonymous" or not storage:
+        return {}
+    try:
+        if hasattr(storage, "db") and storage.db:
+            users_collection = storage.db["users"]
+        elif hasattr(storage, "users_collection") and storage.users_collection:
+            users_collection = storage.users_collection
+        else:
+            return {}
+        user_doc = await users_collection.find_one({"user_id": user_id})
+        if not user_doc:
+            return {}
+        has_visa = bool(user_doc.get("visa_type") or user_doc.get("visa_number"))
+        return {
+            "has_visa": has_visa,
+            "visa_type": user_doc.get("visa_type") or "",
+            "visa_number": user_doc.get("visa_number") or "",
+            "visa_issuing_country": user_doc.get("visa_issuing_country") or "",
+            "visa_expiry_date": user_doc.get("visa_expiry_date") or "",
+            "visa_entry_type": user_doc.get("visa_entry_type") or "S",
+            "visa_purpose": user_doc.get("visa_purpose") or "T",
+        }
+    except Exception as e:
+        logger.debug(f"Failed to get user visa profile for {user_id}: {e}")
+        return {}
 
 
 async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = False, mode: str = "normal"):
@@ -328,14 +469,15 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
     """
     if not session:
         return {
-            "plan_choices": [],
-            "slot_choices": [],
-            "slot_intent": None,
-            "agent_state": {"step": "start"},
+            "agent_state": {"mode": mode},
             "travel_slots": {"flights": [], "accommodations": [], "ground_transport": []}
         }
     
     plan = session.trip_plan
+    # 🛂 Fetch user visa profile for flight/transfer visa_warning personalization
+    user_id = (session.session_id or "").split("::")[0] if getattr(session, "session_id", None) else ""
+    storage = HybridStorage()
+    user_visa_profile = await _get_user_visa_profile(storage, user_id) if user_id else {}
     
     # 1. Map Current Status of all Slots
     # Access new hierarchical structure
@@ -518,7 +660,7 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
         destination_city = outbound_seg.requirements.get("destination")
         departure_date = outbound_seg.requirements.get("departure_date")
         adults = outbound_seg.requirements.get("adults", 1)
-        
+        children = outbound_seg.requirements.get("children", 0)
         # Also try to get from selected_option if available
         if outbound_seg.selected_option:
             raw_data = outbound_seg.selected_option.get("raw_data", {})
@@ -537,6 +679,8 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
         return_date = inbound_seg.requirements.get("departure_date")
         if not adults:
             adults = inbound_seg.requirements.get("adults", 1)
+        if children == 0:
+            children = inbound_seg.requirements.get("children", 0)
     
     # Get from accommodation segments if flights don't have it (fallback)
     if not departure_date and all_accommodations:
@@ -546,6 +690,8 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
             destination_city = first_acc.requirements.get("location")
         if not adults:
             adults = first_acc.requirements.get("guests", 1)
+        if children == 0:
+            children = first_acc.requirements.get("children", 0)
     
     # Get return date from accommodation check_out if no inbound flight (fallback)
     if not return_date and all_accommodations:
@@ -572,7 +718,7 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
     travel_slots["return_date"] = return_date
     travel_slots["end_date"] = return_date  # Alias
     travel_slots["adults"] = adults
-    travel_slots["guests"] = adults  # Alias
+    travel_slots["guests"] = adults + children  # Total (alias for backward compat; frontend may use adults+children)
     travel_slots["children"] = children
     travel_slots["infants"] = infants
     travel_slots["nights"] = nights
@@ -585,269 +731,48 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
     if transport_data:
         travel_slots["transport"] = transport_data
     
-    # 2. Check for active selection or pending work
+    # 2. Build plan_choices/slot_choices จาก segment.options_pool (ข้อมูลจาก Redis/Amadeus) สำหรับ PlanChoiceCard
     slot_choices = []
     slot_intent = None
-    
-    # Helper to iterate all segments with their slot name
     def iter_all_segments():
-        # Iterate Outbound and Inbound separately to preserve context
-        for s in plan.travel.flights.outbound: yield "flights_outbound", s
-        for s in plan.travel.flights.inbound: yield "flights_inbound", s
-        for s in all_accommodations: yield "accommodations", s
-        for s in all_ground: yield "ground_transport", s
-
-    # Priority 1: SELECTING (User needs to pick) - WITH SEQUENTIAL LOGIC FOR FLIGHTS
-    all_selecting_choices = []
-    first_selecting_intent = None
-    
-    # Sequential Logic สำหรับเที่ยวบิน: ให้เลือกขาไปก่อน แล้วค่อยขากลับ
-    outbound_selecting = []
-    inbound_selecting = []
-    other_selecting = []
-    
-    # ✅ Get trip_type early to filter inbound flights for one_way trips
-    trip_type = plan.travel.trip_type if hasattr(plan.travel, 'trip_type') else "round_trip"
-    is_one_way = trip_type == "one_way"
-    
+        for s in plan.travel.flights.outbound:
+            yield "flights_outbound", s
+        for s in plan.travel.flights.inbound:
+            yield "flights_inbound", s
+        for s in all_accommodations:
+            yield "accommodations", s
+        for s in all_ground:
+            yield "ground_transport", s
     for slot_name, segment in iter_all_segments():
-        # ✅ FIX: Skip inbound flights if it's a one_way trip
-        if slot_name == "flights_inbound" and is_one_way:
-            continue  # Don't show inbound flights for one-way trips
-        
-        # Only include segments with SELECTING status
-        has_options = segment.options_pool and len(segment.options_pool) > 0
-        is_selecting = segment.status == SegmentStatus.SELECTING
-        
-        # #region agent log
-        if slot_name in ["accommodations", "ground_transport"]:
-            _write_debug_log({
-                "sessionId": "debug-session",
-                "runId": "run1",
-                "hypothesisId": "B,D",
-                "location": "chat.py:545",
-                "message": f"Segment status check: {slot_name}",
-                "data": {
-                    "slot_name": slot_name,
-                    "status": str(segment.status),
-                    "is_selecting": is_selecting,
-                    "has_options": has_options,
-                    "options_count": len(segment.options_pool) if segment.options_pool else 0
-                },
-                "timestamp": int(datetime.now().timestamp() * 1000)
-            })
-        # #endregion
-        
-        # Only show from SELECTING segments
-        if is_selecting and has_options:
-            raw_choices = segment.options_pool
-            if not raw_choices:
-                continue
-                
-            # Label them correctly based on slot type
-            mapped = [_map_option_for_frontend(opt, i, slot_context=slot_name) for i, opt in enumerate(raw_choices)]
-            
-            if slot_name == "flights_outbound":
-                outbound_selecting.extend(mapped)
-            elif slot_name == "flights_inbound":
-                inbound_selecting.extend(mapped)
-            else:
-                other_selecting.extend(mapped)
-                if not first_selecting_intent:
-                    # Determine intent from category
-                    if mapped:
-                        cat = mapped[0].get("category")
-                        if cat == "hotel": first_selecting_intent = "hotel"
-                        elif cat == "transfer" or cat == "transport": first_selecting_intent = "transfer"
-
-    # Sequential logic (show outbound first, then inbound, then others)
-    # ✅ FIX: Check trip_type - if one_way, only show outbound flights
-    trip_type = plan.travel.trip_type if hasattr(plan.travel, 'trip_type') else "round_trip"
-    is_one_way = trip_type == "one_way"
-    
-    # ✅ Priority order: flights_outbound → flights_inbound → accommodation → ground_transport
-    # ✅ After selecting transport, show accommodation choices next
-    if outbound_selecting:
-        all_selecting_choices = outbound_selecting
-        first_selecting_intent = "flight"
-    elif inbound_selecting and not is_one_way:
-        # ✅ Only show inbound if NOT one_way trip
-        # ตรวจสอบว่า outbound confirmed หรือยัง
-        outbound_confirmed = all(seg.status == SegmentStatus.CONFIRMED for seg in plan.travel.flights.outbound) if plan.travel.flights.outbound else False
-        if outbound_confirmed:
-            all_selecting_choices = inbound_selecting
-            first_selecting_intent = "flight"
-        # ถ้า outbound ยังไม่ confirmed ห้ามแสดง inbound
-    else:
-        # ✅ แสดง other slots (hotels, transfers, etc.)
-        # ✅ Priority: ถ้ามี accommodation ที่ SELECTING → แสดง accommodation ก่อน
-        # ✅ ถ้าไม่มี accommodation → แสดง transport/transfer
-        accommodation_selecting = [c for c in other_selecting if c.get("category") == "hotel"]
-        transport_selecting = [c for c in other_selecting if c.get("category") in ["transport", "transfer"]]
-        
-        # ✅ Check if transport is already confirmed (user already selected transport)
-        transport_confirmed = any(
-            seg.status == SegmentStatus.CONFIRMED 
-            for seg in all_ground
-        )
-        
-        # #region agent log
-        _write_debug_log({
-            "sessionId": "debug-session",
-            "runId": "run1",
-            "hypothesisId": "B,C,D",
-            "location": "chat.py:591",
-            "message": "accommodation/transport selection logic",
-            "data": {
-                "other_selecting_count": len(other_selecting),
-                "other_selecting_categories": [c.get("category") for c in other_selecting],
-                "accommodation_selecting_count": len(accommodation_selecting),
-                "transport_selecting_count": len(transport_selecting),
-                "transport_confirmed": transport_confirmed,
-                "all_ground_count": len(all_ground),
-                "all_ground_statuses": [str(seg.status) for seg in all_ground],
-                "accommodation_segments_count": len(all_accommodations),
-                "accommodation_segments_statuses": [{"status": str(seg.status), "has_options": bool(seg.options_pool and len(seg.options_pool) > 0)} for seg in all_accommodations]
-            },
-            "timestamp": int(datetime.now().timestamp() * 1000)
-        })
-        # #endregion
-        
-        # ✅ NEW LOGIC: ถ้า transport confirmed แล้ว แต่ accommodation ยังเป็น PENDING/SEARCHING → ควร trigger search
-        accommodation_needs_search = any(
-            seg.status in [SegmentStatus.PENDING, SegmentStatus.SEARCHING] 
-            and seg.needs_search()
-            for seg in all_accommodations
-        )
-        
-        # #region agent log
-        _write_debug_log({
-            "sessionId": "debug-session",
-            "runId": "run1",
-            "hypothesisId": "F",
-            "location": "chat.py:600",
-            "message": "Accommodation needs_search check after transport confirmed",
-            "data": {
-                "transport_confirmed": transport_confirmed,
-                "accommodation_needs_search": accommodation_needs_search,
-                "accommodation_segments_status": [str(seg.status) for seg in all_accommodations],
-                "accommodation_segments_needs_search": [seg.needs_search() for seg in all_accommodations]
-            },
-            "timestamp": int(datetime.now().timestamp() * 1000)
-        })
-        # #endregion
-        
-        if accommodation_selecting:
-            # ✅ มี accommodation ที่ SELECTING → แสดง accommodation choices
-            all_selecting_choices = accommodation_selecting
-            first_selecting_intent = "hotel"
-            logger.info(f"Showing accommodation choices ({len(accommodation_selecting)} options) - transport already selected or not needed")
-            # #region agent log
-            _write_debug_log({
-                "sessionId": "debug-session",
-                "runId": "run1",
-                "hypothesisId": "B",
-                "location": "chat.py:620",
-                "message": "BRANCH: accommodation_selecting is truthy",
-                "data": {"branch": "accommodation_selecting", "count": len(accommodation_selecting)},
-                "timestamp": int(datetime.now().timestamp() * 1000)
-            })
-            # #endregion
-        elif transport_selecting and not transport_confirmed:
-            # ✅ ไม่มี accommodation และ transport ยังไม่ selected → แสดง transport choices
-            all_selecting_choices = transport_selecting
-            first_selecting_intent = "transfer"
-            # #region agent log
-            _write_debug_log({
-                "sessionId": "debug-session",
-                "runId": "run1",
-                "hypothesisId": "C",
-                "location": "chat.py:625",
-                "message": "BRANCH: transport_selecting and not transport_confirmed",
-                "data": {"branch": "transport_selecting", "transport_confirmed": transport_confirmed},
-                "timestamp": int(datetime.now().timestamp() * 1000)
-            })
-            # #endregion
-        elif transport_confirmed and accommodation_selecting:
-            # ✅ Transport confirmed แล้ว → แสดง accommodation choices
-            all_selecting_choices = accommodation_selecting
-            first_selecting_intent = "hotel"
-            logger.info(f"Transport already selected - showing accommodation choices ({len(accommodation_selecting)} options)")
-            # #region agent log
-            _write_debug_log({
-                "sessionId": "debug-session",
-                "runId": "run1",
-                "hypothesisId": "C",
-                "location": "chat.py:633",
-                "message": "BRANCH: transport_confirmed and accommodation_selecting",
-                "data": {"branch": "transport_confirmed_accommodation", "transport_confirmed": transport_confirmed, "accommodation_count": len(accommodation_selecting)},
-                "timestamp": int(datetime.now().timestamp() * 1000)
-            })
-            # #endregion
-        elif transport_confirmed and accommodation_needs_search:
-            # ✅ Transport confirmed แล้ว แต่ accommodation ยังต้อง search → แสดง intent เป็น hotel เพื่อให้ frontend แสดงสถานะ
-            # Note: ไม่มี choices ให้แสดง แต่ควรบอกว่า accommodation กำลัง search
-            first_selecting_intent = "hotel"
-            logger.info(f"Transport confirmed - accommodation needs search (status: {[str(seg.status) for seg in all_accommodations]})")
-            # #region agent log
-            _write_debug_log({
-                "sessionId": "debug-session",
-                "runId": "run1",
-                "hypothesisId": "F",
-                "location": "chat.py:644",
-                "message": "BRANCH: transport_confirmed and accommodation_needs_search",
-                "data": {
-                    "branch": "transport_confirmed_accommodation_needs_search",
-                    "transport_confirmed": transport_confirmed,
-                    "accommodation_needs_search": accommodation_needs_search
-                },
-                "timestamp": int(datetime.now().timestamp() * 1000)
-            })
-            # #endregion
-        else:
-            # ✅ Fallback: แสดงทั้งหมด
-            all_selecting_choices = other_selecting
-            # #region agent log
-            _write_debug_log({
-                "sessionId": "debug-session",
-                "runId": "run1",
-                "hypothesisId": "D",
-                "location": "chat.py:650",
-                "message": "BRANCH: fallback to other_selecting",
-                "data": {"branch": "fallback", "other_selecting_count": len(other_selecting)},
-                "timestamp": int(datetime.now().timestamp() * 1000)
-            })
-            # #endregion
-
-    if all_selecting_choices:
-        slot_choices = all_selecting_choices
-        slot_intent = first_selecting_intent # Fallback for frontend
-        logger.info(f"Built {len(slot_choices)} slot_choices from segments (intent: {slot_intent})")
-        # #region agent log
-        _write_debug_log({
-            "sessionId": "debug-session",
-            "runId": "run1",
-            "hypothesisId": "E",
-            "location": "chat.py:618",
-            "message": "Final slot_choices and slot_intent",
-            "data": {
-                "slot_choices_count": len(slot_choices),
-                "slot_intent": slot_intent,
-                "slot_choices_categories": [c.get("category") for c in slot_choices[:5]]
-            },
-            "timestamp": int(datetime.now().timestamp() * 1000)
-        })
-        # #endregion
-    else:
-        # Priority 2: PENDING or SEARCHING (System is working, keep UI focused)
-        if not plan.is_complete():
-            for slot_name, segment in iter_all_segments():
-                if not segment.is_complete():
-                    slot_intent = slot_name.rstrip('s')
-                    if "flights" in slot_name: slot_intent = "flight"
-                    if "accommodation" in slot_name: slot_intent = "hotel"
-                    if "ground" in slot_name: slot_intent = "transfer"
-                    break
+        if segment.status != SegmentStatus.SELECTING or not (segment.options_pool and len(segment.options_pool) > 0):
+            continue
+        raw_choices = segment.options_pool
+        mapped = [_map_option_for_frontend(opt, i, slot_context=slot_name, user_visa_profile=user_visa_profile) for i, opt in enumerate(raw_choices)]
+        if slot_name == "flights_outbound":
+            slot_choices = mapped
+            slot_intent = "flight"
+            break
+        if slot_name == "flights_inbound" and (not getattr(plan.travel, "trip_type", "round_trip") or plan.travel.trip_type == "round_trip"):
+            out_ok = all(s.status == SegmentStatus.CONFIRMED for s in plan.travel.flights.outbound)
+            if out_ok:
+                slot_choices = mapped
+                slot_intent = "flight"
+                break
+        if slot_name == "accommodations":
+            slot_choices = mapped
+            slot_intent = "hotel"
+            break
+        if slot_name == "ground_transport":
+            slot_choices = mapped
+            slot_intent = "transfer"
+            break
+    if not slot_choices:
+        for slot_name, segment in iter_all_segments():
+            if segment.options_pool and len(segment.options_pool) > 0 and segment.status == SegmentStatus.SELECTING:
+                raw_choices = segment.options_pool
+                slot_choices = [_map_option_for_frontend(opt, i, slot_context=slot_name, user_visa_profile=user_visa_profile) for i, opt in enumerate(raw_choices)]
+                slot_intent = "flight" if "flight" in slot_name else "hotel" if "accommodation" in slot_name else "transfer"
+                break
 
     # 3. Determine if trip is ready for summary
     # ✅ แสดง Summary ได้เมื่อ: มี Core Segments (Flight OR Hotel) ที่ Confirmed แล้ว
@@ -865,31 +790,11 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
     has_confirmed_hotels = any(seg.status == SegmentStatus.CONFIRMED for seg in all_accommodations)
     has_core_segments_ready = has_confirmed_flights or has_confirmed_hotels
     
-    # ✅ Mode Detection: ตรวจสอบ mode และการเลือก options
-    has_any_selected = False
     agent_mode_active = (mode == "agent")
-    
-    for slot_name, segment in iter_all_segments():
-        if segment.selected_option:
-            has_any_selected = True
-            break
-    
-    # ✅ Normal Mode: แสดง choices เสมอ (ให้ผู้ใช้เลือกและแก้ไขได้)
-    # ✅ Agent Mode: ถ้าเลือกแล้ว → ไม่แสดง choices, แสดง plan แทน
-    if mode == "agent" and (agent_mode_active or has_any_selected):
-            # Agent Mode: Clear choices เพราะ Agent เลือกให้แล้ว (แสดง plan แทน)
-            slot_choices = []
-            slot_intent = None
-            logger.info(f"Agent Mode: Cleared slot_choices (has_any_selected={has_any_selected}) - showing plan instead")
-    elif mode == "normal":
-        # ✅ Normal Mode: แสดง choices เสมอ (ให้ผู้ใช้เลือกและแก้ไขได้)
-        # ไม่ clear slot_choices แม้จะมี selected_option (ให้ผู้ใช้แก้ไขได้)
-        logger.info(f"Normal Mode: Keeping {len(slot_choices)} slot_choices visible for user selection/editing")
-    
     # แสดง Summary ได้เมื่อ:
     # - Normal Mode: ทั้งหมดเสร็จ หรือ มี Core Segments พร้อมแล้ว (ผู้ใช้เลือกแล้ว)
     # - Agent Mode: ทั้งหมดเสร็จ หรือ มี Core Segments พร้อมแล้ว หรือ Agent เลือกแล้ว
-    should_show_summary = is_fully_complete or has_core_segments_ready or (mode == "agent" and has_any_selected)
+    should_show_summary = is_fully_complete or has_core_segments_ready
     
     # ✅ Build current_plan with formatted data for TripSummaryCard
     current_plan = None
@@ -932,10 +837,28 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
         if not plan.travel.flights.inbound or len(plan.travel.flights.inbound) == 0:
             trip_type = "one_way"
     
-    # ✅ ดึงข้อมูลจาก cache และ validate
+    # ✅ Workflow state (Redis) + อัปเดต step = summary เมื่อพร้อมสรุป
+    workflow_validation = None
+    workflow_step = "planning"
+    if session:
+        try:
+            from app.services.workflow_state import get_workflow_state_service, WorkflowStep as WfStep
+            wf = get_workflow_state_service()
+            workflow_validation = await wf.get_workflow_state(session.session_id)
+            if workflow_validation:
+                workflow_step = workflow_validation.get("step", "planning")
+            if should_show_summary:
+                await wf.set_workflow_state(session.session_id, WfStep.SUMMARY)
+                workflow_step = WfStep.SUMMARY
+                workflow_validation = workflow_validation or {}
+                workflow_validation["step"] = WfStep.SUMMARY
+                workflow_validation["is_complete"] = True
+        except Exception as wf_err:
+            logger.warning(f"Workflow state: {wf_err}")
+    
+    # ✅ ดึงข้อมูลจาก cache (options + raw Amadeus อยู่ที่ Redis)
     cached_options = None
     cache_validation = None
-    workflow_validation = None
     if session:
         try:
             options_cache = get_options_cache()
@@ -944,78 +867,27 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
             logger.info(f"Retrieved cached options for session {session.session_id}: {cache_validation.get('summary', {})}")
         except Exception as cache_error:
             logger.warning(f"Failed to get cached options: {cache_error}")
-        
-        # ✅ Validate workflow step และ trip plan completeness
-        try:
-            workflow_validator = get_workflow_validator()
-            current_workflow_step = workflow_validator.get_current_workflow_step(plan)
-            
-            # Validate trip plan completeness
-            required_slots = []
-            if plan.travel.mode in ["both", "flight_only"]:
-                required_slots.append("flights_outbound")
-                if plan.travel.trip_type == "round_trip":
-                    required_slots.append("flights_inbound")
-            if plan.travel.mode in ["both", "car_only"]:
-                required_slots.append("accommodation")
-            
-            is_complete, completeness_issues = workflow_validator.validate_trip_plan_completeness(
-                plan,
-                required_slots
-            )
-            
-            workflow_validation = {
-                "current_step": current_workflow_step,
-                "is_complete": is_complete,
-                "completeness_issues": completeness_issues,
-                "required_slots": required_slots
-            }
-            
-            logger.info(f"Workflow validation: step={current_workflow_step}, complete={is_complete}, issues={len(completeness_issues)}")
-        except Exception as workflow_error:
-            logger.warning(f"Failed to validate workflow: {workflow_error}")
-            workflow_validation = {
-                "current_step": "unknown",
-                "is_complete": False,
-                "completeness_issues": [f"Validation error: {str(workflow_error)}"],
-                "required_slots": []
-            }
-    
-    # ✅ กำหนด step ตาม workflow validator (ห้ามข้ามขั้นตอน)
-    workflow_step = workflow_validation.get("current_step", "planning") if workflow_validation else "planning"
-    
-    # ถ้าทุกอย่าง complete แล้ว ให้แสดง summary
-    if should_show_summary and workflow_validation and workflow_validation.get("is_complete"):
-        workflow_step = WorkflowStep.TRIP_SUMMARY.value
-    elif should_show_summary:
-        # ถ้ายังไม่ complete แต่ควรแสดง summary ให้ใช้ step เดิม
-        workflow_step = "trip_summary"
     
     return {
-        "plan_choices": slot_choices, 
+        "trip_type": trip_type,
+        "plan_choices": slot_choices,
         "slot_choices": slot_choices,
         "slot_intent": slot_intent,
-        "trip_type": trip_type,  # ✅ Add trip_type so frontend knows if it's one_way
         "agent_state": {
-            "step": workflow_step,  # ✅ ใช้ workflow step จาก validator
-            "slot_workflow": {
-                "current_slot": slot_intent or ("summary" if should_show_summary else None)
-            },
-            "agent_mode": agent_mode_active,  # ✅ Flag สำหรับ frontend
-            "mode": mode,  # ✅ Pass mode to frontend
-            "workflow_validation": workflow_validation  # ✅ เพิ่ม workflow validation
+            "agent_mode": agent_mode_active,
+            "mode": mode,
+            "step": workflow_step,
+            "slot_workflow": {"current_slot": slot_intent or ("summary" if should_show_summary else None)},
         },
         "travel_slots": travel_slots,
         "current_plan": current_plan,
-        # ✅ Add formatted slot data for SlotCards (also in travel_slots)
         "flight": flight_data,
         "hotel": hotel_data,
         "transport": transport_data,
-        # ✅ Add cached options and validation for TripSummary
         "cached_options": cached_options,
         "cache_validation": cache_validation,
-        # ✅ Add workflow validation
-        "workflow_validation": workflow_validation
+        "workflow_validation": workflow_validation,
+        "popular_destinations": getattr(session, "popular_destinations", None)
     }
 
 
@@ -1053,9 +925,10 @@ async def chat_stream(
         import time
         import os
         try:
-            debug_log_path = r'c:\Users\Juins\Desktop\DEMO\AITravelAgent\.cursor\debug.log'
-            debug_log_dir = os.path.dirname(debug_log_path)
-            os.makedirs(debug_log_dir, exist_ok=True)
+            from pathlib import Path
+            debug_log_dir = Path(__file__).parent.parent.parent / 'data' / 'logs' / 'debug'
+            debug_log_dir.mkdir(parents=True, exist_ok=True)
+            debug_log_path = debug_log_dir / 'chat_stream_debug.log'
             with open(debug_log_path, 'a', encoding='utf-8') as f:
                 f.write(json.dumps({
                     "id": f"log_{int(time.time() * 1000)}_event_generator_start",
@@ -1084,9 +957,10 @@ async def chat_stream(
             
             # #region agent log (Hypothesis: No Response)
             try:
-                debug_log_path = r'c:\Users\Juins\Desktop\DEMO\AITravelAgent\.cursor\debug.log'
-                debug_log_dir = os.path.dirname(debug_log_path)
-                os.makedirs(debug_log_dir, exist_ok=True)
+                from pathlib import Path
+                debug_log_dir = Path(__file__).parent.parent.parent / 'data' / 'logs' / 'debug'
+                debug_log_dir.mkdir(parents=True, exist_ok=True)
+                debug_log_path = debug_log_dir / 'chat_session_debug.log'
                 with open(debug_log_path, 'a', encoding='utf-8') as f:
                     f.write(json.dumps({
                         "id": f"log_{int(time.time() * 1000)}_got_existing_session",
@@ -1130,7 +1004,25 @@ async def chat_stream(
             
             try:
                 llm_with_mcp = LLMServiceWithMCP()
-                agent = TravelAgent(storage, llm_service=llm_with_mcp)
+                
+                # ✅ Get user preferences for agent personality
+                agent_personality = "friendly"  # Default
+                try:
+                    if hasattr(storage, 'db') and storage.db:
+                        users_collection = storage.db["users"]
+                        user_data = await users_collection.find_one({"user_id": user_id})
+                        if user_data and user_data.get("preferences"):
+                            preferences = user_data.get("preferences", {})
+                            agent_personality = preferences.get("agentPersonality", "friendly")
+                    elif hasattr(storage, 'users_collection') and storage.users_collection:
+                        user_data = await storage.users_collection.find_one({"user_id": user_id})
+                        if user_data and user_data.get("preferences"):
+                            preferences = user_data.get("preferences", {})
+                            agent_personality = preferences.get("agentPersonality", "friendly")
+                except Exception as pref_error:
+                    logger.warning(f"Failed to load user preferences for personality: {pref_error}")
+                
+                agent = TravelAgent(storage, llm_service=llm_with_mcp, agent_personality=agent_personality)
                 
                 # #region agent log (Hypothesis: No Response)
                 _write_debug_log({
@@ -1391,9 +1283,10 @@ async def chat_stream(
                 "plan_choices": [],
                 "slot_choices": [],
                 "slot_intent": None,
-                "agent_state": {"step": "error"},
+                "agent_state": {"mode": mode, "step": "planning"},
                 "travel_slots": {"flights": [], "accommodations": [], "ground_transport": []},
-                "current_plan": None
+                "current_plan": None,
+                "workflow_validation": None
             }
             
             # 5. Send completion data
@@ -1559,7 +1452,25 @@ async def chat(
         # Instantiate storage and agent (with MCP support)
         storage = HybridStorage()
         llm_with_mcp = LLMServiceWithMCP()
-        agent = TravelAgent(storage, llm_service=llm_with_mcp)
+        
+        # ✅ Get user preferences for agent personality
+        agent_personality = "friendly"  # Default
+        try:
+            if hasattr(storage, 'db') and storage.db:
+                users_collection = storage.db["users"]
+                user_data = await users_collection.find_one({"user_id": user_id})
+                if user_data and user_data.get("preferences"):
+                    preferences = user_data.get("preferences", {})
+                    agent_personality = preferences.get("agentPersonality", "friendly")
+            elif hasattr(storage, 'users_collection') and storage.users_collection:
+                user_data = await storage.users_collection.find_one({"user_id": user_id})
+                if user_data and user_data.get("preferences"):
+                    preferences = user_data.get("preferences", {})
+                    agent_personality = preferences.get("agentPersonality", "friendly")
+        except Exception as pref_error:
+            logger.warning(f"Failed to load user preferences for personality: {pref_error}")
+        
+        agent = TravelAgent(storage, llm_service=llm_with_mcp, agent_personality=agent_personality)
         
         # ✅ SECURITY: CRITICAL - Validate session_id format matches user_id BEFORE loading session
         from app.core.security import validate_session_user_id
@@ -1922,7 +1833,25 @@ async def select_choice(request: dict, fastapi_request: Request):
             raise HTTPException(status_code=403, detail="You do not have permission to access this session")
         
         llm_with_mcp = LLMServiceWithMCP()
-        agent = TravelAgent(storage, llm_service=llm_with_mcp)
+        
+        # ✅ Get user preferences for agent personality
+        agent_personality = "friendly"  # Default
+        try:
+            if hasattr(storage, 'db') and storage.db:
+                users_collection = storage.db["users"]
+                user_data = await users_collection.find_one({"user_id": user_id})
+                if user_data and user_data.get("preferences"):
+                    preferences = user_data.get("preferences", {})
+                    agent_personality = preferences.get("agentPersonality", "friendly")
+            elif hasattr(storage, 'users_collection') and storage.users_collection:
+                user_data = await storage.users_collection.find_one({"user_id": user_id})
+                if user_data and user_data.get("preferences"):
+                    preferences = user_data.get("preferences", {})
+                    agent_personality = preferences.get("agentPersonality", "friendly")
+        except Exception as pref_error:
+            logger.warning(f"Failed to load user preferences for personality: {pref_error}")
+        
+        agent = TravelAgent(storage, llm_service=llm_with_mcp, agent_personality=agent_personality)
         
         # ✅ สร้างข้อความที่รวมข้อมูล choice ทั้งหมดเพื่อให้ AI รู้ว่าผู้ใช้เลือกข้อมูลอะไร
         if choice_data:
@@ -2034,13 +1963,13 @@ async def generate_tts(request: dict, fastapi_request: Request):
             audio_format=audio_format
         )
         
-        # Return audio as response
-        content_type = "audio/mpeg" if audio_format == "MP3" else "audio/wav"
+        # TTS ส่งคืน WAV (เบราว์เซอร์เล่นได้ทั้ง WAV/MP3)
+        content_type = "audio/wav"
         return Response(
             content=audio_data,
             media_type=content_type,
             headers={
-                "Content-Disposition": f'inline; filename="tts.{audio_format.lower()}"'
+                "Content-Disposition": 'inline; filename="tts.wav"'
             }
         )
     except HTTPException:
