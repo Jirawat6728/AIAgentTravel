@@ -1,0 +1,147 @@
+/* ========== Theme: Content Area Only (ไม่รวม header) ========== */
+
+[data-theme="dark"] {
+  --content-bg: #1e1e2e;
+  --content-bg-card: #2d2d3d;
+  --content-bg-hover: #3d3d4d;
+  --content-text: #e4e4e7;
+  --content-text-muted: #a1a1aa;
+  --content-border: #3f3f46;
+  --content-accent: #60a5fa;
+}
+
+[data-theme="dark"].settings-content-area {
+  background-color: var(--content-bg);
+}
+
+[data-theme="dark"] .settings-container {
+  /* container inherits page bg */
+}
+
+[data-theme="dark"] .settings-sidebar,
+[data-theme="dark"] .settings-content {
+  background: var(--content-bg-card);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+[data-theme="dark"] .settings-sidebar h2,
+[data-theme="dark"] .settings-section h3,
+[data-theme="dark"] .settings-item label {
+  color: var(--content-text);
+}
+
+[data-theme="dark"] .settings-nav-item {
+  color: var(--content-text-muted);
+}
+
+[data-theme="dark"] .settings-nav-item:hover {
+  background-color: var(--content-bg-hover);
+  color: var(--content-text);
+}
+
+[data-theme="dark"] .settings-nav-item.active {
+  background-color: #3b82f6;
+  color: white;
+}
+
+[data-theme="dark"] .form-select,
+[data-theme="dark"] .form-input,
+[data-theme="dark"] .form-textarea {
+  background: var(--content-bg);
+  border-color: var(--content-border);
+  color: var(--content-text);
+}
+
+[data-theme="dark"] .settings-content .settings-item-control span,
+[data-theme="dark"] .settings-content .settings-item-control .btn-link {
+  color: var(--content-accent);
+}
+
+/* My Bookings */
+[data-theme="dark"].my-bookings-content {
+  background-color: var(--content-bg);
+  color: var(--content-text);
+}
+
+[data-theme="dark"] .my-bookings-content .booking-card,
+[data-theme="dark"] .my-bookings-content .bookings-list > div {
+  background: var(--content-bg-card);
+  border-color: var(--content-border);
+  color: var(--content-text);
+}
+
+[data-theme="dark"] .my-bookings-content .booking-card h3,
+[data-theme="dark"] .my-bookings-content .empty-text {
+  color: var(--content-text);
+}
+
+[data-theme="dark"] .my-bookings-content .empty-subtext,
+[data-theme="dark"] .my-bookings-content .booking-meta {
+  color: var(--content-text-muted);
+}
+
+/* Payment Page */
+[data-theme="dark"].payment-page-content {
+  background-color: var(--content-bg);
+  color: var(--content-text);
+}
+
+[data-theme="dark"] .payment-page-content .card-form-container,
+[data-theme="dark"] .payment-page-content .payment-summary {
+  background: var(--content-bg-card);
+  border-color: var(--content-border);
+}
+
+/* Flights, Hotels, Car Rentals */
+[data-theme="dark"].flights-content,
+[data-theme="dark"].hotels-content,
+[data-theme="dark"].car-rentals-content {
+  background-color: var(--content-bg);
+  color: var(--content-text);
+}
+
+[data-theme="dark"] .flights-hero h1,
+[data-theme="dark"] .hotels-hero h1,
+[data-theme="dark"] .car-rentals-hero h1 {
+  color: var(--content-text);
+}
+
+/* Chat Main (sidebar + chat area) */
+[data-theme="dark"].chat-main {
+  background-color: var(--content-bg);
+}
+
+[data-theme="dark"] .trip-sidebar {
+  background: var(--content-bg-card);
+  border-color: var(--content-border);
+}
+
+[data-theme="dark"] .trip-sidebar .trip-sidebar-title,
+[data-theme="dark"] .trip-sidebar .trip-item-title {
+  color: var(--content-text);
+}
+
+[data-theme="dark"] .chat-messages-container {
+  background: var(--content-bg);
+}
+
+[data-theme="dark"] .chat-message.user {
+  background: var(--content-bg-card);
+  color: var(--content-text);
+}
+
+[data-theme="dark"] .chat-message.assistant {
+  background: var(--content-bg-hover);
+  color: var(--content-text);
+}
+
+[data-theme="dark"] .chat-input-container {
+  background: var(--content-bg-card);
+  border-color: var(--content-border);
+}
+
+[data-theme="dark"] .chat-input-textarea {
+  background: var(--content-bg);
+  border-color: var(--content-border);
+  color: var(--content-text);
+}

@@ -7,18 +7,143 @@
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable, Awaitable
 from datetime import datetime
+import random
+import asyncio
+import uuid
 
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.storage.mongodb_storage import MongoStorage
 from app.services.omise_service import OmiseService
+from app.core.exceptions import AmadeusException
 import httpx
 
 logger = get_logger(__name__)
 
+# ✅ My Bookings = Amadeus sandbox: retry จนกว่าจะสำเร็จ ห้ามฝั่งใดฝั่งหนึ่งสำเร็จอย่างเดียว
+AMADEUS_SYNC_MAX_RETRIES = 5
+AMADEUS_SYNC_RETRY_DELAY_SEC = 2
+
+
+async def _amadeus_retry_until_success(operation_name: str, coro_fn: Callable[[], Awaitable[None]]) -> None:
+    """รัน Amadeus operation ด้วย retry จนกว่าจะสำเร็จ (หรือครบจำนวนครั้ง)"""
+    last_err = None
+    for attempt in range(1, AMADEUS_SYNC_MAX_RETRIES + 1):
+        try:
+            await coro_fn()
+            if attempt > 1:
+                logger.info(f"Amadeus {operation_name} succeeded on attempt {attempt}")
+            return
+        except Exception as e:
+            last_err = e
+            logger.warning(f"Amadeus {operation_name} attempt {attempt}/{AMADEUS_SYNC_MAX_RETRIES} failed: {e}")
+            if attempt < AMADEUS_SYNC_MAX_RETRIES:
+                await asyncio.sleep(AMADEUS_SYNC_RETRY_DELAY_SEC)
+    raise last_err
+
+
+async def _sync_booking_to_amadeus_sandbox(booking_doc: dict, bookings_collection) -> None:
+    """
+    ส่งข้อมูลจองทั้งหมดไปยัง Amadeus sandbox
+    ต้องสำเร็จเท่านั้น — ถ้า Amadeus ล้มเหลวจะ raise เพื่อไม่ให้การชำระเงินถูกยืนยัน
+    """
+    if not booking_doc:
+        return
+    if settings.amadeus_booking_env.lower() == "production":
+        raise AmadeusException("Amadeus booking env is production — ไม่อนุญาตให้ sync ใน production")
+    from app.services.travel_service import orchestrator
+    plan = booking_doc.get("plan") or {}
+    travel_slots = booking_doc.get("travel_slots") or {}
+    user_id = booking_doc.get("user_id", "")
+    booking_id = booking_doc.get("booking_id") or str(booking_doc.get("_id", ""))
+    adults = int(travel_slots.get("adults") or 1)
+    children = int(travel_slots.get("children") or 0)
+    travelers = []
+    for i in range(adults):
+        travelers.append({
+            "id": str(i + 1),
+            "dateOfBirth": "1990-01-01",
+            "name": {"firstName": "Traveler", "lastName": f"Adult{i + 1}"},
+            "gender": "M"
+        })
+    for i in range(children):
+        travelers.append({
+            "id": str(adults + i + 1),
+            "dateOfBirth": "2015-01-01",
+            "name": {"firstName": "Child", "lastName": f"{i + 1}"},
+            "gender": "M"
+        })
+    if not travelers:
+        travelers = [{"id": "1", "dateOfBirth": "1990-01-01", "name": {"firstName": "Guest", "lastName": "1"}, "gender": "M"}]
+    flight_order_ids = []
+    hotel_booking_ids = []
+    travel = plan.get("travel") or {}
+    flights_data = travel.get("flights") or {}
+    for direction in ("outbound", "inbound"):
+        segments = flights_data.get(direction) or []
+        for seg in segments:
+            opt = seg.get("selected_option") or {}
+            raw = opt.get("raw_data") or opt
+            if not raw:
+                continue
+            offer = raw if isinstance(raw, dict) else {}
+            if not offer.get("id") and not offer.get("itineraries"):
+                continue
+            result = await orchestrator.create_flight_order(offer, travelers)
+            if result and result.get("data", {}).get("id"):
+                flight_order_ids.append(result["data"]["id"])
+                logger.info(f"Amadeus sandbox flight order created: {result['data']['id']} for booking {booking_id}")
+    acc = plan.get("accommodation") or {}
+    acc_segments = acc.get("segments") if isinstance(acc, dict) else (plan.get("accommodations") or [])
+    if not isinstance(acc_segments, list):
+        acc_segments = []
+    guests = [{"name": {"title": "MR", "firstName": "Guest", "lastName": "1"}, "contact": {"email": "guest@test.com", "phone": "+66800000000"}}]
+    for seg in acc_segments:
+        opt = seg.get("selected_option") if isinstance(seg, dict) else None
+        if not opt:
+            continue
+        raw = (opt.get("raw_data") or opt) if isinstance(opt, dict) else {}
+        offer_id = raw.get("id") or raw.get("offerId") or (opt.get("id") if isinstance(opt, dict) else None)
+        if not offer_id:
+            continue
+        hotel_offer = {"id": offer_id} if isinstance(offer_id, str) else offer_id
+        result = await orchestrator.create_hotel_booking(hotel_offer, guests)
+        if result and result.get("data", {}).get("id"):
+            hotel_booking_ids.append(result["data"]["id"])
+            logger.info(f"Amadeus sandbox hotel booking created: {result['data']['id']} for booking {booking_id}")
+    from bson import ObjectId
+    update_filter = {"user_id": user_id}
+    if len(booking_id) == 24:
+        try:
+            update_filter["_id"] = ObjectId(booking_id)
+        except Exception:
+            update_filter["booking_id"] = booking_id
+    else:
+        update_filter["booking_id"] = booking_id
+    await bookings_collection.update_one(
+        update_filter,
+        {"$set": {
+            "amadeus_sync": {
+                "flight_order_ids": flight_order_ids,
+                "hotel_booking_ids": hotel_booking_ids,
+                "synced_at": datetime.utcnow().isoformat()
+            },
+            "updated_at": datetime.utcnow().isoformat()
+        }}
+    )
+    logger.info(f"Booking {booking_id} synced to Amadeus sandbox: flights={len(flight_order_ids)}, hotels={len(hotel_booking_ids)}")
+
 router = APIRouter(prefix="/api/booking", tags=["booking"])
+
+
+def _generate_numeric_booking_id() -> str:
+    """Generate a unique numeric booking ID (10–12 digits), Amadeus-style."""
+    # 8 digits from timestamp (ms) + 4 random digits = 12 digits total, unique enough
+    base = int(datetime.utcnow().timestamp() * 1000) % (10 ** 8)
+    suffix = random.randint(1000, 9999)
+    return str(base * 10000 + suffix)
 
 
 # =============================================================================
@@ -74,11 +199,12 @@ class BookingUpdateRequest(BaseModel):
 # =============================================================================
 
 @router.post("/create")
-async def create_booking(request: BookingCreateRequest):
+async def create_booking(booking_request: BookingCreateRequest, fastapi_request: Request):
     """
     Create a new booking (pending payment or confirmed for Agent Mode).
     Returns {ok, booking_id, message, status}. Cancel via POST /api/booking/cancel?booking_id=...
     SECURITY: Amadeus booking is sandbox-only (production blocked).
+    ✅ ใช้ user_id จาก session/cookie เป็นหลัก เพื่อให้การจองแสดงใน My Bookings (list ใช้ session เดียวกัน)
     """
     try:
         # ✅ SECURITY: Check Amadeus booking environment - block production
@@ -90,27 +216,33 @@ async def create_booking(request: BookingCreateRequest):
                 detail="Booking in production environment is not allowed for security reasons. Please use sandbox environment."
             )
         
+        # ✅ ใช้ user_id จาก session/cookie ก่อน (ให้ตรงกับ /list ที่ใช้ extract_user_id_from_request) เพื่อให้จองแล้วแสดงใน My Bookings
+        from app.core.security import extract_user_id_from_request
+        session_user_id = extract_user_id_from_request(fastapi_request)
+        body_user_id = (booking_request.user_id or "").strip()
+        user_id = (session_user_id or body_user_id).strip() if (session_user_id or body_user_id) else None
+        if session_user_id and body_user_id and session_user_id != body_user_id:
+            logger.warning(f"Booking create: session user_id ({session_user_id}) != body user_id ({body_user_id}), using session for list consistency")
+        
         # ✅ Log incoming request for debugging
-        logger.info(f"Creating booking - trip_id: {request.trip_id}, user_id: {request.user_id}, mode: {request.mode}, booking_env: {booking_env}")
-        logger.debug(f"Booking request - plan keys: {list(request.plan.keys()) if request.plan else 'None'}, travel_slots keys: {list(request.travel_slots.keys()) if request.travel_slots else 'None'}, total_price: {request.total_price}")
+        logger.info(f"Creating booking - trip_id: {booking_request.trip_id}, user_id: {user_id}, mode: {booking_request.mode}, booking_env: {booking_env}")
+        logger.debug(f"Booking request - plan keys: {list(booking_request.plan.keys()) if booking_request.plan else 'None'}, travel_slots keys: {list(booking_request.travel_slots.keys()) if booking_request.travel_slots else 'None'}, total_price: {booking_request.total_price}")
         
         # ✅ Validate required fields
-        if not request.plan or not isinstance(request.plan, dict):
+        if not booking_request.plan or not isinstance(booking_request.plan, dict):
             raise HTTPException(status_code=400, detail="Invalid request format: 'plan' is required and must be a dictionary")
-        if not request.travel_slots or not isinstance(request.travel_slots, dict):
+        if not booking_request.travel_slots or not isinstance(booking_request.travel_slots, dict):
             raise HTTPException(status_code=400, detail="Invalid request format: 'travel_slots' is required and must be a dictionary")
-        if request.total_price is None or (isinstance(request.total_price, (int, float)) and request.total_price < 0):
+        if booking_request.total_price is None or (isinstance(booking_request.total_price, (int, float)) and booking_request.total_price < 0):
             raise HTTPException(status_code=400, detail="Invalid request format: 'total_price' must be a non-negative number")
-        if not request.user_id:
+        if not body_user_id and not session_user_id:
             raise HTTPException(status_code=400, detail="Invalid request format: 'user_id' is required")
-        if not request.trip_id:
+        if not booking_request.trip_id:
             raise HTTPException(status_code=400, detail="Invalid request format: 'trip_id' is required")
         
         storage = MongoStorage()
         await storage.connect()
         
-        # ✅ SECURITY: Validate and normalize user_id
-        user_id = request.user_id.strip() if request.user_id else None
         if not user_id:
             raise HTTPException(status_code=400, detail="Invalid request format: 'user_id' is required and cannot be empty")
         
@@ -129,35 +261,44 @@ async def create_booking(request: BookingCreateRequest):
         # Status is always "pending_payment" - user must pay first
         initial_status = "pending_payment"
         
+        bookings_collection = storage.db["bookings"]
+        # ✅ Generate unique numeric booking_id (Amadeus-style, 10–12 digits)
+        for _ in range(5):
+            numeric_id = _generate_numeric_booking_id()
+            existing = await bookings_collection.find_one({"booking_id": numeric_id})
+            if not existing:
+                break
+            logger.debug(f"Booking ID collision, retrying: {numeric_id}")
+        else:
+            numeric_id = _generate_numeric_booking_id()  # fallback
+
         # Create booking document
         booking_doc = {
-            "trip_id": request.trip_id,
-            "chat_id": request.chat_id,
-            "user_id": user_id,  # ✅ Use normalized user_id
-            "plan": request.plan,
-            "travel_slots": request.travel_slots,
-            "total_price": request.total_price,
-            "currency": request.currency,
+            "booking_id": numeric_id,  # ✅ ตัวเลขแบบ Amadeus (ใช้เป็น ID หลักใน API และ UI)
+            "trip_id": booking_request.trip_id,
+            "chat_id": booking_request.chat_id,
+            "user_id": user_id,  # ✅ Use session user_id so /list returns this booking
+            "plan": booking_request.plan,
+            "travel_slots": booking_request.travel_slots,
+            "total_price": booking_request.total_price,
+            "currency": booking_request.currency,
             "status": initial_status,  # ✅ "confirmed" for Agent Mode, "pending_payment" for Normal Mode
             "created_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat(),
             "metadata": {
-                "mode": request.mode or "normal",  # ✅ Store chat mode
-                "auto_booked": request.auto_booked or False  # ✅ Flag for agent mode
+                "mode": booking_request.mode or "normal",  # ✅ Store chat mode
+                "auto_booked": booking_request.auto_booked or False  # ✅ Flag for agent mode
             }
         }
         
-        # Insert into bookings collection
-        bookings_collection = storage.db["bookings"]
-        
         # ✅ CRUD STABILITY: Check for duplicate booking (same trip_id + user_id)
         existing_booking = await bookings_collection.find_one({
-            "trip_id": request.trip_id,
+            "trip_id": booking_request.trip_id,
             "user_id": user_id,
             "status": {"$in": ["pending_payment", "confirmed", "paid"]}
         })
         if existing_booking:
-            logger.warning(f"Duplicate booking attempt: trip_id={request.trip_id}, user_id={user_id}")
+            logger.warning(f"Duplicate booking attempt: trip_id={booking_request.trip_id}, user_id={user_id}")
             raise HTTPException(
                 status_code=409,
                 detail="A booking for this trip already exists. Please update the existing booking instead."
@@ -166,7 +307,7 @@ async def create_booking(request: BookingCreateRequest):
         # ✅ CRUD STABILITY: Insert with error handling for duplicate key errors
         try:
             result = await bookings_collection.insert_one(booking_doc)
-            booking_id = str(result.inserted_id)
+            booking_id = numeric_id  # ✅ Return numeric ID (ไม่ใช้ ObjectId)
         except Exception as insert_error:
             error_str = str(insert_error).lower()
             if "duplicate" in error_str or "e11000" in error_str:
@@ -181,7 +322,7 @@ async def create_booking(request: BookingCreateRequest):
         
         # ✅ เคลียร์ Redis workflow + options + raw Amadeus เมื่อจองสำเร็จ (workflow เสร็จสิ้น)
         try:
-            session_id = f"{user_id}::{request.chat_id or request.trip_id}"
+            session_id = f"{user_id}::{booking_request.chat_id or booking_request.trip_id}"
             from app.services.options_cache import get_options_cache
             from app.services.workflow_state import get_workflow_state_service
             options_cache = get_options_cache()
@@ -218,8 +359,8 @@ async def create_booking(request: BookingCreateRequest):
                     "created_at": datetime.utcnow().isoformat(),
                     "metadata": {
                         "status": initial_status,
-                        "total_price": request.total_price,
-                        "currency": request.currency
+"total_price": booking_request.total_price,
+                    "currency": booking_request.currency or "THB"
                     }
                 }
                 await notifications_collection.insert_one(notification_doc)
@@ -240,9 +381,13 @@ async def create_booking(request: BookingCreateRequest):
             "ok": True,
             "booking_id": booking_id,
             "message": message,
-            "status": initial_status
+            "status": initial_status,
+            "total_price": booking_request.total_price,
+            "currency": booking_request.currency or "THB",
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to create booking: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create booking: {str(e)}")
@@ -334,9 +479,13 @@ async def list_bookings(request: Request):
                 "message": "Failed to retrieve bookings"
             }
         
-        # Convert ObjectId to string
+        # ✅ Expose ID for client: ใช้ booking_id (ตัวเลขแบบ Amadeus) เป็นหลัก ถ้าไม่มีใช้ _id (backward compat)
         for booking in bookings:
-            booking["_id"] = str(booking["_id"])
+            bid = booking.get("booking_id")
+            if bid is not None:
+                booking["_id"] = str(bid)
+            else:
+                booking["_id"] = str(booking["_id"])
         
         result = {
             "ok": True,
@@ -796,14 +945,31 @@ async def cancel_booking(
             logger.error(f"🚨 SECURITY ALERT: Booking {booking_id} user_id mismatch! expected {user_id}, found {booking_user_id}")
             raise HTTPException(status_code=403, detail="You do not have permission to cancel this booking")
         
-        # ✅ CRUD STABILITY: Update status with user_id filter for atomic operation
+        # ✅ Amadeus sandbox sync: ยกเลิก flight orders ใน Amadeus ก่อน — สำเร็จทุกอันถึงค่อยอัปเดต DB (retry จนกว่าจะได้)
+        amadeus_sync = booking.get("amadeus_sync") or {}
+        flight_order_ids = amadeus_sync.get("flight_order_ids") or []
+        if flight_order_ids and settings.amadeus_booking_env.lower() != "production":
+            from app.services.travel_service import orchestrator
+            for order_id in flight_order_ids:
+                async def _cancel_one(oid=order_id):
+                    await orchestrator.delete_flight_order(oid)
+                try:
+                    await _amadeus_retry_until_success(f"cancel_flight_order_{order_id}", _cancel_one)
+                except (AmadeusException, Exception) as ae:
+                    logger.error(f"Amadeus cancel flight order failed after retries: booking={booking_id} order={order_id}: {ae}")
+                    raise HTTPException(
+                        status_code=502,
+                        detail="ไม่สามารถยกเลิกการจองใน Amadeus sandbox ได้ การยกเลิกจะไม่ดำเนินการ กรุณาติดต่อฝ่ายบริการหรือลองใหม่ในภายหลัง"
+                    )
+        
+        # ✅ อัปเดต DB หลัง Amadeus ยกเลิกครบแล้วเท่านั้น
         from bson import ObjectId
         try:
             result = await bookings_collection.update_one(
                 {"_id": ObjectId(booking_id), "user_id": user_id},  # ✅ Atomic update with user_id filter
                 {"$set": {"status": "cancelled", "updated_at": datetime.utcnow().isoformat()}}
             )
-        except:
+        except Exception:
             result = await bookings_collection.update_one(
                 {"booking_id": booking_id, "user_id": user_id},  # ✅ Atomic update with user_id filter
                 {"$set": {"status": "cancelled", "updated_at": datetime.utcnow().isoformat()}}
@@ -1420,7 +1586,26 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
                 if response.status_code == 200:
                     charge_data = response.json()
                     
-                    # Update booking status
+                    # ✅ ห้ามยืนยันการชำระเงินจนกว่าจะส่งข้อมูลไป Amadeus sandbox สำเร็จ (retry จนกว่าจะได้)
+                    if charge_data.get("paid"):
+                        async def _do_sync():
+                            await _sync_booking_to_amadeus_sandbox(booking, bookings_collection)
+                        try:
+                            await _amadeus_retry_until_success("sync_booking", _do_sync)
+                        except AmadeusException as ae:
+                            logger.error(f"Amadeus sandbox sync failed after retries — payment not confirmed: {ae}")
+                            raise HTTPException(
+                                status_code=502,
+                                detail="ไม่สามารถส่งข้อมูลการจองไป Amadeus sandbox ได้ การชำระเงินจะไม่ถูกยืนยัน กรุณาติดต่อฝ่ายบริการหรือลองใหม่ในภายหลัง"
+                            )
+                        except Exception as sync_err:
+                            logger.error(f"Amadeus sandbox sync failed after retries — payment not confirmed: {sync_err}", exc_info=True)
+                            raise HTTPException(
+                                status_code=502,
+                                detail="ไม่สามารถส่งข้อมูลการจองไป Amadeus sandbox ได้ การชำระเงินจะไม่ถูกยืนยัน กรุณาติดต่อฝ่ายบริการหรือลองใหม่ในภายหลัง"
+                            )
+                    
+                    # Update booking status (paid ได้เฉพาะหลัง sync Amadeus สำเร็จ)
                     try:
                         await bookings_collection.update_one(
                             {"_id": ObjectId(request.booking_id)},
@@ -1431,7 +1616,7 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
                                 "updated_at": datetime.utcnow().isoformat()
                             }}
                         )
-                    except:
+                    except Exception:
                         await bookings_collection.update_one(
                             {"booking_id": request.booking_id},
                             {"$set": {
@@ -1446,9 +1631,11 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
                     
                     # ✅ Invalidate bookings list cache for this user
                     try:
-                        booking = await bookings_collection.find_one({"_id": ObjectId(request.booking_id)})
-                        if booking:
-                            user_id_for_cache = booking.get("user_id")
+                        booking_for_cache = await bookings_collection.find_one({"_id": ObjectId(request.booking_id)})
+                        if not booking_for_cache:
+                            booking_for_cache = await bookings_collection.find_one({"booking_id": request.booking_id})
+                        if booking_for_cache:
+                            user_id_for_cache = booking_for_cache.get("user_id")
                             if user_id_for_cache:
                                 from app.core.redis_cache import cache
                                 cache_key = f"bookings:list:{user_id_for_cache}"
@@ -1536,6 +1723,15 @@ class AddSavedCardRequest(BaseModel):
     email: Optional[str] = Field(None, description="Customer email (for Omise customer)")
 
 
+class AddSavedCardLocalRequest(BaseModel):
+    """Request model for adding a saved card to DB only (no Omise)"""
+    last4: str = Field(..., description="Last 4 digits of card")
+    brand: str = Field(..., description="Card brand: visa, mastercard, amex, etc.")
+    expiry_month: str = Field(..., description="MM")
+    expiry_year: str = Field(..., description="YY")
+    name: Optional[str] = Field(None, description="Cardholder name")
+
+
 @router.get("/saved-cards")
 async def list_saved_cards(request: Request):
     """
@@ -1550,7 +1746,8 @@ async def list_saved_cards(request: Request):
         await storage.connect()
         doc = await storage.saved_cards_collection.find_one({"user_id": user_id})
         cards = (doc or {}).get("cards") or []
-        return {"ok": True, "cards": cards, "customer_id": doc.get("omise_customer_id") if doc else None}
+        primary_card_id = doc.get("primary_card_id") if doc else None
+        return {"ok": True, "cards": cards, "customer_id": doc.get("omise_customer_id") if doc else None, "primary_card_id": primary_card_id}
     except HTTPException:
         raise
     except Exception as e:
@@ -1636,7 +1833,7 @@ async def add_saved_card(fastapi_request: Request, body: AddSavedCardRequest):
             # Return updated list
             doc = await coll.find_one({"user_id": user_id})
             cards = (doc or {}).get("cards") or []
-        return {"ok": True, "cards": cards, "customer_id": customer_id}
+        return {"ok": True, "cards": cards, "customer_id": customer_id, "primary_card_id": doc.get("primary_card_id") if doc else None}
     except HTTPException:
         raise
     except Exception as e:
@@ -1644,45 +1841,134 @@ async def add_saved_card(fastapi_request: Request, body: AddSavedCardRequest):
         raise HTTPException(status_code=500, detail=f"Failed to add saved card: {str(e)}")
 
 
-@router.delete("/saved-cards/{card_id}")
-async def delete_saved_card(fastapi_request: Request, card_id: str):
-    """
-    Remove a saved card from MongoDB and from Omise customer.
-    """
+@router.put("/saved-cards/{card_id}/set-primary")
+async def set_primary_card(fastapi_request: Request, card_id: str):
+    """Set a card as the primary payment card."""
     try:
         user_id = fastapi_request.headers.get("X-User-ID") or fastapi_request.cookies.get(settings.session_cookie_name)
         if not user_id:
             raise HTTPException(status_code=401, detail="Authentication required")
-        if not settings.omise_secret_key or not settings.omise_secret_key.startswith("skey_"):
-            raise HTTPException(status_code=500, detail="Omise secret key not configured")
         storage = MongoStorage()
         await storage.connect()
         coll = storage.saved_cards_collection
         doc = await coll.find_one({"user_id": user_id})
         if not doc:
             raise HTTPException(status_code=404, detail="No saved cards")
-        customer_id = doc.get("omise_customer_id")
-        if not customer_id:
-            raise HTTPException(status_code=404, detail="No Omise customer")
         cards = doc.get("cards") or []
         if not any(c.get("card_id") == card_id for c in cards):
             raise HTTPException(status_code=404, detail="Card not found")
-        async with httpx.AsyncClient() as client:
-            resp = await client.delete(
-                f"https://api.omise.co/customers/{customer_id}/cards/{card_id}",
-                auth=(settings.omise_secret_key, ""),
-                timeout=30.0,
-            )
-            if resp.status_code not in (200, 204):
-                err = resp.json() if resp.text else {}
-                logger.warning(f"Omise delete card: {resp.status_code} - {err}")
         await coll.update_one(
             {"user_id": user_id},
-            {"$pull": {"cards": {"card_id": card_id}}, "$set": {"updated_at": datetime.utcnow().isoformat()}},
+            {"$set": {"primary_card_id": card_id, "updated_at": datetime.utcnow().isoformat()}},
+        )
+        return {"ok": True, "primary_card_id": card_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to set primary card: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to set primary card: {str(e)}")
+
+
+@router.post("/saved-cards/add-local")
+async def add_saved_card_local(fastapi_request: Request, body: AddSavedCardLocalRequest):
+    """
+    Add a card to the user's saved cards in MongoDB only (no Omise).
+    Stores last4, brand, expiry — never full card number or CVV.
+    """
+    try:
+        user_id = fastapi_request.headers.get("X-User-ID") or fastapi_request.cookies.get(settings.session_cookie_name)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        last4 = "".join(c for c in (body.last4 or "") if c.isdigit())[-4:]
+        if len(last4) != 4:
+            raise HTTPException(status_code=400, detail="last4 must be 4 digits")
+        brand_raw = (body.brand or "Card").strip().lower()
+        brand_map = {"visa": "Visa", "mastercard": "Mastercard", "amex": "American Express", "jcb": "JCB",
+                     "discover": "Discover", "diners": "Diners Club", "unionpay": "UnionPay"}
+        brand = brand_map.get(brand_raw, brand_raw.title() if brand_raw else "Card")
+        mm = (body.expiry_month or "").strip()
+        yy = (body.expiry_year or "").strip()
+        if len(mm) != 2 or len(yy) != 2 or not mm.isdigit() or not yy.isdigit():
+            raise HTTPException(status_code=400, detail="expiry_month and expiry_year must be MM and YY")
+        card_id = "local_" + str(uuid.uuid4())
+        card_info = {
+            "card_id": card_id,
+            "last4": last4,
+            "brand": brand,
+            "expiry_month": mm,
+            "expiry_year": yy,
+        }
+        if body.name and body.name.strip():
+            card_info["name"] = body.name.strip()
+        storage = MongoStorage()
+        await storage.connect()
+        coll = storage.saved_cards_collection
+        doc = await coll.find_one({"user_id": user_id})
+        update_op = {"$set": {"user_id": user_id, "updated_at": datetime.utcnow().isoformat()}, "$push": {"cards": card_info}}
+        if not doc or not doc.get("cards"):
+            update_op["$set"]["primary_card_id"] = card_id
+        await coll.update_one(
+            {"user_id": user_id},
+            update_op,
+            upsert=True,
         )
         doc = await coll.find_one({"user_id": user_id})
         cards = (doc or {}).get("cards") or []
-        return {"ok": True, "cards": cards}
+        primary_card_id = doc.get("primary_card_id") if doc else None
+        return {"ok": True, "cards": cards, "primary_card_id": primary_card_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to add saved card (local): {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to add saved card: {str(e)}")
+
+
+@router.delete("/saved-cards/{card_id}")
+async def delete_saved_card(fastapi_request: Request, card_id: str):
+    """
+    Remove a saved card from MongoDB. For Omise cards, also remove from Omise customer.
+    For local_ cards, only remove from MongoDB.
+    """
+    try:
+        user_id = fastapi_request.headers.get("X-User-ID") or fastapi_request.cookies.get(settings.session_cookie_name)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        storage = MongoStorage()
+        await storage.connect()
+        coll = storage.saved_cards_collection
+        doc = await coll.find_one({"user_id": user_id})
+        if not doc:
+            raise HTTPException(status_code=404, detail="No saved cards")
+        cards = doc.get("cards") or []
+        if not any(c.get("card_id") == card_id for c in cards):
+            raise HTTPException(status_code=404, detail="Card not found")
+        update_data = {"$pull": {"cards": {"card_id": card_id}}, "$set": {"updated_at": datetime.utcnow().isoformat()}}
+        if doc.get("primary_card_id") == card_id:
+            remaining = [c for c in cards if c.get("card_id") != card_id]
+            update_data["$set"]["primary_card_id"] = remaining[0]["card_id"] if remaining else None
+        is_local = card_id.startswith("local_")
+        if not is_local:
+            customer_id = doc.get("omise_customer_id")
+            if not customer_id:
+                raise HTTPException(status_code=404, detail="No Omise customer")
+            if settings.omise_secret_key and settings.omise_secret_key.startswith("skey_"):
+                async with httpx.AsyncClient() as client:
+                    resp = await client.delete(
+                        f"https://api.omise.co/customers/{customer_id}/cards/{card_id}",
+                        auth=(settings.omise_secret_key, ""),
+                        timeout=30.0,
+                    )
+                    if resp.status_code not in (200, 204):
+                        err = resp.json() if resp.text else {}
+                        logger.warning(f"Omise delete card: {resp.status_code} - {err}")
+        await coll.update_one(
+            {"user_id": user_id},
+            update_data,
+        )
+        doc = await coll.find_one({"user_id": user_id})
+        cards = (doc or {}).get("cards") or []
+        primary_card_id = doc.get("primary_card_id") if doc else None
+        return {"ok": True, "cards": cards, "primary_card_id": primary_card_id}
     except HTTPException:
         raise
     except Exception as e:

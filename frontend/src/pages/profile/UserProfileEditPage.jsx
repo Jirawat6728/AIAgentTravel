@@ -1,7 +1,11 @@
-import React, { useState, useEffect } from 'react';
+ import React, { useState, useEffect } from 'react';
+import Swal from 'sweetalert2';
+import { formatCardNumber, getCardType, validateCardNumber } from '../../utils/cardUtils';
+import { CardBrandLogo } from '../settings/SettingsPage';
 import './UserProfileEditPage.css';
 import '../settings/SettingsPage.css';
 import AppHeader from '../../components/common/AppHeader';
+import { useTheme } from '../../context/ThemeContext';
 
 const PROFILE_SECTIONS = [
   { id: 'personal', name: 'ข้อมูลส่วนตัว', icon: '👤' },
@@ -9,6 +13,7 @@ const PROFILE_SECTIONS = [
   { id: 'visa', name: 'ข้อมูลวีซ่า', icon: '🛂' },
   { id: 'address_emergency', name: 'ที่อยู่ / ติดต่อฉุกเฉิน', icon: '📍' },
   { id: 'family', name: 'ผู้จองร่วม', icon: '👨‍👩‍👧‍👦' },
+  { id: 'cards', name: 'บัตรเครดิต/เดบิต', icon: '💳' },
 ];
 
 export default function UserProfileEditPage({ 
@@ -100,6 +105,15 @@ export default function UserProfileEditPage({
   const [activeSection, setActiveSection] = useState('personal');
   const [showDeletePopup, setShowDeletePopup] = useState(false);
 
+  // บัตรเครดิต/เดบิต (saved cards)
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+  const [savedCards, setSavedCards] = useState([]);
+  const [primaryCardId, setPrimaryCardId] = useState(null);
+  const [cardsLoading, setCardsLoading] = useState(false);
+  const [cardsError, setCardsError] = useState(null);
+  const [deletingCardId, setDeletingCardId] = useState(null);
+  const [settingPrimaryId, setSettingPrimaryId] = useState(null);
+
   // ✅ Fetch latest user data from backend when component mounts or user changes
   useEffect(() => {
     const fetchUserData = async () => {
@@ -183,6 +197,187 @@ export default function UserProfileEditPage({
     // ✅ Always fetch fresh data from backend when component mounts
     fetchUserData();
   }, [onRefreshUser]); // ✅ Re-run if onRefreshUser changes
+
+  // โหลดรายการบัตรเมื่อเปิดหมวดบัตรเครดิต/เดบิต
+  useEffect(() => {
+    if (activeSection !== 'cards' || !user?.id) return;
+    setCardsLoading(true);
+    setCardsError(null);
+    const headers = { 'X-User-ID': user.id };
+    fetch(`${API_BASE_URL}/api/booking/saved-cards`, { headers, credentials: 'include' })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error('โหลดบัตรไม่สำเร็จ'))))
+      .then((data) => {
+        if (data.ok && Array.isArray(data.cards)) setSavedCards(data.cards);
+        if (data.ok && data.primary_card_id !== undefined) setPrimaryCardId(data.primary_card_id);
+      })
+      .catch((err) => setCardsError(err.message || 'โหลดบัตรไม่สำเร็จ'))
+      .finally(() => setCardsLoading(false));
+  }, [activeSection, user?.id]);
+
+  // แสดง popup กรอกข้อมูลบัตร (ไม่โหลด Omise)
+  const handleClickAddCard = () => {
+    Swal.fire({
+      title: '💳 เพิ่มบัตรใหม่',
+      customClass: { popup: 'add-card-popup' },
+      html: `
+        <div style="text-align: left;">
+          <div class="add-card-field">
+            <label class="add-card-label" for="swal-card-number">หมายเลขบัตร</label>
+            <input id="swal-card-number" type="text" class="add-card-input" placeholder="1234 5678 9012 3456" maxlength="19" />
+            <div id="swal-card-type-display" class="add-card-type-display" aria-live="polite"></div>
+          </div>
+          <div class="add-card-field">
+            <label class="add-card-label" for="swal-card-name">ชื่อบนบัตร</label>
+            <input id="swal-card-name" type="text" class="add-card-input" placeholder="ชื่อ-นามสกุล" />
+          </div>
+          <div class="add-card-row">
+            <div class="add-card-field">
+              <label class="add-card-label" for="swal-card-expiry">หมดอายุ (MM/YY)</label>
+              <input id="swal-card-expiry" type="text" class="add-card-input" placeholder="MM/YY" maxlength="5" />
+            </div>
+            <div class="add-card-field">
+              <label class="add-card-label" for="swal-card-cvv">CVV</label>
+              <input id="swal-card-cvv" type="text" class="add-card-input" placeholder="123" maxlength="4" />
+            </div>
+          </div>
+        </div>
+      `,
+      showCancelButton: true,
+      confirmButtonText: 'บันทึก',
+      cancelButtonText: 'ยกเลิก',
+      width: 440,
+      didOpen: () => {
+        const input = document.getElementById('swal-card-number');
+        const display = document.getElementById('swal-card-type-display');
+        if (!input || !display) return;
+        const logos = {
+          visa: '<svg viewBox="0 0 56 24" width="48" height="22" xmlns="http://www.w3.org/2000/svg"><rect width="56" height="24" fill="#fff" rx="2"/><text x="28" y="16" text-anchor="middle" fill="#1A1F71" font-size="12" font-weight="700" font-family="Arial,sans-serif">VISA</text></svg>',
+          mastercard: '<svg viewBox="0 0 56 24" width="48" height="22" xmlns="http://www.w3.org/2000/svg"><circle cx="20" cy="12" r="8" fill="#EB001B"/><circle cx="36" cy="12" r="8" fill="#F79E1B"/><path fill="#E85A00" fill-opacity="0.9" d="M28 4a8 8 0 0 1 0 16 8 8 0 0 1 0-16z"/></svg>',
+          amex: '<svg viewBox="0 0 56 24" width="48" height="22" xmlns="http://www.w3.org/2000/svg"><rect width="56" height="24" rx="3" fill="#006FCF"/><text x="28" y="9.5" text-anchor="middle" fill="#fff" font-size="5" font-weight="700" font-family="Arial,sans-serif">AMERICAN</text><text x="28" y="17.5" text-anchor="middle" fill="#fff" font-size="5" font-weight="700" font-family="Arial,sans-serif">EXPRESS</text></svg>',
+          jcb: '<img src="/images/jcb-logo.png" alt="JCB" class="card-logo-img" width="48" height="22" />',
+          discover: '<svg viewBox="0 0 56 24" width="48" height="22" xmlns="http://www.w3.org/2000/svg"><rect width="56" height="24" rx="3" fill="#FF6000"/><text x="28" y="15.5" text-anchor="middle" fill="#fff" font-size="7" font-weight="700" font-family="Arial,sans-serif">Discover</text></svg>',
+          diners: '<svg viewBox="0 0 56 24" width="48" height="22" xmlns="http://www.w3.org/2000/svg"><rect width="56" height="24" rx="3" fill="#0079BE"/><text x="28" y="15.5" text-anchor="middle" fill="#fff" font-size="6" font-weight="700" font-family="Arial,sans-serif">Diners Club</text></svg>',
+          unionpay: '<img src="/images/unionpay-logo.png" alt="UnionPay" class="card-logo-img" width="48" height="22" />'
+        };
+        const update = () => {
+          const raw = input.value.replace(/\D/g, '');
+          input.value = formatCardNumber(input.value);
+          input.classList.remove('card-visa', 'card-mastercard', 'card-amex', 'card-jcb', 'card-discover', 'card-diners', 'card-unionpay');
+          if (raw.length >= 2) {
+            const cardType = getCardType(input.value);
+            let html = '';
+            if (cardType && logos[cardType]) {
+              html = '<span class="card-logo-wrap">' + logos[cardType] + '</span>';
+              input.classList.add('card-' + cardType);
+            }
+            display.innerHTML = html;
+            display.className = 'add-card-type-display ' + (cardType ? 'visible' : '');
+            if (raw.length >= 13) {
+              const v = validateCardNumber(input.value);
+              const statusSpan = v.valid ? '<span class="card-logo-valid">✓ ถูกต้อง</span>' : '<span class="card-logo-invalid">' + (v.message || 'ไม่ถูกต้อง') + '</span>';
+              display.innerHTML = (cardType && logos[cardType] ? '<span class="card-logo-wrap">' + logos[cardType] + '</span>' : '') + statusSpan;
+              display.className = 'add-card-type-display visible ' + (v.valid ? 'valid' : 'invalid');
+            }
+          } else {
+            display.innerHTML = '';
+            display.className = 'add-card-type-display';
+          }
+        };
+        input.addEventListener('input', update);
+        input.addEventListener('paste', () => setTimeout(update, 0));
+
+        const expiryInput = document.getElementById('swal-card-expiry');
+        if (expiryInput) {
+          const formatExpiry = (val) => {
+            const c = (val || '').replace(/\D/g, '');
+            if (c.length >= 2) return c.substring(0, 2) + '/' + c.substring(2, 4);
+            return c;
+          };
+          expiryInput.addEventListener('input', (e) => {
+            e.target.value = formatExpiry(e.target.value);
+            e.target.setSelectionRange(e.target.value.length, e.target.value.length);
+          });
+          expiryInput.addEventListener('paste', () => setTimeout(() => { expiryInput.value = formatExpiry(expiryInput.value); }, 0));
+        }
+      },
+      preConfirm: () => {
+        const cardNumber = (document.getElementById('swal-card-number')?.value || '').replace(/\s/g, '');
+        const cardName = (document.getElementById('swal-card-name')?.value || '').trim();
+        const cardExpiry = (document.getElementById('swal-card-expiry')?.value || '').trim();
+        const cardCvv = (document.getElementById('swal-card-cvv')?.value || '').replace(/\s/g, '');
+
+        if (!cardNumber) {
+          Swal.showValidationMessage('กรุณากรอกหมายเลขบัตร');
+          return false;
+        }
+        if (cardNumber.length < 13) {
+          Swal.showValidationMessage('กรุณากรอกหมายเลขบัตรอย่างน้อย 13 หลัก');
+          return false;
+        }
+        const v = validateCardNumber(document.getElementById('swal-card-number')?.value);
+        if (!v.valid) {
+          Swal.showValidationMessage(v.message || 'เลขบัตรไม่ถูกต้อง');
+          return false;
+        }
+
+        if (!cardName || cardName.length < 2) {
+          Swal.showValidationMessage('กรุณากรอกชื่อบนบัตร (อย่างน้อย 2 ตัวอักษร)');
+          return false;
+        }
+
+        const parts = cardExpiry.split('/').map((p) => p.trim());
+        if (parts.length !== 2 || parts[0].length !== 2 || parts[1].length !== 2) {
+          Swal.showValidationMessage('กรุณากรอกวันหมดอายุรูปแบบ MM/YY');
+          return false;
+        }
+        const mm = parseInt(parts[0], 10);
+        const yy = parseInt(parts[1], 10);
+        if (mm < 1 || mm > 12) {
+          Swal.showValidationMessage('เดือนต้องอยู่ระหว่าง 01-12');
+          return false;
+        }
+        const now = new Date();
+        const fullYear = 2000 + yy;
+        const expDate = new Date(fullYear, mm, 0);
+        if (expDate < now) {
+          Swal.showValidationMessage('บัตรหมดอายุแล้ว');
+          return false;
+        }
+
+        if (!cardCvv || !/^\d{3,4}$/.test(cardCvv)) {
+          Swal.showValidationMessage('กรุณากรอก CVV ให้ถูกต้อง (3-4 หลัก)');
+          return false;
+        }
+
+        return { cardNumber, cardName, cardExpiry, cardCvv };
+      }
+    }).then(async (result) => {
+      if (result.isConfirmed && result.value) {
+        const { cardNumber, cardName, cardExpiry, cardCvv } = result.value;
+        const last4 = cardNumber.replace(/\s/g, '').slice(-4);
+        const brand = getCardType(cardNumber) || 'visa';
+        const [mm, yy] = cardExpiry.split('/').map((p) => p.trim());
+        try {
+          const res = await fetch(`${API_BASE_URL}/api/booking/saved-cards/add-local`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-User-ID': user?.id || '' },
+            credentials: 'include',
+            body: JSON.stringify({ last4, brand, expiry_month: mm, expiry_year: yy, name: cardName })
+          });
+          const data = await res.json();
+          if (data.ok) {
+            setSavedCards(data.cards || []);
+            if (data.primary_card_id !== undefined) setPrimaryCardId(data.primary_card_id);
+            Swal.fire({ icon: 'success', title: 'บันทึกสำเร็จ', text: 'บัตรของคุณถูกบันทึกแล้ว', confirmButtonText: 'ตกลง' });
+          } else {
+            throw new Error(data.detail || 'บันทึกไม่สำเร็จ');
+          }
+        } catch (err) {
+          Swal.fire({ icon: 'error', title: 'เกิดข้อผิดพลาด', text: err.message || 'บันทึกบัตรไม่สำเร็จ', confirmButtonText: 'ตกลง' });
+        }
+      }
+    });
+  };
 
   // Initialize form with user data (fallback to prop if backend fetch fails)
   useEffect(() => {
@@ -631,6 +826,61 @@ export default function UserProfileEditPage({
     setShowDeletePopup(false);
   };
 
+  const fetchSavedCards = () => {
+    if (!user?.id) return;
+    setCardsLoading(true);
+    setCardsError(null);
+    const headers = { 'X-User-ID': user.id };
+    fetch(`${API_BASE_URL}/api/booking/saved-cards`, { headers, credentials: 'include' })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error('โหลดบัตรไม่สำเร็จ'))))
+      .then((data) => {
+        if (data.ok && Array.isArray(data.cards)) setSavedCards(data.cards);
+        if (data.ok && data.primary_card_id !== undefined) setPrimaryCardId(data.primary_card_id);
+      })
+      .catch((err) => setCardsError(err.message || 'โหลดบัตรไม่สำเร็จ'))
+      .finally(() => setCardsLoading(false));
+  };
+
+  const handleSetPrimaryCard = async (cardId) => {
+    if (!user?.id || !cardId) return;
+    setSettingPrimaryId(cardId);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/booking/saved-cards/${encodeURIComponent(cardId)}/set-primary`, {
+        method: 'PUT',
+        headers: { 'X-User-ID': user.id },
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || data.message || 'ตั้งบัตรหลักไม่สำเร็จ');
+      if (data.ok) setPrimaryCardId(cardId);
+    } catch (err) {
+      setCardsError(err.message || 'ตั้งบัตรหลักไม่สำเร็จ');
+    } finally {
+      setSettingPrimaryId(null);
+    }
+  };
+
+  const handleDeleteCard = async (cardId) => {
+    if (!user?.id || !cardId) return;
+    setDeletingCardId(cardId);
+    try {
+      const headers = { 'X-User-ID': user.id };
+      const res = await fetch(`${API_BASE_URL}/api/booking/saved-cards/${encodeURIComponent(cardId)}`, {
+        method: 'DELETE',
+        headers,
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || data.message || 'ลบบัตรไม่สำเร็จ');
+      if (data.ok && data.cards) setSavedCards(data.cards);
+      if (data.ok && data.primary_card_id !== undefined) setPrimaryCardId(data.primary_card_id);
+    } catch (err) {
+      setCardsError(err.message || 'ลบบัตรไม่สำเร็จ');
+    } finally {
+      setDeletingCardId(null);
+    }
+  };
+
   // ผู้จองร่วม (Family) - เพิ่ม/แก้ไข/ลบ (ช่องกรอกละเอียดเท่าผู้จองหลัก)
   const makeId = () => (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `fm_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`);
   const addFamilyMember = (type) => {
@@ -805,7 +1055,12 @@ export default function UserProfileEditPage({
       if (!familyCheck.valid) {
         setActiveSection('family');
         const name = family[familyCheck.index]?.first_name || family[familyCheck.index]?.first_name_th || `รายการที่ ${familyCheck.index + 1}`;
-        alert(`ข้อมูลผู้จองร่วมไม่ครบหรือไม่ถูกต้อง (${name}): ${familyCheck.message}\nกรุณากด "แก้ไข" ที่รายการนั้นแล้วกรอกให้ถูกต้อง`);
+        Swal.fire({
+          icon: 'warning',
+          title: 'ข้อมูลไม่ครบ',
+          text: `ข้อมูลผู้จองร่วมไม่ครบหรือไม่ถูกต้อง (${name}): ${familyCheck.message}\nกรุณากด "แก้ไข" ที่รายการนั้นแล้วกรอกให้ถูกต้อง`,
+          confirmButtonText: 'ตกลง'
+        });
         return;
       }
     }
@@ -816,7 +1071,12 @@ export default function UserProfileEditPage({
       if (Object.keys(err).length > 0) {
         setFamilyFormErrors(err);
         setActiveSection('family');
-        alert('กรุณากรอกข้อมูลผู้จองร่วมให้ครบและถูกต้อง แล้วกด "บันทึก" ที่รายการที่กำลังแก้ไขก่อน');
+        Swal.fire({
+          icon: 'warning',
+          title: 'กรุณากรอกข้อมูลให้ครบ',
+          text: 'กรุณากรอกข้อมูลผู้จองร่วมให้ครบและถูกต้อง แล้วกด "บันทึก" ที่รายการที่กำลังแก้ไขก่อน',
+          confirmButtonText: 'ตกลง'
+        });
         return;
       }
     }
@@ -824,9 +1084,20 @@ export default function UserProfileEditPage({
     setIsSaving(true);
     try {
       await onSave({ ...formData, family });
+      await Swal.fire({
+        icon: 'success',
+        title: 'บันทึกสำเร็จ',
+        text: 'บันทึกข้อมูลเรียบร้อยแล้ว',
+        confirmButtonText: 'ตกลง'
+      });
     } catch (error) {
       console.error('Error saving profile:', error);
-      alert('เกิดข้อผิดพลาดในการบันทึกข้อมูล: ' + (error.message || 'Unknown error'));
+      await Swal.fire({
+        icon: 'error',
+        title: 'เกิดข้อผิดพลาด',
+        text: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล: ' + (error.message || 'Unknown error'),
+        confirmButtonText: 'ตกลง'
+      });
     } finally {
       setIsSaving(false);
     }
@@ -899,6 +1170,8 @@ export default function UserProfileEditPage({
   ];
 
 
+  const theme = useTheme();
+
   return (
     <div className="profile-edit-wrapper settings-page">
       {onNavigateToHome && (
@@ -918,6 +1191,7 @@ export default function UserProfileEditPage({
         />
       )}
 
+      <div className="settings-content-area" data-theme={theme}>
       <div className="settings-container">
         <aside className="settings-sidebar">
           <h2>แก้ไขโปรไฟล์</h2>
@@ -943,6 +1217,89 @@ export default function UserProfileEditPage({
             </button>
           </div>
 
+          {/* บัตรเครดิต/เดบิต — เพิ่มหรือลบบัตรสำหรับชำระเงินในระบบ */}
+          {activeSection === 'cards' && (
+            <div className="settings-section settings-section-cards">
+              <h3>บัตรเครดิต/เดบิต</h3>
+              <p className="settings-cards-desc">จัดการบัตรสำหรับใช้ชำระเงินในระบบ — เพิ่มหรือลบบัตรได้ที่นี่</p>
+
+              {cardsLoading && <p className="settings-cards-loading">กำลังโหลดรายการบัตร...</p>}
+              {cardsError && (
+                <div className="settings-cards-error">
+                  <span>{cardsError}</span>
+                  <button type="button" className="btn-secondary" onClick={fetchSavedCards}>โหลดใหม่</button>
+                </div>
+              )}
+
+              {!cardsLoading && savedCards.length > 0 && (
+                <div className="settings-cards-list">
+                  <h4>บัตรที่บันทึกไว้</h4>
+                  <ul className="settings-cards-grid">
+                    {savedCards.map((c) => {
+                      const brandKey = (c.brand || 'card').toLowerCase().replace(/\s+/g, '');
+                      const cardClass = ['visa','mastercard','amex','americanexpress','jcb','discover','diners','unionpay'].includes(brandKey)
+                        ? `settings-card-visual card-${brandKey.replace('americanexpress','amex')}`
+                        : 'settings-card-visual card-default';
+                      return (
+                        <li key={c.card_id || c.id} className="settings-card-item">
+                          <div className={`${cardClass} ${primaryCardId === (c.card_id || c.id) ? 'settings-card-primary' : ''}`}>
+                            <div className="settings-card-visual-top">
+                              {primaryCardId === (c.card_id || c.id) && (
+                                <span className="settings-card-primary-badge">บัตรหลัก</span>
+                              )}
+                            </div>
+                            <div className="settings-card-visual-mid">
+                              <span className="settings-card-visual-number">•••• •••• •••• {c.last4 || '****'}</span>
+                              {c.name && <span className="settings-card-visual-name">{c.name}</span>}
+                            </div>
+                            <div className="settings-card-visual-bottom">
+                              <span className="settings-card-visual-expiry">หมดอายุ {c.expiry_month || '**'}/{c.expiry_year || '**'}</span>
+                              <span className="settings-card-visual-logo"><CardBrandLogo brand={c.brand} /></span>
+                            </div>
+                          </div>
+                          <div className="settings-card-actions">
+                            {primaryCardId !== (c.card_id || c.id) && (
+                              <button
+                                type="button"
+                                className="btn-secondary btn-set-primary-card"
+                                onClick={() => handleSetPrimaryCard(c.card_id || c.id)}
+                                disabled={settingPrimaryId === (c.card_id || c.id)}
+                              >
+                                {settingPrimaryId === (c.card_id || c.id) ? 'กำลังตั้ง...' : 'ตั้งเป็นหลัก'}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="btn-secondary btn-delete-card"
+                              onClick={() => handleDeleteCard(c.card_id || c.id)}
+                              disabled={deletingCardId === (c.card_id || c.id)}
+                            >
+                              {deletingCardId === (c.card_id || c.id) ? 'กำลังลบ...' : 'ลบ'}
+                            </button>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
+
+              {!cardsLoading && (
+                <div className="settings-cards-add">
+                  <h4>เพิ่มบัตรใหม่</h4>
+                  <button
+                    type="button"
+                    className="btn-primary btn-add-card"
+                    onClick={handleClickAddCard}
+                  >
+                    เพิ่มบัตร
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+        {activeSection !== 'cards' && (
         <form onSubmit={handleSubmit} className="profile-edit-form">
           {/* ข้อมูลส่วนตัว: รูป + ข้อมูลพื้นฐาน + passport + visa */}
           {activeSection === 'personal' && (
@@ -1047,8 +1404,8 @@ export default function UserProfileEditPage({
                   id="first_name"
                   name="first_name"
                   value={formData.first_name}
-                  readOnly
-                  className={`form-input form-input-readonly ${errors.first_name ? 'error' : ''}`}
+                  onChange={handleChange}
+                  className={`form-input ${errors.first_name ? 'error' : ''}`}
                   placeholder="First Name"
                 />
                 {errors.first_name && <span className="error-message">{errors.first_name}</span>}
@@ -1063,8 +1420,8 @@ export default function UserProfileEditPage({
                   id="last_name"
                   name="last_name"
                   value={formData.last_name}
-                  readOnly
-                  className={`form-input form-input-readonly ${errors.last_name ? 'error' : ''}`}
+                  onChange={handleChange}
+                  className={`form-input ${errors.last_name ? 'error' : ''}`}
                   placeholder="Last Name"
                 />
                 {errors.last_name && <span className="error-message">{errors.last_name}</span>}
@@ -2178,7 +2535,9 @@ export default function UserProfileEditPage({
             </div>
           )}
         </form>
+        )}
         </div>
+      </div>
       </div>
     </div>
   );

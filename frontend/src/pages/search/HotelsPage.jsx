@@ -1,8 +1,10 @@
 import React from 'react';
 import AppHeader from '../../components/common/AppHeader';
+import { useTheme } from '../../context/ThemeContext';
 import './HotelsPage.css';
 
 export default function HotelsPage({ user, onLogout, onSignIn, onNavigateToBookings, onNavigateToAI, onNavigateToFlights, onNavigateToHotels, onNavigateToCarRentals, onNavigateToProfile = null, onNavigateToSettings = null, onNavigateToHome = null }) {
+  const theme = useTheme();
   const handleTabChange = (tab) => {
     if (tab === 'ai' && onNavigateToAI) onNavigateToAI();
     else if (tab === 'bookings' && onNavigateToBookings) onNavigateToBookings();
@@ -31,7 +33,7 @@ export default function HotelsPage({ user, onLogout, onSignIn, onNavigateToBooki
         onNavigateToSettings={onNavigateToSettings}
       />
 
-      <div className="hotels-content">
+      <div className="hotels-content" data-theme={theme}>
         <div className="hotels-hero">
           <h1>ค้นหาที่พัก</h1>
           {/* <p>ค้นหาที่พักที่เหมาะกับคุณมากที่สุด</p> */}

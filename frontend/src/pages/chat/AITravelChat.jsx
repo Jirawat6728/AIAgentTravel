@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import Swal from 'sweetalert2';
 import './AITravelChat.css';
 import AppHeader from '../../components/common/AppHeader';
+import { useTheme } from '../../context/ThemeContext';
 
 class ChatErrorBoundary extends React.Component {
   constructor(props) {
@@ -449,6 +450,10 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
   const historyAbortControllerRef = useRef(null);
   // ✅ ป้องกัน StrictMode เรียก useEffect สองครั้ง → ยิง history fetch ซ้ำ
   const isFetchingHistoryRef = useRef(false);
+  // ✅ ป้องกัน preload ยิงซ้ำสำหรับแชทเดียวกัน และป้องกันรัน preload พร้อมกันหลายรอบ
+  const preloadingChatIdsRef = useRef(new Set());
+  const [preloadCycle, setPreloadCycle] = useState(0);
+  const preloadRunningRef = useRef(false);
   
   // ✅ Persist loaded trips to sessionStorage whenever it changes
   // Note: We can't use loadedTripsRef.current.size as dependency, so we'll save on key events
@@ -676,6 +681,118 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     };
   }, [activeTripId, activeChat?.chatId]);
 
+  // ✅ โหลดประวัติทุกแชทครั้งเดียวเมื่อมีรายการแชท (เข้าครั้งเดียวแล้วจบ ไม่โหลดซ้ำทุกครั้งที่สลับแชท)
+  useEffect(() => {
+    const currentUserId = user?.id || userId;
+    if (!currentUserId) return;
+    if (preloadRunningRef.current) return;
+    const userTrips = trips.filter(t => {
+      const tripUserId = t.userId || t.user_id;
+      return !tripUserId || tripUserId === currentUserId;
+    });
+    // ✅ แชทที่มี messages ใน state อยู่แล้ว (เช่นจาก localStorage) ถือว่าโหลดแล้ว ไม่ดึงซ้ำ
+    userTrips.forEach(t => {
+      const cid = t.chatId || t.tripId;
+      if (cid && t.messages && t.messages.length > 0) loadedTripsRef.current.add(cid);
+    });
+    try {
+      sessionStorage.setItem('ai_travel_loaded_trips', JSON.stringify(Array.from(loadedTripsRef.current)));
+    } catch (e) { /* ignore */ }
+    const toLoad = userTrips.filter(t => {
+      const cid = t.chatId || t.tripId;
+      return cid && !loadedTripsRef.current.has(cid) && !preloadingChatIdsRef.current.has(cid);
+    });
+    if (toLoad.length === 0) return;
+    preloadRunningRef.current = true;
+
+    const mapHistoryToMessages = (data) => {
+      if (!data.history || data.history.length === 0) return null;
+      return data.history.map((m, idx) => ({
+        ...m,
+        id: m.id || `restored_${idx}_${Date.now()}`,
+        type: m.role === 'assistant' ? 'bot' : (m.role || m.type),
+        planChoices: m.planChoices || m.plan_choices || [],
+        slotChoices: m.slotChoices || m.slot_choices || [],
+        slotIntent: m.slotIntent || m.slot_intent || null,
+        agentState: m.agentState || m.agent_state || null,
+        travelSlots: m.travelSlots || m.travel_slots || null,
+        currentPlan: m.currentPlan || m.current_plan || null,
+        tripTitle: m.tripTitle || m.trip_title || null,
+        searchResults: m.searchResults || m.search_results || {},
+        suggestions: m.suggestions || [],
+        cachedOptions: m.cachedOptions || m.cached_options || null,
+        cacheValidation: m.cacheValidation || m.cache_validation || null,
+        workflowValidation: m.workflowValidation || m.workflow_validation || null,
+        reasoning: m.reasoning || null,
+        memorySuggestions: m.memorySuggestions || m.memory_suggestions || null,
+        debug: m.debug || null
+      }));
+    };
+
+    let cancelled = false;
+    const runPreload = async () => {
+      for (const trip of toLoad) {
+        if (cancelled) break;
+        const chatId = trip.chatId || trip.tripId;
+        const tripId = trip.tripId;
+        if (preloadingChatIdsRef.current.has(chatId) || loadedTripsRef.current.has(chatId)) continue;
+        preloadingChatIdsRef.current.add(chatId);
+        try {
+          const res = await fetch(`${API_BASE_URL}/api/chat/history/${chatId}`, {
+            headers: { 'Content-Type': 'application/json', 'X-Trip-ID': tripId || chatId },
+            credentials: 'include',
+          });
+          if (!res.ok || cancelled) continue;
+          const data = await res.json();
+          const restoredMessages = mapHistoryToMessages(data);
+          if (restoredMessages && restoredMessages.length > 0) {
+            loadedTripsRef.current.add(chatId);
+            try {
+              sessionStorage.setItem('ai_travel_loaded_trips', JSON.stringify(Array.from(loadedTripsRef.current)));
+            } catch (e) { console.warn('Failed to save loaded trips to sessionStorage:', e); }
+            setTrips(prev => {
+              const userTripsPrev = prev.filter(t => {
+                const u = t.userId || t.user_id;
+                return !u || u === currentUserId;
+              });
+              const idx = userTripsPrev.findIndex(t => (t.chatId || t.tripId) === chatId);
+              if (idx === -1) return prev;
+              const newTrips = [...prev];
+              const tripIndex = prev.findIndex(t => (t.chatId || t.tripId) === chatId);
+              if (tripIndex === -1) return prev;
+              const seen = new Set();
+              const unique = restoredMessages.filter(msg => {
+                const key = msg.id || `${msg.type}_${msg.text}_${msg.timestamp || ''}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+              });
+              newTrips[tripIndex] = { ...prev[tripIndex], messages: unique, updatedAt: nowISO() };
+              try {
+                localStorage.setItem(LS_TRIPS_KEY, JSON.stringify(newTrips));
+              } catch (e) { console.error('Failed to save to localStorage:', e); }
+              return newTrips;
+            });
+          } else {
+            loadedTripsRef.current.add(chatId);
+            try {
+              sessionStorage.setItem('ai_travel_loaded_trips', JSON.stringify(Array.from(loadedTripsRef.current)));
+            } catch (e) { console.warn('Failed to save loaded trips to sessionStorage:', e); }
+          }
+        } catch (e) {
+          if (e.name !== 'AbortError') console.warn('Preload history failed for chat:', chatId, e);
+          preloadingChatIdsRef.current.delete(chatId);
+        } finally {
+          preloadingChatIdsRef.current.delete(chatId);
+        }
+      }
+      preloadRunningRef.current = false;
+      setPreloadCycle(c => c + 1); // ให้ effect รันอีกครั้งถ้ามีแชทใหม่ที่ยังไม่โหลด
+    };
+    runPreload();
+    return () => { cancelled = true; };
+  }, [trips, user?.id, userId, preloadCycle]);
+
   const [inputText, setInputText] = useState('');
   const [processingTripId, setProcessingTripId] = useState(null);
   // ✅ แก้ไข isTyping ให้ตรวจสอบทั้ง tripId และ chatId
@@ -713,15 +830,42 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
   const completedProcessedRef = useRef(false);
   // ✅ สถานะการทำงานของ Agent แบบ realtime
   const [agentStatus, setAgentStatus] = useState(null); // { status, message, step }
+  // ✅ ข้อความแก้ไขทริป (สำหรับปุ่ม "รัน Flow ใหม่" ในโหมดแก้ไข) — ใช้ state เพื่อให้ปุ่มแสดงหลังโหลดจากประวัติ
+  const [editModeMessageForRerun, setEditModeMessageForRerun] = useState(null);
+  // ✅ โหมดแก้ไข (มาจาก My Bookings กดแก้ไข) — บังคับใช้ Normal Mode เท่านั้น
+  const [isEditMode, setIsEditMode] = useState(() => {
+    try {
+      const editStr = localStorage.getItem('edit_booking_context');
+      if (!editStr) return false;
+      const edit = JSON.parse(editStr);
+      return edit?.action === 'edit_trip';
+    } catch (_) {
+      return false;
+    }
+  });
   // ✅ Chat Mode: 'normal' = ผู้ใช้เลือกช้อยส์เอง, 'agent' = AI ดำเนินการเอง
   const [chatMode, setChatMode] = useState(() => {
     try {
+      const editStr = localStorage.getItem('edit_booking_context');
+      if (editStr) {
+        try {
+          const edit = JSON.parse(editStr);
+          if (edit?.action === 'edit_trip') return 'normal'; // โหมดแก้ไขใช้ Normal เท่านั้น
+        } catch (_) {}
+      }
       const saved = localStorage.getItem('chat_mode');
       return saved === 'agent' ? 'agent' : 'normal';
     } catch (_) {
       return 'normal';
     }
   });
+  // ✅ เมื่อเป็นโหมดแก้ไข ให้คงเป็น Normal และไม่ให้สลับไป Agent
+  useEffect(() => {
+    if (isEditMode && chatMode !== 'normal') {
+      setChatMode('normal');
+      localStorage.setItem('chat_mode', 'normal');
+    }
+  }, [isEditMode, chatMode]);
   // ✅ Mobile: Dropdown state for chat mode
   const [isChatModeDropdownOpen, setIsChatModeDropdownOpen] = useState(false);
   const chatModeDropdownRef = useRef(null);
@@ -832,7 +976,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       }
     }
     return [];
-  }, [activeTrip?.messages, activeTripId]);
+  }, [activeTrip?.messages, activeTripId, user?.id, userId]);
 
   // ===== Persist trips + activeTripId =====
   useEffect(() => {
@@ -1605,7 +1749,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
         return 0;
       }
     });
-  }, [trips]);
+  }, [trips, user?.id, userId]);
 
   // ===== Stop current request =====
   const handleStop = () => {
@@ -1652,16 +1796,18 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     // If status is unknown (null), try to send anyway - let the actual request fail gracefully
 
     const tripId = activeTrip?.tripId;
-    if (!tripId) {
+    // ✅ ใช้ chatId เป็น target ของการ append เพื่อให้ข้อความไปแสดงในแชทที่เลือก (แก้บั๊กแชทซ้อนเมื่อมีหลายแชทในทริปเดียวกัน)
+    const targetId = activeTrip?.chatId || activeTrip?.tripId;
+    if (!tripId || !targetId) {
       sendInProgressRef.current = false;
       return;
     }
 
-    // If editing, remove the old message and its bot response
+    // If editing, remove the old message and its bot response (match by targetId = แชทปัจจุบัน)
     if (editingMessageId) {
       setTrips(prev =>
         prev.map(t => {
-          if (t.tripId !== tripId) return t;
+          if (t.tripId !== targetId && t.chatId !== targetId) return t;
           const msgIndex = t.messages.findIndex(m => m.id === editingMessageId);
           if (msgIndex === -1) return t;
           // Remove the user message and all messages after it
@@ -1678,8 +1824,8 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       text: trimmed
     };
 
-    appendMessageToTrip(tripId, userMessage);
-    setProcessingTripId(tripId);
+    appendMessageToTrip(targetId, userMessage);
+    setProcessingTripId(targetId);
     setAgentStatus(null); // Reset status
 
     // Create abort controller for this request
@@ -1839,7 +1985,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                   console.log('⚠️ No slot choices received. finalData.slot_choices:', finalData?.slot_choices);
                 }
 
-                appendMessageToTrip(tripId, botMessage);
+                appendMessageToTrip(targetId, botMessage);
                 
                 // ✅ Store latest bot message for agentState access
                 setLatestBotMessage(botMessage);
@@ -1942,7 +2088,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       console.error('Error calling API:', error);
 
       if (error.name === 'AbortError') {
-        appendMessageToTrip(tripId, {
+        appendMessageToTrip(targetId, {
           id: Date.now() + 1,
           type: 'bot',
           text: '⏹️ หยุดการทำงานแล้วค่ะ'
@@ -1967,7 +2113,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
           }
         };
 
-        appendMessageToTrip(tripId, errorMessage);
+        appendMessageToTrip(targetId, errorMessage);
       }
     } finally {
       setProcessingTripId(null);
@@ -1980,7 +2126,8 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
   // ===== Regenerate (refresh) last user message like ChatGPT =====
   const regenerateFromUserText = async (messageId, userText) => {
     const tripId = activeTrip?.tripId;
-    if (!tripId) return;
+    const targetId = activeTrip?.chatId || activeTrip?.tripId;
+    if (!tripId || !targetId) return;
     const trimmed = String(userText || '').trim();
     if (!trimmed) return;
 
@@ -1989,12 +2136,12 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     if (now - lastAt < REFRESH_COOLDOWN_MS) return;
     lastRefreshAtRef.current[messageId] = now;
 
-    setProcessingTripId(tripId);
+    setProcessingTripId(targetId);
     
-    // ✅ Revert chat: ลบข้อความหลังจากข้อความที่กดรีเฟรชออกให้หมด
+    // ✅ Revert chat: ลบข้อความหลังจากข้อความที่กดรีเฟรชออกให้หมด (match by targetId = แชทปัจจุบัน)
     setTrips(prev =>
       prev.map(t => {
-        if (t.tripId !== tripId) return t;
+        if (t.tripId !== targetId && t.chatId !== targetId) return t;
         const msgIndex = t.messages.findIndex(m => m.id === messageId);
         if (msgIndex === -1) return t;
         // เก็บไว้เฉพาะข้อความจนถึงข้อความ user ที่เรากำลังรีเฟรช
@@ -2091,7 +2238,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                   workflowValidation: finalData.workflow_validation || null,
       };
 
-      appendMessageToTrip(tripId, botMessage);
+      appendMessageToTrip(targetId, botMessage);
 
                 // ✅ ไม่แสดง popup แล้ว - ให้ LLM บอกในแชทแทน
                 // Notification จะแสดงใน My Bookings แทน
@@ -2171,13 +2318,13 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       }
     } catch (e) {
       if (e.name === 'AbortError') {
-        appendMessageToTrip(tripId, {
+        appendMessageToTrip(targetId, {
           id: Date.now() + 1,
           type: 'bot',
           text: '⏹️ หยุดการทำงานแล้วค่ะ'
         });
       } else {
-        appendMessageToTrip(tripId, {
+        appendMessageToTrip(targetId, {
           id: Date.now() + 1,
           type: 'bot',
           text: `❌ Error: ${e.message}`
@@ -2237,6 +2384,10 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     try {
       const editContext = JSON.parse(editContextStr);
       if (editContext.action === 'edit_trip' && editContext.booking) {
+        // ✅ โหมดแก้ไข: บังคับใช้ Normal Mode เท่านั้น (เก็บสถานะไว้ทั้ง session)
+        setIsEditMode(true);
+        setChatMode('normal');
+        localStorage.setItem('chat_mode', 'normal');
         // ✅ Mark as sent to prevent duplicate
         didSendEditMessageRef.current = true;
         
@@ -2258,7 +2409,9 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
         
         // ✅ สร้างข้อความที่บอก AI ว่าเรามาแก้ไขทริป พร้อมข้อมูล booking
         const editMessage = `ฉันต้องการแก้ไขทริปที่จองไว้\n\n📋 ข้อมูลการจองปัจจุบัน:\n- เส้นทาง: ${route}\n${departureDate ? `- วันเดินทาง: ${departureDate}` : ''}${returnDate ? `\n- วันกลับ: ${returnDate}` : ''}\n- ราคารวม: ${formattedPrice}\n- Booking ID: ${editContext.bookingId}\n\nกรุณาช่วยฉันแก้ไขทริปนี้ด้วยค่ะ`;
-        
+        // ✅ เก็บข้อความไว้สำหรับปุ่ม "รัน Flow ใหม่"
+        setEditModeMessageForRerun(editMessage);
+
         // Clear edit context
         localStorage.removeItem('edit_booking_context');
         
@@ -2274,6 +2427,14 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       localStorage.removeItem('edit_booking_context');
     }
   }, [activeChat]); // ✅ Run when activeChat changes
+
+  // ✅ โหมดแก้ไข: ถ้ายังไม่มีข้อความสำหรับ "รัน Flow ใหม่" ให้ดึงจากข้อความ user ล่าสุดที่เหมือน edit prompt (รองรับหลัง reload)
+  useEffect(() => {
+    if (!isEditMode || editModeMessageForRerun) return;
+    const msgs = activeTrip?.messages || [];
+    const editLike = msgs.slice().reverse().find(m => m.type === 'user' && (m.text || '').includes('ฉันต้องการแก้ไขทริปที่จองไว้'));
+    if (editLike && editLike.text) setEditModeMessageForRerun(editLike.text);
+  }, [isEditMode, editModeMessageForRerun, activeTrip?.messages]);
 
   useEffect(() => {
     if (didSetInitialPromptRef.current) return;
@@ -2754,7 +2915,8 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     // If status is unknown (null), try to send anyway - let the actual request fail gracefully
 
     const tripId = activeTrip?.tripId;
-    if (!tripId) return;
+    const targetId = activeTrip?.chatId || activeTrip?.tripId;
+    if (!tripId || !targetId) return;
 
     // ✅ เพิ่มข้อความฝั่งผู้ใช้ว่าเลือก slot X
     const slotName = slotType === 'flight' ? 'เที่ยวบิน' : slotType === 'hotel' ? 'ที่พัก' : slotType === 'car' ? 'รถ' : 'การเดินทาง';
@@ -2763,9 +2925,9 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       type: 'user',
       text: `เลือกช้อยส์ ${choiceId}` // ใช้คำว่า "เลือกช้อยส์" แทน "เลือก..."
     };
-    appendMessageToTrip(tripId, userMessage);
+    appendMessageToTrip(targetId, userMessage);
 
-    setProcessingTripId(tripId);
+    setProcessingTripId(targetId);
     
     try {
       const currentPlan = selectedPlan;
@@ -2827,7 +2989,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
           slotChoices: data.slot_choices || [],
         };
 
-        appendMessageToTrip(tripId, botMessage);
+        appendMessageToTrip(targetId, botMessage);
 
         // ✅ Update state
         if (data.plan_choices) setLatestPlanChoices(data.plan_choices);
@@ -3010,7 +3172,8 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     // If status is unknown (null), try to send anyway - let the actual request fail gracefully
 
     const tripId = activeTrip?.tripId;
-    if (!tripId) return;
+    const targetId = activeTrip?.chatId || activeTrip?.tripId;
+    if (!tripId || !targetId) return;
 
     // ✅ หา choice object ถ้ายังไม่มี (จาก latest message ที่มี planChoices)
     let choiceData = choice;
@@ -3034,9 +3197,9 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       type: 'user',
       text: `เลือกช้อยส์ ${choiceId}`
     };
-    appendMessageToTrip(tripId, userMessage);
+    appendMessageToTrip(targetId, userMessage);
 
-    setProcessingTripId(tripId);
+    setProcessingTripId(targetId);
 
     try {
       // ✅ ถ้า backend มี /api/chat/select_choice จะเลือกได้ทันทีแบบไม่ต้องส่งข้อความ
@@ -3123,7 +3286,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
         tripTitle: data.trip_title || null
       };
 
-      appendMessageToTrip(tripId, botMessage);
+      appendMessageToTrip(targetId, botMessage);
 
       // Keep plan/choices in state so cards don't disappear
       if (data.plan_choices) setLatestPlanChoices(data.plan_choices);
@@ -3208,6 +3371,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
   const handleConfirmBooking = async () => {
     const tripId = activeTrip?.tripId;
     const chatId = activeTrip?.chatId || tripId;
+    const targetId = activeTrip?.chatId || activeTrip?.tripId;
     if (!tripId) return;
 
     // ✅ ตรวจสอบว่ามี plan และ travel_slots หรือไม่
@@ -3218,7 +3382,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
 
     setIsBooking(true);
     setBookingResult(null);
-    setProcessingTripId(tripId);
+    setProcessingTripId(targetId);
     
     try {
       // ✅ ดึงข้อมูล plan และ travel_slots จาก selectedPlan และ selectedTravelSlots
@@ -3353,7 +3517,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
           detail: data?.detail || errorMsg,
         };
         setBookingResult(result);
-        appendMessageToTrip(tripId, {
+        appendMessageToTrip(targetId, {
           id: Date.now() + 1,
           type: 'bot',
           text: typeof result.message === 'string' ? result.message : String(result.message || ''),
@@ -3373,7 +3537,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       };
       setBookingResult(result);
       const messageText = typeof result.message === 'string' ? result.message : String(result.message || '');
-      appendMessageToTrip(tripId, {
+      appendMessageToTrip(targetId, {
         id: Date.now() + 1,
         type: 'bot',
         text: messageText + '\nกรุณาชำระเงินเพื่อยืนยันการจอง\n\n📋 คุณสามารถดูรายการจองได้ที่ "My Bookings"',
@@ -3385,18 +3549,14 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
         onRefreshNotifications();
       }
       
-      // ✅ Trigger event to refresh MyBookingsPage if it's open
+      // ✅ Trigger event to refresh My Bookings (เมื่อเปิดอยู่จะโหลดใหม่)
       window.dispatchEvent(new Event('bookingCreated'));
-      // ✅ Also use localStorage event for cross-tab communication
-      localStorage.setItem('booking_created', Date.now().toString());
-      localStorage.removeItem('booking_created'); // Clear immediately
       
-      // ✅ Navigate to My Bookings to show the new booking
+      // ✅ ไปที่ My Bookings เพื่อแสดงการจองใหม่
       if (onNavigateToBookings) {
-        // Small delay to ensure booking is saved
         setTimeout(() => {
           onNavigateToBookings();
-        }, 500);
+        }, 400);
       }
       
       // ✅ ไม่แสดง popup แล้ว - ให้ LLM บอกในแชทแทน
@@ -3456,10 +3616,10 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       setBookingResult(result);
       
       // Show success message in chat
-      const tripId = activeTrip?.tripId;
-      if (tripId) {
+      const targetId = activeTrip?.chatId || activeTrip?.tripId;
+      if (targetId) {
         const messageText = typeof result.message === 'string' ? result.message : String(result.message || '');
-        appendMessageToTrip(tripId, {
+        appendMessageToTrip(targetId, {
           id: Date.now() + 1,
           type: 'bot',
           text: messageText + 
@@ -3687,6 +3847,8 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     return toolMap[step] || null;
   };
 
+  const theme = useTheme();
+
   // ===== UI =====
   return (
     <ChatErrorBoundary>
@@ -3736,6 +3898,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       {/* Main: Sidebar + Chat */}
       <main 
         className={`chat-main chat-main-split ${isSidebarOpen ? 'sidebar-open' : 'sidebar-closed'}`}
+        data-theme={theme}
         onTouchStart={onTouchStart}
         onTouchMove={onTouchMove}
         onTouchEnd={onTouchEnd}
@@ -3774,14 +3937,15 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
           {isSidebarOpen && (
             <>
               <div className="trip-list">
-                {sortedTrips.map((t) => {
+                {sortedTrips.map((t, idx) => {
                   // ✅ ตรวจสอบว่าเป็น active chat (ใช้ chatId)
                   const isActive = (t.chatId || t.tripId) === (activeChat?.chatId || activeChat?.tripId || activeTripId);
                   const isEditing = editingTripId === t.tripId;
                   const isProcessing = processingTripId === t.tripId;
+                  const uniqueKey = t.chatId ?? `${t.tripId}_${idx}`;
                   return (
                     <div
-                      key={`${t.tripId}_${t.chatId}`} // ✅ ใช้ทั้ง tripId และ chatId เป็น key (รองรับหลายแชทในทริปเดียวกัน)
+                      key={uniqueKey}
                       className={`trip-item ${isActive ? 'trip-item-active' : ''} ${t.pinned ? 'trip-item-pinned' : ''}`}
                       onClick={() => {
                         console.log('👆 Clicked trip:', t.chatId || t.tripId);
@@ -3857,7 +4021,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                       {!isEditing && (
                         <>
                           <div className="trip-item-sub">อัปเดต: {shortDate(t.updatedAt)}</div>
-                          <div className="trip-item-sub">ข้อความ: {(t.messages?.length || 0) - 1}</div>
+                          <div className="trip-item-sub">ข้อความ: {Math.max(0, (t.messages?.length || 0) - 1)}</div>
                         </>
                       )}
                     </div>
@@ -3888,7 +4052,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
             </div>
             
             <div className="chatbox-header-right">
-              {/* ✅ Chat Mode Toggle - Desktop: Buttons, Mobile: Dropdown */}
+              {/* ✅ Chat Mode Toggle - โหมดแก้ไขบังคับใช้ Normal เท่านั้น */}
               <div className="chat-mode-toggle" style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -3899,10 +4063,40 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                 borderRadius: '8px',
                 fontSize: '13px'
               }}>
-                {/* Desktop: Show both buttons */}
+                {isEditMode && (
+                  <>
+                    <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.7)', marginRight: '4px' }} title="โหมดแก้ไขใช้ได้เฉพาะ Normal">
+                      ✏️ แก้ไข
+                    </span>
+                    {editModeMessageForRerun && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (editModeMessageForRerun && !isTyping) sendMessage(editModeMessageForRerun);
+                        }}
+                        disabled={isTyping}
+                        title="ส่งข้อความแก้ไขทริปอีกครั้ง เพื่อรัน Flow ใหม่"
+                        style={{
+                          padding: '4px 10px',
+                          borderRadius: '6px',
+                          border: '1px solid rgba(255,255,255,0.3)',
+                          background: 'rgba(59, 130, 246, 0.25)',
+                          color: '#fff',
+                          cursor: isTyping ? 'not-allowed' : 'pointer',
+                          fontSize: '12px',
+                          opacity: isTyping ? 0.7 : 1
+                        }}
+                      >
+                        🔄 รัน Flow ใหม่
+                      </button>
+                    )}
+                  </>
+                )}
+                {/* Desktop: Show both buttons (Agent ปิดเมื่อโหมดแก้ไข) */}
                 <div className="chat-mode-toggle-desktop">
                   <button
                     onClick={() => {
+                      if (isEditMode) return;
                       setChatMode('normal');
                       localStorage.setItem('chat_mode', 'normal');
                     }}
@@ -3912,49 +4106,55 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                       border: 'none',
                       background: chatMode === 'normal' ? 'rgba(59, 130, 246, 0.3)' : 'transparent',
                       color: chatMode === 'normal' ? '#fff' : 'rgba(255, 255, 255, 0.7)',
-                      cursor: 'pointer',
+                      cursor: isEditMode ? 'default' : 'pointer',
                       fontWeight: chatMode === 'normal' ? '600' : '400',
                       transition: 'all 0.2s'
                     }}
-                    title="โหมดปกติ - คุณเลือกช้อยส์เอง"
+                    title={isEditMode ? 'โหมดแก้ไขใช้ได้เฉพาะ Normal' : 'โหมดปกติ - คุณเลือกช้อยส์เอง'}
                   >
                     📋 Normal
                   </button>
                   <button
                     onClick={() => {
+                      if (isEditMode) return; // โหมดแก้ไขห้ามสลับไป Agent
                       setChatMode('agent');
                       localStorage.setItem('chat_mode', 'agent');
                     }}
+                    disabled={isEditMode}
                     style={{
                       padding: '6px 12px',
                       borderRadius: '6px',
                       border: 'none',
                       background: chatMode === 'agent' ? 'rgba(139, 92, 246, 0.3)' : 'transparent',
-                      color: chatMode === 'agent' ? '#fff' : 'rgba(255, 255, 255, 0.7)',
-                      cursor: 'pointer',
+                      color: isEditMode ? 'rgba(255,255,255,0.4)' : (chatMode === 'agent' ? '#fff' : 'rgba(255, 255, 255, 0.7)'),
+                      cursor: isEditMode ? 'not-allowed' : 'pointer',
                       fontWeight: chatMode === 'agent' ? '600' : '400',
-                      transition: 'all 0.2s'
+                      transition: 'all 0.2s',
+                      opacity: isEditMode ? 0.6 : 1
                     }}
-                    title="โหมด Agent - AI ดำเนินการเองทั้งหมด"
+                    title={isEditMode ? 'โหมดแก้ไขใช้ได้เฉพาะ Normal Mode' : 'โหมด Agent - AI ดำเนินการเองทั้งหมด'}
                   >
                     🤖 Agent
                   </button>
                 </div>
                 
-                {/* Mobile: Dropdown */}
+                {/* Mobile: Dropdown (โหมดแก้ไข = แสดงเฉพาะ Normal, ไม่ให้เลือก Agent) */}
                 <div className="chat-mode-toggle-mobile" ref={chatModeDropdownRef}>
                   <button
                     className="chat-mode-dropdown-button"
-                    onClick={() => setIsChatModeDropdownOpen(!isChatModeDropdownOpen)}
-                    title={chatMode === 'normal' ? 'โหมดปกติ' : 'โหมด Agent'}
+                    onClick={() => !isEditMode && setIsChatModeDropdownOpen(!isChatModeDropdownOpen)}
+                    title={isEditMode ? 'โหมดแก้ไขใช้ได้เฉพาะ Normal' : (chatMode === 'normal' ? 'โหมดปกติ' : 'โหมด Agent')}
+                    style={isEditMode ? { cursor: 'default' } : {}}
                   >
                     <span>{chatMode === 'normal' ? '📋 Normal' : '🤖 Agent'}</span>
-                    <svg className="chat-mode-dropdown-icon" fill="currentColor" viewBox="0 0 24 24">
-                      <path d="M7 10l5 5 5-5z"/>
-                    </svg>
+                    {!isEditMode && (
+                      <svg className="chat-mode-dropdown-icon" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M7 10l5 5 5-5z"/>
+                      </svg>
+                    )}
                   </button>
                   
-                  {isChatModeDropdownOpen && (
+                  {isChatModeDropdownOpen && !isEditMode && (
                     <div className="chat-mode-dropdown-menu">
                       <button
                         className={`chat-mode-dropdown-item ${chatMode === 'normal' ? 'active' : ''}`}
@@ -4022,8 +4222,8 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                         formatMessageText(message.text)?.includes('ลองพิมพ์ทริป')
                       ) ? 'message-empty-state' : ''
                     }`}>
-                      {/* ข้อความหลัก */}
-                      <p className="message-text">{formatMessageText(message.text)}</p>
+                      {/* ข้อความหลัก — แสดงช่องว่างเมื่อข้อความว่างเพื่อไม่ให้บับเบิลแบน */}
+                      <p className="message-text">{formatMessageText(message.text) || '\u00A0'}</p>
 
                       {/* ✅ Retry Button for Error Messages */}
                       {message.error && message.retryAvailable && message.onRetry && (
@@ -4338,13 +4538,9 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                               Array.isArray(message.planChoices) && 
                               message.planChoices.length > 0;
                             const hasSlotChoices = message.slotChoices && message.slotChoices.length > 0;
-                            const hasCurrentPlan = message.currentPlan && 
-                              typeof message.currentPlan === 'object' && 
-                              Object.keys(message.currentPlan).length > 0;
-                            
+                            // ✅ Agent Mode: แสดง plan choices ถึงจะมี currentPlan (สรุปทริป) ด้วย — ไม่ซ่อนการ์ด
                             const shouldShowPlanChoices = hasPlanChoices && 
-                                   (!hasSlotChoices || !message.slotIntent) && 
-                                   !hasCurrentPlan;
+                                   (!hasSlotChoices || !message.slotIntent);
                             
                             return shouldShowPlanChoices ? (
                               <div className="plan-choices-summary-in-bubble">
@@ -4436,12 +4632,9 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                             Array.isArray(message.planChoices) && 
                             message.planChoices.length > 0;
                           const hasSlotChoices = message.slotChoices && message.slotChoices.length > 0;
-                          const hasCurrentPlan = message.currentPlan && 
-                            typeof message.currentPlan === 'object' && 
-                            Object.keys(message.currentPlan).length > 0;
+                          // ✅ Agent Mode: แสดง plan choice cards ถึงจะมี currentPlan — ไม่ซ่อนการ์ด
                           const shouldShowPlanChoices = hasPlanChoices && 
-                                 (!hasSlotChoices || !message.slotIntent) && 
-                                 !hasCurrentPlan;
+                                 (!hasSlotChoices || !message.slotIntent);
                           const isLatestWithChoices = latestBotWithChoices && message.id === latestBotWithChoices.id;
                           
                           if (!shouldShowPlanChoices) return null;
@@ -4452,16 +4645,28 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                               </div>
                             );
                           }
+                          // ✅ ใช้การ์ดตามประเภท (เที่ยวบิน/ที่พัก/ transfer) เหมือน slot choices
+                          const getPlanCardComponent = (choice) => {
+                            if (!choice || typeof choice !== 'object') return PlanChoiceCard;
+                            const cat = choice.category || (choice.flight ? 'flight' : choice.hotel ? 'hotel' : (choice.transport || choice.car) ? 'transport' : null);
+                            if (cat === 'flight') return (choice.flight && (choice.flight.segments?.length > 0 || choice.flight.outbound?.length || choice.flight.inbound?.length)) ? PlanChoiceCardFlights : PlanChoiceCard;
+                            if (cat === 'hotel') return choice.hotel ? PlanChoiceCardHotels : PlanChoiceCard;
+                            if (cat === 'transport' || cat === 'transfer') return (choice.transport || choice.car || choice.ground_transport) ? PlanChoiceCardTransfer : PlanChoiceCard;
+                            return PlanChoiceCard;
+                          };
                           return (
                             <div className="plan-choices-block full-width-block">
                               <div className="plan-choices-grid">
-                                {message.planChoices.map((choice) => (
-                                  <PlanChoiceCard
-                                    key={choice.id || `choice-${choice.title || ''}-${choice.id ?? ''}`}
-                                    choice={choice}
-                                    onSelect={(id) => handleSelectPlanChoice(id, choice)}
-                                  />
-                                ))}
+                                {message.planChoices.map((choice, idx) => {
+                                  const PlanCard = getPlanCardComponent(choice);
+                                  return (
+                                    <PlanCard
+                                      key={choice.id || `choice-${choice.title || ''}-${idx}`}
+                                      choice={choice}
+                                      onSelect={(id) => handleSelectPlanChoice(id, choice)}
+                                    />
+                                  );
+                                })}
                               </div>
                             </div>
                           );
@@ -4469,7 +4674,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                       </>
                     )}
 
-                    {/* Action buttons under messages (ChatGPT style) */}
+                    {/* Action buttons under messages (ChatGPT style) — แสดงปุ่มรีเฟรชที่ข้อความล่าสุด */}
                     {message.type === 'user' && message.id === lastUserMessageId && (
                       <div className="message-actions message-actions-user">
                         <button
@@ -4500,20 +4705,27 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                       </div>
                     )}
                     
-                    {/* Action buttons under bot messages */}
+                    {/* Action buttons under bot messages — รีเฟรชได้ทุกข้อความ */}
                     {message.type === 'bot' && (
                       <div className="message-actions message-actions-bot">
                         <button
                           className="btn-action btn-refresh"
                           onClick={() => {
-                            // Find the user message that triggered this bot response
                             const tripMessages = activeTrip?.messages || [];
-                            const userMsg = tripMessages.find(m => m.type === 'user' && m.id < message.id);
+                            const botIdx = tripMessages.findIndex(m => m.id === message.id);
+                            const before = tripMessages.slice(0, botIdx);
+                            const userMsg = [...before].reverse().find(m => m.type === 'user');
                             if (userMsg) {
                               handleRefreshBot(userMsg.id, userMsg.text);
                             }
                           }}
-                          disabled={isTyping}
+                          disabled={isTyping || (() => {
+                            const tripMessages = activeTrip?.messages || [];
+                            const botIdx = tripMessages.findIndex(m => m.id === message.id);
+                            const before = tripMessages.slice(0, botIdx);
+                            const userMsg = [...before].reverse().find(m => m.type === 'user');
+                            return !userMsg;
+                          })()}
                           title="รีเฟรช"
                         >
                           🔄 รีเฟรช

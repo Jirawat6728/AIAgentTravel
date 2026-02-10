@@ -8,6 +8,8 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
     confirmPassword: '',
     firstName: '',
     lastName: '',
+    firstNameTh: '',
+    lastNameTh: '',
     phone: ''
   });
   const [errors, setErrors] = useState({});
@@ -26,6 +28,8 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
       confirmPassword: 'Confirm Password',
       firstName: 'First Name',
       lastName: 'Last Name',
+      firstNameTh: 'First Name (Thai)',
+      lastNameTh: 'Last Name (Thai)',
       phone: 'Phone Number',
       signUp: 'Sign Up',
       alreadyHaveAccount: 'Already have an account?',
@@ -41,6 +45,8 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
       confirmPassword: 'ยืนยันรหัสผ่าน',
       firstName: 'ชื่อ',
       lastName: 'นามสกุล',
+      firstNameTh: 'ชื่อภาษาไทย',
+      lastNameTh: 'นามสกุลภาษาไทย',
       phone: 'เบอร์โทรศัพท์',
       signUp: 'สมัครสมาชิก',
       alreadyHaveAccount: 'มีบัญชีอยู่แล้ว?',
@@ -155,6 +161,8 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
         password: formData.password,
         firstName: formData.firstName,
         lastName: formData.lastName,
+        firstNameTh: formData.firstNameTh.trim() || undefined,
+        lastNameTh: formData.lastNameTh.trim() || undefined,
         phone: formData.phone
       });
       
@@ -201,10 +209,11 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
 
   return (
     <div className="register-container">
-      {/* Transparent Header with Logo */}
+      {/* Header with Logo + AI Travel Agent text (เหมือนหน้าเข้าสู่ระบบ) */}
       <header className="register-transparent-header">
         <div className="header-logo" onClick={onNavigateToHome} style={{ cursor: 'pointer' }}>
-          <img src="/images/project-logo.png" alt="AI Travel Agent" className="login-logo-img" />
+          <img src="/favicon.svg" alt="" className="login-logo-img" aria-hidden="true" />
+          <span className="header-logo-text">AITravelAgent</span>
         </div>
       </header>
 
@@ -260,8 +269,8 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                 </div>
               )}
 
-              {/* First Name and Last Name - 2 columns */}
-              <div className="form-row">
+              {/* ชื่อ นามสกุล ชื่อภาษาไทย นามสกุลภาษาไทย - 1 แถว 4 คอลัมน์ */}
+              <div className="form-row form-row-4">
                 <div className="form-group">
                   <label htmlFor="firstName" className="form-label">{text[lang].firstName}</label>
                   <input
@@ -276,7 +285,6 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                   />
                   {errors.firstName && <span className="error-message">{errors.firstName}</span>}
                 </div>
-
                 <div className="form-group">
                   <label htmlFor="lastName" className="form-label">{text[lang].lastName}</label>
                   <input
@@ -287,8 +295,37 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                     onChange={handleChange}
                     placeholder={text[lang].lastName}
                     className={`form-input ${errors.lastName ? 'error' : ''}`}
+                    disabled={isSubmitting}
                   />
                   {errors.lastName && <span className="error-message">{errors.lastName}</span>}
+                </div>
+                <div className="form-group">
+                  <label htmlFor="firstNameTh" className="form-label">{text[lang].firstNameTh}</label>
+                  <input
+                    type="text"
+                    id="firstNameTh"
+                    name="firstNameTh"
+                    value={formData.firstNameTh}
+                    onChange={handleChange}
+                    placeholder={text[lang].firstNameTh}
+                    className={`form-input ${errors.firstNameTh ? 'error' : ''}`}
+                    disabled={isSubmitting}
+                  />
+                  {errors.firstNameTh && <span className="error-message">{errors.firstNameTh}</span>}
+                </div>
+                <div className="form-group">
+                  <label htmlFor="lastNameTh" className="form-label">{text[lang].lastNameTh}</label>
+                  <input
+                    type="text"
+                    id="lastNameTh"
+                    name="lastNameTh"
+                    value={formData.lastNameTh}
+                    onChange={handleChange}
+                    placeholder={text[lang].lastNameTh}
+                    className={`form-input ${errors.lastNameTh ? 'error' : ''}`}
+                    disabled={isSubmitting}
+                  />
+                  {errors.lastNameTh && <span className="error-message">{errors.lastNameTh}</span>}
                 </div>
               </div>
 

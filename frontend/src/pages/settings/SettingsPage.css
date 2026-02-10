@@ -1,5 +1,12 @@
 .settings-page {
   min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-content-area {
+  flex: 1;
+  min-height: 0;
   background-color: #f5f5f5;
 }
 
@@ -302,4 +309,490 @@
     width: 100%;
     justify-content: flex-start;
   }
+}
+
+/* บัตรเครดิต/เดบิต (Cards) */
+.settings-section-cards .settings-cards-desc {
+  color: #666;
+  font-size: 14px;
+  margin: -8px 0 20px 0;
+}
+
+.settings-cards-loading,
+.settings-cards-omise-loading {
+  color: #666;
+  margin: 12px 0;
+}
+
+.settings-cards-error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0;
+  padding: 12px;
+  background: #fff3f3;
+  border-radius: 8px;
+  color: #c62828;
+}
+
+.settings-cards-list {
+  margin-bottom: 28px;
+}
+
+/* ให้ slide เฉพาะบัตร — scroll ได้เฉพาะรายการบัตร */
+.settings-cards-scroll {
+  overflow-y: auto;
+  max-height: min(50vh, 360px);
+  padding-right: 4px;
+}
+
+.settings-cards-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.settings-cards-scroll::-webkit-scrollbar-thumb {
+  background: #ccc;
+  border-radius: 3px;
+}
+
+.settings-cards-scroll::-webkit-scrollbar-thumb:hover {
+  background: #999;
+}
+
+.settings-cards-list h4,
+.settings-cards-add h4 {
+  font-size: 15px;
+  color: #333;
+  margin: 0 0 12px 0;
+}
+
+.settings-cards-list ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.settings-cards-grid {
+  display: flex;
+  flex-direction: column;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.settings-card-item {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  max-width: 320px;
+  width: 100%;
+}
+
+.settings-card-visual {
+  aspect-ratio: 1.586 / 1;
+  border-radius: 14px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.96);
+  min-height: 120px;
+  position: relative;
+  overflow: hidden;
+}
+
+.settings-card-visual::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 50%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, transparent 100%);
+  pointer-events: none;
+  border-radius: 14px 14px 0 0;
+}
+
+.settings-card-visual.card-visa {
+  background: linear-gradient(145deg, #1a237e 0%, #283593 40%, #3949ab 100%);
+}
+
+.settings-card-visual.card-mastercard {
+  background: linear-gradient(145deg, #c62828 0%, #e65100 50%, #ff6f00 100%);
+}
+
+.settings-card-visual.card-amex {
+  background: linear-gradient(145deg, #01579b 0%, #0277bd 50%, #0288d1 100%);
+}
+
+.settings-card-visual.card-jcb {
+  background: linear-gradient(145deg, #0d47a1 0%, #1565c0 50%, #1976d2 100%);
+}
+
+.settings-card-visual.card-discover {
+  background: linear-gradient(145deg, #e65100 0%, #ef6c00 50%, #ff9800 100%);
+}
+
+.settings-card-visual.card-diners {
+  background: linear-gradient(145deg, #006064 0%, #00838f 50%, #0097a7 100%);
+}
+
+.settings-card-visual.card-unionpay {
+  background: linear-gradient(145deg, #1b5e20 0%, #2e7d32 50%, #388e3c 100%);
+}
+
+.settings-card-visual.card-default {
+  background: linear-gradient(145deg, #37474f 0%, #455a64 50%, #546e7a 100%);
+}
+
+.settings-card-visual-top {
+  display: flex;
+  justify-content: flex-end;
+  align-items: flex-start;
+}
+
+.settings-card-visual-top .settings-card-primary-badge {
+  position: static;
+}
+
+.settings-card-visual-mid {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-card-visual-number {
+  font-size: 16px;
+  font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+  letter-spacing: 0.15em;
+}
+
+.settings-card-visual-name {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 6px;
+  text-align: center;
+}
+
+.settings-card-visual-bottom {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  font-size: 12px;
+  opacity: 0.9;
+  margin-top: auto;
+}
+
+.settings-card-visual-bottom .card-brand-logo {
+  color: inherit;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.2));
+}
+
+.settings-card-visual-bottom .card-brand-logo svg,
+.settings-card-visual-bottom .card-brand-logo img {
+  width: 64px;
+  height: 28px;
+  object-fit: contain;
+}
+
+.settings-card-visual-expiry {
+  text-transform: uppercase;
+}
+
+.settings-card-visual-logo {
+  display: flex;
+  align-items: center;
+}
+
+.settings-card-info {
+  font-size: 14px;
+  color: #333;
+}
+
+.settings-card-item .btn-delete-card {
+  min-width: 72px;
+}
+
+.settings-card-visual.settings-card-primary {
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22), 0 0 0 2px rgba(96, 165, 250, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.settings-card-primary-badge {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+}
+
+.settings-card-visual-top .settings-card-primary-badge {
+  position: static;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.25);
+  backdrop-filter: blur(4px);
+}
+
+.settings-card-visual {
+  position: relative;
+}
+
+.settings-card-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-self: flex-start;
+}
+
+.settings-card-actions .btn-set-primary-card {
+  min-width: 90px;
+}
+
+.settings-cards-add {
+  padding-top: 8px;
+  border-top: 1px solid #eee;
+}
+
+.settings-cards-add-disabled {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.settings-cards-add-disabled .btn-add-card {
+  margin-top: 4px;
+}
+
+/* Add Card Popup (SweetAlert) - สไตล์สวยงาม */
+body .add-card-popup.swal2-popup {
+  padding: 0;
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(102, 126, 234, 0.08);
+  max-width: 95vw;
+}
+
+.add-card-popup .swal2-html-container {
+  padding: 8px 24px 20px;
+  margin: 0;
+  overflow: hidden;
+  max-width: 100%;
+}
+
+.add-card-popup .swal2-title {
+  padding: 24px 24px 16px;
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: #4f46e5;
+  letter-spacing: -0.02em;
+}
+
+.add-card-popup .swal2-actions {
+  padding: 16px 24px 24px;
+  gap: 12px;
+}
+
+.add-card-popup .swal2-confirm {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+  border: none !important;
+  padding: 12px 28px !important;
+  border-radius: 12px !important;
+  font-weight: 600 !important;
+  box-shadow: 0 4px 14px rgba(102, 126, 234, 0.4) !important;
+}
+
+.add-card-popup .swal2-cancel {
+  background: #f1f5f9 !important;
+  color: #475569 !important;
+  border: none !important;
+  padding: 12px 28px !important;
+  border-radius: 12px !important;
+  font-weight: 500 !important;
+}
+
+.add-card-popup .add-card-input {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 12px 16px;
+  border: 2px solid #e2e8f0;
+  border-radius: 12px;
+  font-size: 15px;
+  color: #1e293b;
+  background: #fafafa;
+  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+}
+
+.add-card-popup .add-card-input:focus {
+  outline: none;
+  border-color: #667eea;
+  background: #fff;
+  box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.12);
+}
+
+.add-card-popup .add-card-input::placeholder {
+  color: #94a3b8;
+}
+
+.add-card-popup .add-card-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: #475569;
+  letter-spacing: 0.01em;
+}
+
+.add-card-popup .add-card-field {
+  margin-bottom: 16px;
+}
+
+.add-card-popup .add-card-type-display {
+  font-size: 13px;
+  margin-top: 8px;
+  min-height: 24px;
+  opacity: 0;
+  transition: opacity 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.add-card-popup .add-card-type-display.visible {
+  opacity: 1;
+}
+
+.add-card-popup .add-card-type-display .card-logo-wrap {
+  display: inline-flex;
+  align-items: center;
+}
+
+.add-card-popup .add-card-type-display .card-logo-wrap svg {
+  height: 22px;
+  width: auto;
+  max-width: 48px;
+}
+
+.add-card-popup .add-card-type-display .card-logo-img {
+  height: 22px;
+  width: auto;
+  max-width: 48px;
+  object-fit: contain;
+}
+
+.add-card-popup .add-card-type-display.valid .card-logo-valid {
+  color: #059669;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.add-card-popup .add-card-type-display.invalid .card-logo-invalid {
+  color: #dc2626;
+  font-weight: 500;
+  font-size: 13px;
+}
+
+/* กรอบช่องใส่ตามสีแบรนด์บัตร */
+.add-card-popup .add-card-input.card-visa,
+.add-card-popup .add-card-input.card-visa:focus {
+  border-color: #1A1F71;
+  box-shadow: 0 0 0 3px rgba(26, 31, 113, 0.15);
+}
+
+.add-card-popup .add-card-input.card-mastercard,
+.add-card-popup .add-card-input.card-mastercard:focus {
+  border-color: #EB001B;
+  box-shadow: 0 0 0 3px rgba(235, 0, 27, 0.15);
+}
+
+.add-card-popup .add-card-input.card-amex,
+.add-card-popup .add-card-input.card-amex:focus {
+  border-color: #006FCF;
+  box-shadow: 0 0 0 3px rgba(0, 111, 207, 0.15);
+}
+
+.add-card-popup .add-card-input.card-jcb,
+.add-card-popup .add-card-input.card-jcb:focus {
+  border-color: #0E4C96;
+  box-shadow: 0 0 0 3px rgba(14, 76, 150, 0.15);
+}
+
+.add-card-popup .add-card-input.card-discover,
+.add-card-popup .add-card-input.card-discover:focus {
+  border-color: #FF6000;
+  box-shadow: 0 0 0 3px rgba(255, 96, 0, 0.15);
+}
+
+.add-card-popup .add-card-input.card-diners,
+.add-card-popup .add-card-input.card-diners:focus {
+  border-color: #0079BE;
+  box-shadow: 0 0 0 3px rgba(0, 121, 190, 0.15);
+}
+
+.add-card-popup .add-card-input.card-unionpay,
+.add-card-popup .add-card-input.card-unionpay:focus {
+  border-color: #1A237E;
+  box-shadow: 0 0 0 3px rgba(26, 35, 126, 0.15);
+}
+
+.add-card-popup .add-card-row {
+  display: flex;
+  gap: 12px;
+}
+
+.add-card-popup .add-card-row .add-card-field {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 16px;
+}
+
+.settings-cards-form .form-row {
+  margin-bottom: 14px;
+}
+
+.settings-cards-form .form-row label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: #333;
+  margin-bottom: 6px;
+}
+
+.settings-cards-form .form-row-inline {
+  display: flex;
+  gap: 16px;
+}
+
+.settings-cards-form .form-row-inline > div {
+  flex: 1;
+}
+
+.settings-cards-form .form-row-inline label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: #333;
+  margin-bottom: 6px;
+}
+
+.settings-cards-form-error {
+  color: #c62828;
+  font-size: 13px;
+  margin: 8px 0;
+}
+
+.settings-cards-powered {
+  font-size: 12px;
+  color: #888;
+  margin: 12px 0 0 0;
 }

@@ -114,6 +114,43 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
             return False
 
 
+def hash_password_from_client_sha256(client_sha256_hex: str) -> str:
+    """
+    Hash for storage when client sends SHA-256(password) as hex.
+    So the real password never leaves the client (Payload in DevTools shows hash only).
+    """
+    if not client_sha256_hex or len(client_sha256_hex) != 64:
+        raise ValueError("Invalid client SHA-256 hex (must be 64 hex chars)")
+    try:
+        pre_hashed_bytes = bytes.fromhex(client_sha256_hex)
+    except Exception as e:
+        raise ValueError(f"Client SHA-256 hex decode failed: {e}")
+    if len(pre_hashed_bytes) != 32:
+        raise ValueError("Client hash must be 32 bytes (SHA-256)")
+    salt = bcrypt.gensalt(rounds=BCRYPT_ROUNDS)
+    hashed_bytes = bcrypt.hashpw(pre_hashed_bytes, salt)
+    return hashed_bytes.decode("utf-8")
+
+
+def verify_password_from_client_hash(client_sha256_hex: str, hashed_password: str) -> bool:
+    """
+    Verify when client sends SHA-256(password) as hex. No plain password on wire.
+    """
+    if not client_sha256_hex or len(client_sha256_hex) != 64:
+        return False
+    try:
+        pre_hashed_bytes = bytes.fromhex(client_sha256_hex)
+    except Exception:
+        return False
+    if len(pre_hashed_bytes) != 32:
+        return False
+    try:
+        hashed_bytes = hashed_password.encode("utf-8")
+        return bcrypt.checkpw(pre_hashed_bytes, hashed_bytes)
+    except Exception:
+        return False
+
+
 def validate_password_strength(password: str) -> Tuple[bool, str]:
     """
     Validate password strength

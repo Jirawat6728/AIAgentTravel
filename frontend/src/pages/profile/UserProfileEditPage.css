@@ -13,7 +13,15 @@
 }
 
 /* ล็อกแถบเมนู ไม่ให้สไลด์ — ให้สไลด์เฉพาะเนื้อหา */
-.profile-edit-wrapper.settings-page .settings-container {
+.profile-edit-wrapper.settings-page .settings-content-area {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.profile-edit-wrapper.settings-page .settings-content-area .settings-container {
   max-width: 1180px;
   margin: 0 auto;
   padding: clamp(20px, 4vh, 32px) clamp(16px, 4vw, 24px);

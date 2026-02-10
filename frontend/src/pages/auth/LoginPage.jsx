@@ -53,10 +53,11 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
       }
     }
     // Clear error when user starts typing
-    if (errors[name]) {
+    if (errors[name] || errors.general) {
       setErrors(prev => ({
         ...prev,
-        [name]: ''
+        [name]: '',
+        general: ''
       }));
     }
   };
@@ -73,6 +74,7 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
     setEmailError(false);
     setShakePassword(false);
     setShakeEmail(false);
+    setErrors(prev => ({ ...prev, general: '' }));
     
     try {
       await onLogin(email, password, rememberMe);
@@ -112,7 +114,7 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
         // Clear password field
         setPassword('');
       }
-      // ✅ Check if it's a password/authentication error
+      // ✅ Check if it's a password/authentication error (wrong credentials)
       else if (errorMessage.includes('Invalid email or password') || 
                errorMessage.includes('password') || 
                errorMessage.includes('401') ||
@@ -120,6 +122,9 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
         // Show password error with shake animation
         setPasswordError(true);
         setShakePassword(true);
+        setErrors({
+          general: lang === 'th' ? 'อีเมลหรือรหัสผ่านไม่ถูกต้อง' : 'Email or password is incorrect'
+        });
         
         // Remove shake animation class after animation completes (600ms)
         setTimeout(() => {
@@ -304,6 +309,13 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
                   </button>
                 </div>
               </div>
+
+              {/* General error (wrong credentials, etc.) */}
+              {errors.general && (
+                <div className="error-message" style={{ color: '#dc2626', fontSize: '0.875rem', marginTop: '0.25rem', marginBottom: '0.5rem' }}>
+                  {errors.general}
+                </div>
+              )}
 
               {/* Submit Button */}
               <button type="submit" className="btn-login" disabled={isLoading}>

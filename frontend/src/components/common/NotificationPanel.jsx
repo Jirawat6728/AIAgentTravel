@@ -11,12 +11,18 @@ export default function NotificationPanel({
   onMarkAsRead = null  // ✅ New callback to sync with parent
 }) {
   const [activeTab, setActiveTab] = useState('all');
+  const [taskCategoryFilter, setTaskCategoryFilter] = useState('all'); // all | booking | email_confirm | add_info
   const [localNotifications, setLocalNotifications] = useState(notifications);
 
   // Update local notifications when prop changes
   React.useEffect(() => {
     setLocalNotifications(notifications);
   }, [notifications]);
+
+  // รีเซ็ต task category filter เมื่อเปลี่ยนไปแท็บอื่น
+  React.useEffect(() => {
+    if (activeTab !== 'tasks') setTaskCategoryFilter('all');
+  }, [activeTab]);
 
   const handleMarkAsRead = (id) => {
     // Update local state
@@ -40,10 +46,16 @@ export default function NotificationPanel({
   const newNotifications = localNotifications.filter(n => !n.isRead);
   const previousNotifications = localNotifications.filter(n => n.isRead);
 
-  const filteredNotifications = activeTab === 'all' 
-    ? localNotifications 
+  const taskNotifications = localNotifications.filter(n => n.type === 'task');
+  const taskFilteredByCategory =
+    taskCategoryFilter === 'all'
+      ? taskNotifications
+      : taskNotifications.filter(n => (n.taskCategory || 'add_info') === taskCategoryFilter);
+
+  const filteredNotifications = activeTab === 'all'
+    ? localNotifications
     : activeTab === 'tasks'
-    ? localNotifications.filter(n => n.type === 'task')
+    ? taskFilteredByCategory
     : localNotifications.filter(n => n.type === 'reminder');
 
   if (!isOpen) return null;
@@ -93,6 +105,36 @@ export default function NotificationPanel({
           </button>
         </div>
 
+        {/* หมวดย่อยสำหรับ TASKS: การจองตั๋ว | ยืนยันอีเมลก่อนจอง | การเพิ่มข้อมูล */}
+        {activeTab === 'tasks' && (
+          <div className="notification-task-categories">
+            <button
+              className={`notification-task-cat-btn ${taskCategoryFilter === 'all' ? 'active' : ''}`}
+              onClick={() => setTaskCategoryFilter('all')}
+            >
+              ทั้งหมด
+            </button>
+            <button
+              className={`notification-task-cat-btn ${taskCategoryFilter === 'booking' ? 'active' : ''}`}
+              onClick={() => setTaskCategoryFilter('booking')}
+            >
+              การจองตั๋ว
+            </button>
+            <button
+              className={`notification-task-cat-btn ${taskCategoryFilter === 'email_confirm' ? 'active' : ''}`}
+              onClick={() => setTaskCategoryFilter('email_confirm')}
+            >
+              ยืนยันอีเมลก่อนจอง
+            </button>
+            <button
+              className={`notification-task-cat-btn ${taskCategoryFilter === 'add_info' ? 'active' : ''}`}
+              onClick={() => setTaskCategoryFilter('add_info')}
+            >
+              การเพิ่มข้อมูล
+            </button>
+          </div>
+        )}
+
         {/* Content */}
         <div className="notification-panel-content">
           {/* New Notifications */}
@@ -100,11 +142,14 @@ export default function NotificationPanel({
             <div className="notification-section">
               <div className="notification-list">
                 {newNotifications
-                  .filter(n => 
-                    activeTab === 'all' || 
-                    (activeTab === 'tasks' && n.type === 'task') ||
-                    (activeTab === 'reminders' && n.type === 'reminder')
-                  )
+                  .filter(n => {
+                    if (activeTab === 'all') return true;
+                    if (activeTab === 'reminders') return n.type === 'reminder';
+                    if (activeTab === 'tasks' && n.type === 'task') {
+                      return taskCategoryFilter === 'all' || (n.taskCategory || 'add_info') === taskCategoryFilter;
+                    }
+                    return false;
+                  })
                   .map((notification) => (
                     <div 
                       key={notification.id} 
@@ -167,11 +212,14 @@ export default function NotificationPanel({
               </div>
               <div className="notification-list">
                 {previousNotifications
-                  .filter(n => 
-                    activeTab === 'all' || 
-                    (activeTab === 'tasks' && n.type === 'task') ||
-                    (activeTab === 'reminders' && n.type === 'reminder')
-                  )
+                  .filter(n => {
+                    if (activeTab === 'all') return true;
+                    if (activeTab === 'reminders') return n.type === 'reminder';
+                    if (activeTab === 'tasks' && n.type === 'task') {
+                      return taskCategoryFilter === 'all' || (n.taskCategory || 'add_info') === taskCategoryFilter;
+                    }
+                    return false;
+                  })
                   .map((notification) => (
                     <div key={notification.id} className="notification-item previous">
                       <div className="notification-icon">

@@ -23,7 +23,13 @@ except ImportError:
 
 from app.core.config import settings
 from app.core.logging import get_logger, set_logging_context, clear_logging_context
-from app.core.security import hash_password, verify_password, validate_password_strength
+from app.core.security import (
+    hash_password,
+    verify_password,
+    validate_password_strength,
+    hash_password_from_client_sha256,
+    verify_password_from_client_hash,
+)
 from app.storage.mongodb_storage import MongoStorage
 from app.models.database import User, SessionDocument, FamilyMember
 from app.services.email_service import get_email_service
@@ -97,6 +103,8 @@ class RegisterRequest(BaseModel):
     password: str
     first_name: str = Field(alias="firstName", description="First name (camelCase: firstName)")
     last_name: str = Field(alias="lastName", description="Last name (camelCase: lastName)")
+    first_name_th: Optional[str] = Field(default=None, alias="firstNameTh", description="First name in Thai")
+    last_name_th: Optional[str] = Field(default=None, alias="lastNameTh", description="Last name in Thai")
     phone: Optional[str] = None
 
     model_config = {"populate_by_name": True}
@@ -139,16 +147,24 @@ class ProfileUpdateRequest(BaseModel):
     # ผู้จองร่วม (สมาชิกในครอบครัว) - สำหรับเลือกตอนจองมากกว่า 1 คน
     family: Optional[list] = Field(default=None, description="List of family members (adult/child) for co-traveler selection: [{id, type, first_name, last_name, date_of_birth?, passport_no?, ...}]")
 
+def _sha256_hex(s: str) -> str:
+    import hashlib
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
 @router.post("/login")
-async def login(request: LoginRequest, response: Response):
+async def login(request: LoginRequest, response: Response, raw_request: Request):
     """
     Login with email and password.
     Returns {ok: true, user: {...}}. Sets session cookie (no access_token).
     Handles both admin@example.com and regular users.
+    If header X-Password-Encoding: sha256 is sent, request.password must be SHA-256(password) in hex (64 chars).
     """
     try:
         if not request.password:
             raise HTTPException(status_code=400, detail="Password is required")
+
+        client_sends_sha256 = (raw_request.headers.get("X-Password-Encoding") or "").strip().lower() == "sha256"
 
         # Initialize storage and collection
         storage = MongoStorage()
@@ -160,9 +176,13 @@ async def login(request: LoginRequest, response: Response):
         
         # 1. Admin/Test Account Check (from environment variables)
         # ✅ SECURITY: Use environment variables instead of hardcoded credentials
-        if (normalized_email == settings.admin_email.lower().strip() and 
-            settings.admin_password and 
-            request.password == settings.admin_password):
+        admin_password_ok = False
+        if normalized_email == settings.admin_email.lower().strip() and settings.admin_password:
+            if client_sends_sha256:
+                admin_password_ok = request.password == _sha256_hex(settings.admin_password)
+            else:
+                admin_password_ok = request.password == settings.admin_password
+        if admin_password_ok:
             user_data = await users_collection.find_one({"email": normalized_email})
             
             if not user_data:
@@ -231,29 +251,21 @@ async def login(request: LoginRequest, response: Response):
             logger.warning(f"User {normalized_email} has no password_hash - cannot login with password")
             raise HTTPException(status_code=401, detail="อีเมลหรือรหัสผ่านไม่ถูกต้อง")
 
-        # Verify password with detailed logging
+        # Verify password (support client sending SHA-256 hex so plain password is never on the wire)
         try:
             logger.info(f"Attempting password verification for user {normalized_email}")
-            logger.debug(f"Password hash from DB: {password_hash[:50]}...")
-            
-            password_valid = verify_password(request.password, password_hash)
-            
+            if client_sends_sha256:
+                password_valid = verify_password_from_client_hash(request.password, password_hash)
+            else:
+                password_valid = verify_password(request.password, password_hash)
+
             if not password_valid:
                 logger.warning(
                     f"Password verification failed for user {normalized_email}. "
                     f"Hash exists: {bool(password_hash)}, Hash length: {len(password_hash) if password_hash else 0}"
                 )
-                # Try to diagnose the issue
-                try:
-                    # Test if we can create a new hash with the same password
-                    test_hash = hash_password(request.password)
-                    test_verify = verify_password(request.password, test_hash)
-                    logger.debug(f"Test hash/verify with same password: {test_verify}")
-                except Exception as test_error:
-                    logger.debug(f"Test hash/verify failed: {test_error}")
-                
                 raise HTTPException(status_code=401, detail="อีเมลหรือรหัสผ่านไม่ถูกต้อง")
-            
+
             logger.info(f"Password verified successfully for user {normalized_email}")
         except HTTPException:
             raise
@@ -570,51 +582,56 @@ async def update_profile(request: Request, profile: ProfileUpdateRequest):
 @router.post("/change-password")
 async def change_password(request: Request, password_data: dict):
     """
-    Change user password
+    Change user password.
+    If header X-Password-Encoding: sha256, current_password and new_password must be SHA-256 hex (64 chars).
     """
     user_id = request.cookies.get(settings.session_cookie_name)
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    
+
     current_password = password_data.get("current_password")
     new_password = password_data.get("new_password")
-    
+
     if not current_password or not new_password:
         raise HTTPException(status_code=400, detail="กรุณากรอกรหัสผ่านปัจจุบันและรหัสผ่านใหม่")
-    
-    # Validate password strength
-    try:
-        validate_password_strength(new_password)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    
+
+    client_sends_sha256 = (request.headers.get("X-Password-Encoding") or "").strip().lower() == "sha256"
+    if not client_sends_sha256:
+        try:
+            validate_password_strength(new_password)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     try:
         storage = MongoStorage()
         await storage.connect()
         users_collection = storage.db["users"]
-        
-        # Get user
+
         user_data = await users_collection.find_one({"user_id": user_id})
         if not user_data:
             raise HTTPException(status_code=404, detail="User not found")
-        
-        # Verify current password
-        stored_password = user_data.get("password", "")
-        if not stored_password:
+
+        stored_hash = user_data.get("password_hash") or user_data.get("password", "")
+        if not stored_hash:
             raise HTTPException(status_code=400, detail="บัญชีนี้ไม่ได้ตั้งรหัสผ่าน (ใช้ Google/Firebase login)")
-        
-        if not verify_password(current_password, stored_password):
+
+        if client_sends_sha256:
+            current_ok = verify_password_from_client_hash(current_password, stored_hash)
+        else:
+            current_ok = verify_password(current_password, stored_hash)
+        if not current_ok:
             raise HTTPException(status_code=400, detail="รหัสผ่านปัจจุบันไม่ถูกต้อง")
-        
-        # Hash new password
-        hashed_password = hash_password(new_password)
-        
-        # Update password
+
+        if client_sends_sha256:
+            hashed_password = hash_password_from_client_sha256(new_password)
+        else:
+            hashed_password = hash_password(new_password)
+
         await users_collection.update_one(
             {"user_id": user_id},
-            {"$set": {"password": hashed_password}}
+            {"$set": {"password_hash": hashed_password}}
         )
-        
+
         logger.info(f"Password changed for user: {user_id}")
         return {"ok": True, "message": "เปลี่ยนรหัสผ่านสำเร็จ"}
     
@@ -835,10 +852,11 @@ async def delete_account(request: Request, response: Response):
 
 
 @router.post("/register", status_code=201)
-async def register(request: RegisterRequest, response: Response):
+async def register(request: RegisterRequest, response: Response, raw_request: Request):
     """
     Register a new user account.
     Expects firstName, lastName (camelCase). Returns {ok, user}. Sets session cookie.
+    If header X-Password-Encoding: sha256, request.password must be SHA-256(password) hex (64 chars); strength is validated on client.
     """
     try:
         # Validate required fields
@@ -846,15 +864,17 @@ async def register(request: RegisterRequest, response: Response):
             raise HTTPException(status_code=400, detail="First name is required")
         if not request.last_name or not request.last_name.strip():
             raise HTTPException(status_code=400, detail="Last name is required")
-        
+
         # Validate password is provided
         if not request.password or not request.password.strip():
             raise HTTPException(status_code=400, detail="Password is required")
-        
-        # Validate password strength
-        is_valid, error_message = validate_password_strength(request.password)
-        if not is_valid:
-            raise HTTPException(status_code=400, detail=error_message)
+
+        client_sends_sha256 = (raw_request.headers.get("X-Password-Encoding") or "").strip().lower() == "sha256"
+        if not client_sends_sha256:
+            # Validate password strength only when sending plain password
+            is_valid, error_message = validate_password_strength(request.password)
+            if not is_valid:
+                raise HTTPException(status_code=400, detail=error_message)
 
         storage = MongoStorage()
         await storage.connect()
@@ -876,13 +896,18 @@ async def register(request: RegisterRequest, response: Response):
             logger.warning(f"Registration attempt with existing email: {normalized_email} (found: {existing_user.get('email')})")
             raise HTTPException(status_code=400, detail="อีเมลนี้ถูกใช้งานแล้ว กรุณาใช้อีเมลอื่น")
 
-        # Hash password (with SHA-256 pre-hashing to handle long passwords)
+        # Hash password (client may send SHA-256 hex so plain password is never on the wire)
         try:
-            hashed_password = hash_password(request.password)
+            if client_sends_sha256:
+                hashed_password = hash_password_from_client_sha256(request.password)
+            else:
+                hashed_password = hash_password(request.password)
             logger.info(f"Password hashed successfully for user: {request.email}")
+        except ValueError as ve:
+            raise HTTPException(status_code=400, detail=str(ve))
         except Exception as hash_error:
             logger.error(f"Password hashing error: {hash_error}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Password encryption failed: {str(hash_error)}")
+            raise HTTPException(status_code=500, detail="Password encryption failed")
 
         # ✅ CRUD STABILITY: Create new user with duplicate key error handling
         user_id = f"user_{int(datetime.utcnow().timestamp())}"
@@ -914,6 +939,8 @@ async def register(request: RegisterRequest, response: Response):
             "full_name": f"{request.first_name} {request.last_name}",
             "first_name": request.first_name.strip(),
             "last_name": request.last_name.strip(),
+            "first_name_th": request.first_name_th.strip() if request.first_name_th else None,
+            "last_name_th": request.last_name_th.strip() if request.last_name_th else None,
             "phone": request.phone.strip() if request.phone else None,
             "password_hash": hashed_password,
             "email_verified": email_verified,
@@ -956,6 +983,8 @@ async def register(request: RegisterRequest, response: Response):
             full_name=f"{request.first_name} {request.last_name}",
             first_name=request.first_name.strip(),
             last_name=request.last_name.strip(),
+            first_name_th=request.first_name_th.strip() if request.first_name_th else None,
+            last_name_th=request.last_name_th.strip() if request.last_name_th else None,
             phone=request.phone.strip() if request.phone else None,
             created_at=datetime.utcnow(),
             last_login=datetime.utcnow()
@@ -1096,17 +1125,17 @@ class ResetPasswordRequest(BaseModel):
 
 
 @router.post("/reset-password")
-async def reset_password(request: ResetPasswordRequest):
+async def reset_password(request: ResetPasswordRequest, raw_request: Request):
     """
-    Reset user password
-    Backs up old password hash before changing
-    Case-insensitive email search
+    Reset user password.
+    If header X-Password-Encoding: sha256, new_password must be SHA-256 hex (64 chars).
     """
     try:
-        # Validate password strength
-        is_valid, error_message = validate_password_strength(request.new_password)
-        if not is_valid:
-            raise HTTPException(status_code=400, detail=error_message)
+        client_sends_sha256 = (raw_request.headers.get("X-Password-Encoding") or "").strip().lower() == "sha256"
+        if not client_sends_sha256:
+            is_valid, error_message = validate_password_strength(request.new_password)
+            if not is_valid:
+                raise HTTPException(status_code=400, detail=error_message)
         
         email_trimmed = request.email.strip()
         email_lower = email_trimmed.lower()
@@ -1148,15 +1177,20 @@ async def reset_password(request: ResetPasswordRequest):
             update_data["password_backup_date"] = datetime.utcnow()
             logger.info(f"Backed up old password hash for user: {request.email}")
         
-        # Hash new password
+        # Hash new password (client may send SHA-256 hex)
         try:
-            new_password_hash = hash_password(request.new_password)
+            if client_sends_sha256:
+                new_password_hash = hash_password_from_client_sha256(request.new_password)
+            else:
+                new_password_hash = hash_password(request.new_password)
             update_data["password_hash"] = new_password_hash
             update_data["password_changed_at"] = datetime.utcnow()
             logger.info(f"Password hashed successfully for user: {request.email}")
+        except ValueError as ve:
+            raise HTTPException(status_code=400, detail=str(ve))
         except Exception as hash_error:
             logger.error(f"Password hashing error: {hash_error}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Password encryption failed: {str(hash_error)}")
+            raise HTTPException(status_code=500, detail="Password encryption failed")
         
         # Update user
         result = await users_collection.update_one(

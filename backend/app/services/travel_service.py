@@ -1532,6 +1532,30 @@ class TravelOrchestrator:
             logger.error(f"Failed to create hotel booking (sandbox): {e}")
             raise AmadeusException(f"Failed to create hotel booking: {str(e)}")
 
+    async def delete_flight_order(self, flight_order_id: str) -> None:
+        """
+        Cancel/delete a flight order in Amadeus sandbox (sync เมื่อยกเลิกการจอง)
+        DELETE /v1/booking/flight-orders/{id}
+        """
+        booking_env = settings.amadeus_booking_env.lower()
+        if booking_env == "production":
+            logger.warning("Amadeus booking env is production — skip delete flight order")
+            return
+        token = await self._get_amadeus_booking_token()
+        from urllib.parse import quote
+        safe_id = quote(flight_order_id, safe="")
+        try:
+            response = await self.client.delete(
+                f"{self.amadeus_booking_base_url}/v1/booking/flight-orders/{safe_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30.0
+            )
+            response.raise_for_status()
+            logger.info(f"Amadeus sandbox flight order deleted: {flight_order_id}")
+        except Exception as e:
+            logger.warning(f"Amadeus delete flight order failed: {flight_order_id} — {e}")
+            raise AmadeusException(f"Failed to cancel flight order: {str(e)}")
+
     async def close(self):
         """Cleanup resources"""
         await self.client.aclose()

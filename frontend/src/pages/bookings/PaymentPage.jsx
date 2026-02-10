@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import './PaymentPage.css';
 import AppHeader from '../../components/common/AppHeader';
+import { useTheme } from '../../context/ThemeContext';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
@@ -114,6 +115,8 @@ export default function PaymentPage({
     postalCode: ''
   });
 
+  const theme = useTheme();
+
   useEffect(() => {
     // Get booking_id from URL if not provided as prop
     const urlParams = new URLSearchParams(window.location.search);
@@ -159,7 +162,11 @@ export default function PaymentPage({
         if (data.ok && Array.isArray(data.cards)) {
           setSavedCards(data.cards);
           if (data.customer_id) setSavedCardsCustomerId(data.customer_id);
-          if (data.cards.length > 0 && !selectedSavedCardId) setSelectedSavedCardId(data.cards[0].card_id);
+          if (data.cards.length > 0 && !selectedSavedCardId) {
+            const primaryId = data.primary_card_id;
+            const primaryExists = primaryId && data.cards.some((c) => c.card_id === primaryId);
+            setSelectedSavedCardId(primaryExists ? primaryId : data.cards[0].card_id);
+          }
         }
       })
       .catch(() => {});
@@ -536,7 +543,7 @@ export default function PaymentPage({
           onNavigateToProfile={onNavigateToProfile}
           onNavigateToSettings={onNavigateToSettings}
         />
-        <div className="payment-page-content">
+        <div className="payment-page-content" data-theme={theme}>
           <div className="payment-loading">⏳ กำลังโหลดข้อมูล...</div>
         </div>
       </div>
@@ -556,7 +563,7 @@ export default function PaymentPage({
           onNavigateToProfile={onNavigateToProfile}
           onNavigateToSettings={onNavigateToSettings}
         />
-        <div className="payment-page-content">
+        <div className="payment-page-content" data-theme={theme}>
           <div className="payment-error">
             ❌ {error === 'omise_load_failed'
               ? 'โหลด Omise ไม่สำเร็จ — ถ้ามีบัตรที่บันทึกไว้สามารถเลือก "ใช้บัตรที่บันทึกไว้" ชำระได้ หรือลองปิด Ad blocker / รีเฟรช / กดลองอีกครั้ง'
@@ -597,7 +604,7 @@ export default function PaymentPage({
         onNavigateToSettings={onNavigateToSettings}
       />
       
-      <div className="payment-page-content">
+      <div className="payment-page-content" data-theme={theme}>
         <div className="payment-wrapper">
           {/* Left Panel: Order Summary */}
           <div className="payment-order-summary">
@@ -722,6 +729,15 @@ export default function PaymentPage({
                             <span className="saved-card-expiry">{card.expiry_month}/{card.expiry_year}</span>
                           </label>
                         ))}
+                        {onNavigateToSettings && (
+                          <button
+                            type="button"
+                            className="btn-add-card-inline"
+                            onClick={() => onNavigateToSettings()}
+                          >
+                            + เพิ่มบัตร
+                          </button>
+                        )}
                         <div className="form-group saved-cvv-only">
                           <label className="form-label">CVV</label>
                           <input
@@ -963,6 +979,7 @@ export default function PaymentPage({
                   minimumFractionDigits: 0,
                 }).format(amount)}`}
               </button>
+              <p className="payment-powered-by">Powered by Omise</p>
             </form>
           </div>
         </div>

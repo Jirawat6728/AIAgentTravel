@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import './ResetPasswordPage.css';
+import { sha256Password } from '../../utils/passwordHash.js';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
@@ -124,13 +125,17 @@ export default function ResetPasswordPage({ onNavigateToLogin, onNavigateToHome,
     setSuccessMessage('');
     
     try {
+      const newPasswordHash = await sha256Password(newPassword);
       const res = await fetch(`${API_BASE_URL}/api/auth/reset-password`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Password-Encoding': 'sha256',
+        },
         credentials: 'include',
         body: JSON.stringify({
           email: email,
-          new_password: newPassword
+          new_password: newPasswordHash
         })
       });
       

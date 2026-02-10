@@ -801,15 +801,26 @@
   align-items: center;
 }
 
-.footer-logo-img {
-  height: 2.5rem;
-  width: auto;
-  max-width: 200px;
-  object-fit: contain;
+.footer-logo-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: #2962ff;
+  color: white;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
 }
 
-.footer-section .logo-icon {
-  background: linear-gradient(135deg, #3b82f6, #1e40af);
+.footer-logo-plane {
+  width: 1.5rem;
+  height: 1.5rem;
+  flex-shrink: 0;
+}
+
+.footer-logo-text {
+  font-size: 1.125rem;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .footer-description {

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import './MyBookingsPage.css';
 import AppHeader from '../../components/common/AppHeader';
+import { useTheme } from '../../context/ThemeContext';
 import PaymentPopup from '../../components/bookings/PaymentPopup';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
@@ -67,7 +68,7 @@ function getStatusBadge(status) {
   return badges[status] || { text: status, class: 'status-unknown' };
 }
 
-export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notificationCount = 0, notifications = [], onNavigateToProfile = null, onNavigateToSettings = null, onNavigateToHome = null, onNavigateToAI = null, onMarkNotificationAsRead = null }) {
+export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notificationCount = 0, notifications = [], onNavigateToProfile = null, onNavigateToSettings = null, onNavigateToHome = null, onNavigateToAI = null, onNavigateToPayment = null, onMarkNotificationAsRead = null }) {
   const [bookings, setBookings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -109,6 +110,8 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
       window.removeEventListener('bookingCreated', handleBookingCreated);
     };
   }, []);
+
+  const theme = useTheme();
 
   const loadBookings = async () => {
     setLoading(true);
@@ -260,20 +263,22 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
           return;
         }
         
-        // ✅ If payment_url is a payment page URL, navigate to PaymentPage component
-        // Otherwise show payment modal (for Omise Links)
-        if (data.payment_url && (data.payment_url.includes('/payment-page/') || data.payment_url.includes('/api/booking/payment-page'))) {
-          // Navigate to PaymentPage component
-          // Extract booking_id from URL or use current bookingId
-          const paymentUrl = new URL(data.payment_url, window.location.origin);
-          const urlBookingId = paymentUrl.pathname.split('/').pop() || bookingId;
-          
-          // Navigate to payment page
-          if (window.history && window.history.pushState) {
-            window.history.pushState({}, '', `/payment?booking_id=${urlBookingId}`);
-            window.dispatchEvent(new PopStateEvent('popstate'));
+        // ✅ ลิงก์ Omise โดยตรง (pay.omise.co ฯลฯ) → เด้งไปหน้าชำระเงินทันที
+        if (data.payment_url && data.payment_url.startsWith('http') && (data.payment_url.includes('omise') || data.payment_url.includes('pay.'))) {
+          window.location.href = data.payment_url;
+        } else if (data.payment_url && (data.payment_url.includes('/payment-page/') || data.payment_url.includes('/api/booking/payment-page'))) {
+          // ✅ หน้า payment ภายใน (SPA) → ใช้ callback ให้ App สลับ view + ตั้ง URL
+          const paymentUrlParsed = new URL(data.payment_url, window.location.origin);
+          const urlBookingId = paymentUrlParsed.pathname.split('/').pop() || bookingId;
+          if (onNavigateToPayment) {
+            onNavigateToPayment(urlBookingId);
           } else {
-            window.location.href = `/payment?booking_id=${urlBookingId}`;
+            if (window.history && window.history.pushState) {
+              window.history.pushState({ view: 'payment' }, '', `/payment?booking_id=${urlBookingId}`);
+              window.dispatchEvent(new PopStateEvent('popstate'));
+            } else {
+              window.location.href = `/payment?booking_id=${urlBookingId}`;
+            }
           }
         } else {
           // Show payment modal with payment methods (for Omise Links)
@@ -452,7 +457,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
       />
 
       {/* Content */}
-      <div className="my-bookings-content">
+      <div className="my-bookings-content" data-theme={theme}>
 
         {loading ? (
           <div className="my-bookings-loading">⏳ กำลังโหลดข้อมูล...</div>

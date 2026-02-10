@@ -16,6 +16,8 @@ import CarRentalsPage from "./pages/search/CarRentalsPage.jsx";
 import Lottie from "lottie-react";
 import loadingAnimation from "./assets/loading.json";
 import { clearAllUserData, checkAndClearIfUserChanged } from "./utils/userDataManager.js";
+import { sha256Password } from "./utils/passwordHash.js";
+import { ThemeProvider } from "./context/ThemeContext.jsx";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
@@ -384,11 +386,16 @@ function App() {
 
   const handleRegister = async (registerData) => {
     try {
+      const passwordHash = await sha256Password(registerData.password);
+      const payload = { ...registerData, password: passwordHash };
       const res = await fetch(`${API_BASE_URL}/api/auth/register`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Password-Encoding": "sha256",
+        },
         credentials: "include",
-        body: JSON.stringify(registerData)
+        body: JSON.stringify(payload)
       });
       
       // Check if response is ok
@@ -407,10 +414,10 @@ function App() {
         throw new Error(data.detail || "Registration failed");
       }
     } catch (e) {
-      console.error("Registration failed", e);
-      // Re-throw with more detailed error message
-      const errorMessage = e?.message || String(e);
-      throw new Error(errorMessage);
+      if (import.meta.env.DEV) {
+        console.error("Registration failed", e?.message ?? "Unknown error");
+      }
+      throw new Error(e?.message || String(e));
     }
   };
 
@@ -446,14 +453,18 @@ function App() {
       }
     }
 
-    // 2. Standard Email login
+    // 2. Standard Email login (send SHA-256 of password so plain password never appears in Payload/DevTools)
     if (email && email.includes('@')) {
       try {
+        const passwordHash = await sha256Password(password);
         const res = await fetch(`${API_BASE_URL}/api/auth/login`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "X-Password-Encoding": "sha256",
+          },
           credentials: "include",
-          body: JSON.stringify({ email, password, remember_me: rememberMe })
+          body: JSON.stringify({ email, password: passwordHash, remember_me: rememberMe })
         });
         
         // ✅ Check if response is ok before parsing JSON
@@ -514,8 +525,9 @@ function App() {
           throw new Error(errorMessage);
         }
       } catch (e) {
-        console.error("Login failed", e);
-        // Re-throw error so LoginPage can handle it
+        if (import.meta.env.DEV) {
+          console.error("Login failed", e?.message ?? "Unknown error");
+        }
         throw e;
       }
     }
@@ -998,7 +1010,7 @@ function App() {
         userMessage += "\n\nทิป:\n";
         userMessage += "1. ตรวจสอบไฟล์ frontend/.env มี VITE_GOOGLE_CLIENT_ID\n";
         userMessage += "2. รีสตาร์ท dev server (npm run dev) หลังจากแก้ไข .env";
-      } else if (errorMessage.includes("not available") || errorMessage.includes("invalid_client") || errorMessage.includes("unregistered_origin")) {
+      } else if (errorMessage.includes("not available") || errorMessage.includes("invalid_client") || errorMessage.includes("unregistered_origin") || errorMessage.includes("unknown_reason")) {
         userMessage += "\n\n⚠️ ปัญหา: Origin ไม่ได้ลงทะเบียนใน Google Cloud Console\n\n";
         userMessage += "📋 ขั้นตอนแก้ไข:\n";
         userMessage += "1. ไปที่: https://console.cloud.google.com/apis/credentials\n";
@@ -1109,6 +1121,7 @@ function App() {
   }
 
   return (
+    <ThemeProvider user={user}>
     <div>
       {view === "home" && (
         <HomePage
@@ -1213,6 +1226,12 @@ function App() {
           onNavigateToProfile={handleNavigateToProfile}
           onNavigateToSettings={handleNavigateToSettings}
           onNavigateToHome={() => navigateToView("home")}
+          onNavigateToPayment={(bookingId) => {
+            if (window.history && window.history.pushState) {
+              window.history.pushState({}, '', `/payment?booking_id=${bookingId}`);
+            }
+            navigateToView("payment");
+          }}
           onNavigateToAI={(tripId, chatId, initialMessage) => {
             // Navigate to chat and set initial message
             if (initialMessage) {
@@ -1342,6 +1361,7 @@ function App() {
         />
       )}
     </div>
+    </ThemeProvider>
   );
 }
 

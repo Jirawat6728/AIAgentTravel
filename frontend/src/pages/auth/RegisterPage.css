@@ -41,10 +41,18 @@
   gap: 0.5rem;
 }
 
+.header-logo-text {
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  color: #1f2937;
+}
+
 .login-logo-img {
-  height: 2rem;
+  height: 2.5rem;
   width: auto;
-  max-width: 140px;
+  max-width: 200px;
   object-fit: contain;
 }
 
@@ -195,6 +203,10 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 1rem;
+}
+
+.form-row-4 {
+  grid-template-columns: 1fr 1fr 1fr 1fr;
 }
 
 .form-group {
@@ -567,5 +579,16 @@
 
   .register-title {
     font-size: 1.5rem;
+  }
+
+  /* 4 คอลัมน์ → 2x2 บนจอเล็ก */
+  .form-row-4 {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .form-row-4 {
+    grid-template-columns: 1fr;
   }
 }
