@@ -1,0 +1,922 @@
+/* App Header - Shared Header Component */
+.app-header {
+  background: linear-gradient(to right, #1e3a8a, #1e40af);
+  color: white;
+  padding: clamp(0.75rem, 2vw, 1rem) clamp(1rem, 3vw, 1.5rem);
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+/* Mobile: โลโก้แบบแถบน้ำเงิน + เครื่องบิน + AI Travel Agent ตามภาพอ้างอิง */
+@media (max-width: 768px) {
+  .app-header {
+    padding: clamp(0.5rem, 1.5vw, 0.75rem) clamp(0.75rem, 2vw, 1rem);
+  }
+  
+  .app-header-content {
+    padding: 0 0.5rem;
+    gap: 0.25rem;
+  }
+  
+  .app-logo-section {
+    gap: 0.25rem;
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  
+  /* Mobile: แสดงเฉพาะไอคอนเครื่องบิน ไม่แสดงคำว่า AI Travel Agent */
+  .app-logo-text {
+    display: none !important;
+  }
+}
+
+.app-header-content {
+  max-width: 80rem;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0 1.5rem;
+}
+
+.app-logo-section {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.app-project-logo {
+  height: 36px;
+  width: auto;
+  object-fit: contain;
+  border-radius: 6px;
+  display: block;
+}
+.app-mobile-logo {
+  display: none;
+  height: 40px;
+  width: auto;
+  object-fit: contain;
+  border-radius: 8px;
+}
+.app-logo-text-fallback {
+  display: none; /* โลโก้มีข้อความ AI Travel Agent อยู่แล้ว */
+}
+
+.app-btn-ai-header {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.5rem 0.875rem;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 0.5rem;
+  color: white;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-left: 0.75rem;
+}
+
+.app-btn-ai-header:hover {
+  background: rgba(255, 255, 255, 0.25);
+  border-color: rgba(255, 255, 255, 0.3);
+  transform: translateY(-1px);
+}
+
+.app-btn-ai-header.active {
+  background: rgba(255, 255, 255, 0.3);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.app-ai-nav-text {
+  font-weight: 500;
+}
+
+
+.app-ai-icon {
+  width: 1rem;
+  height: 1rem;
+}
+
+.app-ai-button-text {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+@media (max-width: 768px) {
+  .app-btn-ai-header {
+    padding: clamp(0.5rem, 1.5vw, 0.625rem) clamp(0.625rem, 2vw, 0.75rem);
+    margin-left: clamp(0.5rem, 1.5vw, 0.75rem);
+    gap: 0.25rem;
+    flex-shrink: 0;
+  }
+  
+  .app-ai-button-text {
+    display: none;
+  }
+  
+  .app-ai-icon {
+    width: clamp(1rem, 2.5vw, 1.125rem);
+    height: clamp(1rem, 2.5vw, 1.125rem);
+  }
+}
+
+.app-logo-icon {
+  width: 2.5rem;
+  height: 2.5rem;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.app-plane-icon {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.app-logo-text {
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.app-nav-links {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.875rem;
+  flex: 1;
+  justify-content: center;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  position: relative; /* ✅ For sliding indicator */
+}
+
+.app-nav-links::-webkit-scrollbar {
+  display: none;
+}
+
+/* ✅ Desktop: แท็บบรรทัดเดียว — เที่ยวบิน, โรงแรม, ที่พักให้เช่า, เอเจนท์, รถเช่า, การจองของฉัน */
+@media (min-width: 768px) {
+  .app-nav-links {
+    display: flex;
+    flex-wrap: nowrap;
+    white-space: nowrap;
+    gap: 0.5rem;
+    flex: 0 1 auto;
+    justify-content: flex-start;
+    overflow-x: visible;
+    min-width: 0;
+  }
+  .app-nav-links-desktop .app-nav-link {
+    padding: 0.4rem 0.6rem;
+    font-size: 0.8125rem;
+    flex-shrink: 0;
+  }
+  
+  /* ✅ Show slider on desktop */
+  .app-nav-slider {
+    display: block;
+  }
+  
+  /* ✅ Hide mobile menu on desktop */
+  .app-mobile-nav {
+    display: none !important;
+  }
+}
+
+/* ✅ Mobile: Hide desktop navigation, show mobile menu */
+@media (max-width: 767px) {
+  .app-nav-links-desktop {
+    display: none !important;
+  }
+  
+  .app-mobile-nav {
+    display: flex !important;
+    flex: 1;
+    justify-content: center;
+    align-items: center;
+  }
+  
+  .app-header-content {
+    gap: 0.5rem;
+  }
+}
+
+.app-nav-link {
+  color: rgba(255, 255, 255, 0.7);
+  text-decoration: none;
+  transition: all 0.3s ease;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  position: relative;
+  font-weight: 500;
+  cursor: pointer;
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.app-nav-link-ai {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.app-nav-icon {
+  width: 1.25rem;
+  height: 1.25rem;
+  flex-shrink: 0;
+}
+
+.app-nav-text {
+  display: inline;
+}
+
+/* Mobile styles */
+@media (max-width: 767px) {
+  .app-nav-link {
+    padding: 0;
+    width: clamp(1.75rem, 4.5vw, 2rem);
+    height: clamp(1.75rem, 4.5vw, 2rem);
+    min-width: clamp(1.75rem, 4.5vw, 2rem);
+    min-height: clamp(1.75rem, 4.5vw, 2rem);
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.15);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    flex-shrink: 0;
+  }
+  
+  .app-nav-icon {
+    width: clamp(0.875rem, 2.5vw, 1rem);
+    height: clamp(0.875rem, 2.5vw, 1rem);
+  }
+  
+  .app-nav-text {
+    display: none !important; /* ซ่อนข้อความบน mobile */
+  }
+  
+  .app-ai-nav-text {
+    display: none !important; /* ซ่อนข้อความ AI บน mobile */
+  }
+  
+  .app-nav-link.active {
+    background: rgba(255, 255, 255, 0.3);
+    border-color: rgba(255, 255, 255, 0.4);
+  }
+  
+  .app-nav-link.active::after {
+    display: none !important; /* ซ่อน underline บน mobile */
+  }
+  
+  /* ✅ Hide slider on mobile - use background highlight instead */
+  .app-nav-slider {
+    display: none;
+  }
+}
+
+.app-nav-link:hover {
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.app-nav-link.active {
+  color: white;
+  background: rgba(255, 255, 255, 0.2);
+  font-weight: 600;
+}
+
+/* ✅ Sliding indicator - animated line that moves between buttons */
+.app-nav-slider {
+  position: absolute;
+  bottom: 0;
+  height: 3px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.8), rgba(255, 255, 255, 1), rgba(255, 255, 255, 0.8));
+  border-radius: 3px 3px 0 0;
+  box-shadow: 0 -2px 8px rgba(255, 255, 255, 0.3);
+  z-index: 1;
+  pointer-events: none; /* Don't interfere with clicks */
+}
+
+/* ✅ Hide old ::after underline - use sliding indicator instead */
+.app-nav-link.active::after {
+  display: none; /* ✅ Replaced by sliding indicator */
+}
+
+
+.app-user-section {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-shrink: 0;
+}
+
+@media (max-width: 768px) {
+  .app-user-section {
+    gap: clamp(0.25rem, 1vw, 0.5rem);
+    flex-shrink: 0;
+  }
+  
+  /* ปรับทุกปุ่มให้เท่ากันบน mobile */
+  .app-btn-notification,
+  .app-btn-bookings-mobile,
+  .app-user-avatar,
+  .app-btn-logout {
+    width: clamp(2rem, 5vw, 2.25rem);
+    height: clamp(2rem, 5vw, 2.25rem);
+    min-width: clamp(2rem, 5vw, 2.25rem);
+    min-height: clamp(2rem, 5vw, 2.25rem);
+    flex-shrink: 0;
+  }
+  
+  .app-btn-logout {
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+  }
+  
+  .app-btn-logout::before {
+    content: '🚪';
+    font-size: clamp(0.875rem, 2.5vw, 1rem);
+    line-height: 1;
+  }
+  
+  .app-btn-logout {
+    font-size: 0;
+  }
+}
+
+.app-btn-notification {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 50%;
+  color: white;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  padding: 0;
+}
+
+.app-btn-notification:hover {
+  background: rgba(255, 255, 255, 0.25);
+  border-color: rgba(255, 255, 255, 0.3);
+  transform: translateY(-1px);
+}
+
+.app-btn-notification.active {
+  background: rgba(255, 255, 255, 0.3);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.app-notification-icon {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.app-notification-badge {
+  position: absolute;
+  top: -0.25rem;
+  right: -0.25rem;
+  background: #ef4444;
+  color: white;
+  font-size: 0.625rem;
+  font-weight: 700;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.75rem;
+  min-width: 1.125rem;
+  height: 1.125rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #1e40af;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+/* ✅ Mobile: My Bookings Button */
+.app-btn-bookings-mobile {
+  display: none; /* Hidden on desktop */
+}
+
+@media (max-width: 767px) {
+  .app-btn-bookings-mobile {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: clamp(1.75rem, 4.5vw, 2rem);
+    height: clamp(1.75rem, 4.5vw, 2rem);
+    background: rgba(255, 255, 255, 0.15);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 50%;
+    color: white;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    padding: 0;
+    flex-shrink: 0;
+  }
+  
+  .app-btn-bookings-mobile:hover {
+    background: rgba(255, 255, 255, 0.25);
+    border-color: rgba(255, 255, 255, 0.3);
+    transform: translateY(-1px);
+  }
+  
+  .app-btn-bookings-mobile.active {
+    background: rgba(255, 255, 255, 0.3);
+    border-color: rgba(255, 255, 255, 0.4);
+  }
+  
+  .app-bookings-icon-mobile {
+    width: clamp(0.875rem, 2.5vw, 1rem);
+    height: clamp(0.875rem, 2.5vw, 1rem);
+  }
+}
+
+@media (max-width: 768px) {
+  .app-btn-notification {
+    width: clamp(1.75rem, 4.5vw, 2rem);
+    height: clamp(1.75rem, 4.5vw, 2rem);
+    flex-shrink: 0;
+  }
+  
+  .app-notification-icon {
+    width: clamp(0.875rem, 2.5vw, 1rem);
+    height: clamp(0.875rem, 2.5vw, 1rem);
+  }
+  
+  .app-notification-badge {
+    font-size: 0.5rem;
+    padding: 0.125rem 0.25rem;
+    min-width: 0.875rem;
+    height: 0.875rem;
+    border-width: 1.5px;
+    top: -0.125rem;
+    right: -0.125rem;
+  }
+}
+
+.app-user-menu-container {
+  position: relative;
+}
+
+.app-user-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+}
+
+.app-user-info.app-user-clickable {
+  cursor: pointer;
+  transition: all 0.2s;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.5rem;
+}
+
+.app-user-info.app-user-clickable:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.app-user-dropdown-icon {
+  width: 1rem;
+  height: 1rem;
+  color: rgba(255, 255, 255, 0.8);
+  transition: transform 0.2s;
+  margin-left: 0.25rem;
+}
+
+.app-user-info.app-user-clickable:hover .app-user-dropdown-icon {
+  transform: translateY(2px);
+}
+
+.app-user-avatar {
+  width: 2.5rem;
+  height: 2.5rem;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.app-user-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+@media (max-width: 768px) {
+  .app-user-avatar {
+    width: clamp(2rem, 5vw, 2.25rem);
+    height: clamp(2rem, 5vw, 2.25rem);
+    flex-shrink: 0;
+  }
+  
+  .app-user-initial {
+    font-size: clamp(0.6875rem, 1.75vw, 0.75rem);
+  }
+}
+
+.app-user-initial {
+  font-size: 0.875rem;
+  font-weight: 600;
+  position: relative;
+  z-index: 1;
+}
+
+.app-user-name {
+  display: none;
+}
+
+@media (min-width: 768px) {
+  .app-user-name {
+    display: inline;
+  }
+}
+
+.app-btn-logout {
+  padding: 0.5rem 1rem;
+  background: #ef4444;
+  border-radius: 0.5rem;
+  border: none;
+  color: white;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+@media (max-width: 768px) {
+  .app-btn-logout {
+    padding: 0;
+    font-size: 0;
+  }
+}
+
+.app-btn-logout:hover {
+  background: #dc2626;
+}
+
+.app-btn-signin {
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.app-btn-signin:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+/* User Popup Styles */
+.app-user-popup {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  background: white;
+  border-radius: 0.75rem;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15), 0 4px 10px rgba(0, 0, 0, 0.1);
+  min-width: 240px;
+  z-index: 1000;
+  animation: appPopupFadeIn 0.2s ease-out;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+@keyframes appPopupFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.app-user-popup-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1rem;
+}
+
+.app-user-popup-avatar {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #3b82f6, #1e40af);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 0.875rem;
+  flex-shrink: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.app-user-popup-avatar .app-user-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+}
+
+.app-user-popup-initial {
+  position: relative;
+  z-index: 1;
+}
+
+.app-user-popup-guest-icon {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.1);
+  color: #3b82f6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.app-user-popup-guest-icon svg {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.app-user-popup-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.app-user-popup-name {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 0.25rem;
+}
+
+.app-user-popup-email {
+  font-size: 0.8125rem;
+  color: #6b7280;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-user-popup-divider {
+  height: 1px;
+  background: #e5e7eb;
+  margin: 0.5rem 0;
+}
+
+.app-user-popup-actions {
+  padding: 0.5rem;
+}
+
+.app-user-popup-button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.625rem 1rem;
+  border-radius: 0.5rem;
+  border: none;
+  background: transparent;
+  color: #1f2937;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: left;
+}
+
+.app-user-popup-button:hover {
+  background: #f3f4f6;
+}
+
+.app-user-popup-button-signout {
+  color: #dc2626;
+}
+
+.app-user-popup-button-signout:hover {
+  background: rgba(220, 38, 38, 0.1);
+  color: #b91c1c;
+}
+
+.app-user-popup-button-signin {
+  color: #3b82f6;
+}
+
+.app-user-popup-button-signin:hover {
+  background: rgba(59, 130, 246, 0.1);
+  color: #2563eb;
+}
+
+.app-user-popup-button-profile {
+  color: #1f2937;
+}
+
+.app-user-popup-button-profile:hover {
+  background: #f3f4f6;
+  color: #111827;
+}
+
+.app-user-popup-button-settings {
+  color: #1f2937;
+}
+
+.app-user-popup-button-settings:hover {
+  background: #f3f4f6;
+  color: #111827;
+}
+
+.app-user-popup-icon {
+  width: 1.125rem;
+  height: 1.125rem;
+}
+
+@media (max-width: 768px) {
+  /* ขยับ dropdown ผู้ใช้มาทางขวาบนมือถือ */
+  .app-user-menu-container {
+    margin-left: auto;
+    width: fit-content;
+  }
+  .app-user-popup {
+    right: 0;
+    left: auto;
+    min-width: 200px;
+  }
+  
+  .app-btn-signin {
+    padding: 0.375rem 0.75rem;
+    font-size: 0.75rem;
+  }
+}
+
+/* ✅ Mobile Navigation Dropdown */
+.app-mobile-nav {
+  position: relative;
+  display: none; /* Hidden by default, shown on mobile via media query */
+  flex: 1;
+  justify-content: center;
+  align-items: center;
+}
+
+.app-mobile-menu-button {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 0.5rem;
+  color: white;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-family: inherit;
+  white-space: nowrap; /* ✅ Prevent text wrapping */
+  min-width: fit-content;
+}
+
+.app-mobile-menu-button:hover {
+  background: rgba(255, 255, 255, 0.25);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.app-mobile-menu-icon {
+  width: 1.25rem;
+  height: 1.25rem;
+  flex-shrink: 0;
+}
+
+.app-mobile-menu-text {
+  font-weight: 500;
+}
+
+.app-mobile-menu-dropdown {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  left: 50%;
+  transform: translateX(-50%);
+  background: linear-gradient(to bottom, #1e3a8a, #1e40af);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 0.5rem;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+  min-width: 200px;
+  max-width: 90vw;
+  width: max-content;
+  animation: slideDown 0.2s ease-out;
+  overflow: hidden;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.app-mobile-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.875rem 1rem;
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: left;
+  font-family: inherit;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.app-mobile-menu-item:last-child {
+  border-bottom: none;
+}
+
+.app-mobile-menu-item:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: white;
+}
+
+.app-mobile-menu-item.active {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+  font-weight: 600;
+}
+
+.app-mobile-menu-item-icon {
+  width: 1.25rem;
+  height: 1.25rem;
+  flex-shrink: 0;
+}
+
+.app-mobile-menu-item span:first-of-type {
+  flex: 1;
+}
+
+.app-mobile-menu-check {
+  color: #4ade80;
+  font-weight: 700;
+  font-size: 1rem;
+}
+

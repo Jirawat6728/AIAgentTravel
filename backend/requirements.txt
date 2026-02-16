@@ -1,0 +1,28 @@
+fastapi==0.115.5
+uvicorn[standard]==0.30.6
+python-dotenv==1.0.1
+pydantic==2.8.2
+amadeus==9.0.0
+google-genai==0.6.0
+google-generativeai>=0.8.0
+googlemaps==4.10.0
+httpx==0.27.2
+aiofiles==24.1.0
+tenacity==9.0.0
+motor==3.6.0
+pymongo>=4.9,<4.10
+psutil==5.9.8
+redis==7.1.0
+omise==0.10.0
+passlib[bcrypt]==1.7.4
+watchdog==6.0.0  # For dev_server.py auto-reload
+firebase-admin>=6.5.0  # Firebase Admin SDK for authentication
+python-dateutil>=2.8.2  # Date parsing for email verification
+# Data processing (for Data Normalization)
+numpy>=1.24.0  # Numerical computing (used in data_normalization.py)
+# Machine Learning & Deep Learning (keyword/intent decoding & validation)
+scikit-learn>=1.3.0  # ML (LR) + Deep Learning (MLP+Calibrated) for workflow intent classification
+# Optional: PyTorch for Deep Learning LSTM (ถ้าต้องการ LSTM intent classifier)
+# ลงแยกหลัง pip install -r requirements.txt สำเร็จ: https://pytorch.org/get-started/locally/
+# pip install torch --index-url https://download.pytorch.org/whl/cpu
+# torch>=2.0.0

@@ -1,0 +1,114 @@
+:root {
+  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: light dark;
+  color: rgba(255, 255, 255, 0.87);
+  background-color: #242424;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  font-weight: 500;
+  color: #646cff;
+  text-decoration: inherit;
+}
+a:hover {
+  color: #535bf2;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  width: 100%;
+  box-sizing: border-box;
+  overflow-x: hidden;
+}
+
+h1 {
+  font-size: 3.2em;
+  line-height: 1.1;
+}
+
+button {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  background-color: #1a1a1a;
+  cursor: pointer;
+  transition: border-color 0.25s;
+}
+button:hover {
+  border-color: #646cff;
+}
+button:focus,
+button:focus-visible {
+  outline: 4px auto -webkit-focus-ring-color;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color: #213547;
+    background-color: #ffffff;
+  }
+  a:hover {
+    color: #747bff;
+  }
+  button {
+    background-color: #f9f9f9;
+  }
+}
+
+/* ========== Custom scrollbar สำหรับหน้า Home และ My Bookings ========== */
+body.page-home,
+body.page-bookings {
+  /* Firefox */
+  scrollbar-width: thin;
+  scrollbar-color: #93c5fd #e0e7ff;
+}
+
+body.page-home::-webkit-scrollbar,
+body.page-bookings::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+body.page-home::-webkit-scrollbar-track,
+body.page-bookings::-webkit-scrollbar-track {
+  background: #e0e7ff;
+  border-radius: 10px;
+  margin: 4px;
+}
+
+body.page-home::-webkit-scrollbar-thumb,
+body.page-bookings::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #3b82f6 0%, #1e40af 100%);
+  border-radius: 10px;
+  border: 2px solid #e0e7ff;
+}
+
+body.page-home::-webkit-scrollbar-thumb:hover,
+body.page-bookings::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #2563eb 0%, #1e3a8a 100%);
+}
+
+body.page-home::-webkit-scrollbar-thumb:active,
+body.page-bookings::-webkit-scrollbar-thumb:active {
+  background: #1e40af;
+}
+
+body.page-home::-webkit-scrollbar-corner,
+body.page-bookings::-webkit-scrollbar-corner {
+  background: #e0e7ff;
+  border-radius: 0 0 10px 0;
+}
