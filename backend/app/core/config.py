@@ -77,9 +77,21 @@ class Settings:
         self.log_file: Optional[Path] = Path(log_file_str) if log_file_str else None
         
         # Agent Configuration
+        # Default true: ใช้ LangChain/LangGraph เป็นค่าเริ่มต้นของระบบ (ไม่ต้องตั้งใน .env)
+        self.enable_langchain_orchestration: bool = os.getenv("ENABLE_LANGCHAIN_ORCHESTRATION", "true").lower() == "true"
+        self.enable_langgraph_agent_mode: bool = os.getenv("ENABLE_LANGGRAPH_AGENT_MODE", "true").lower() == "true"
+        self.enable_langgraph_checkpointer: bool = os.getenv("ENABLE_LANGGRAPH_CHECKPOINTER", "true").lower() == "true"
+        # เมื่อ true ให้ LangGraph จัดการ workflow ทั้งหมดแทน loop ใน agent.run_controller
+        self.enable_langgraph_full_workflow: bool = os.getenv("ENABLE_LANGGRAPH_FULL_WORKFLOW", "true").lower() == "true"
         self.controller_max_iterations: int = int(os.getenv("CONTROLLER_MAX_ITERATIONS", "3"))
         self.controller_temperature: float = float(os.getenv("CONTROLLER_TEMPERATURE", "0.3"))
         self.responder_temperature: float = float(os.getenv("RESPONDER_TEMPERATURE", "0.7"))
+        # Timeout ของ stream chat (ใช้ร่วมกันระหว่าง middleware และ chat.py)
+        # Agent mode ใช้เวลานานกว่า (ค้นหา + เลือก + จอง) จึงให้ timeout สูงกว่า
+        self.chat_timeout_agent: int = int(os.getenv("CHAT_TIMEOUT_AGENT", "120"))
+        self.chat_timeout_normal: int = int(os.getenv("CHAT_TIMEOUT_NORMAL", "90"))
+        # Middleware timeout ต้องมากกว่า chat timeout อย่างน้อย 10s (buffer)
+        self.chat_middleware_timeout: int = self.chat_timeout_agent + 15
         
         # MongoDB Configuration
         self.mongodb_uri: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
@@ -91,7 +103,7 @@ class Settings:
         self.redis_password: Optional[str] = os.getenv("REDIS_PASSWORD")
         self.redis_db: int = int(os.getenv("REDIS_DB", "0"))
         self.redis_ttl: int = int(os.getenv("REDIS_TTL", "3600")) # Default 1 hour for cache
-        
+
         # Authentication Configuration
         # Try GOOGLE_CLIENT_ID first, fallback to VITE_GOOGLE_CLIENT_ID (for shared .env)
         self.google_client_id: str = (
@@ -101,7 +113,7 @@ class Settings:
         self.secret_key: str = os.getenv("SECRET_KEY", "super-secret-key-for-travel-agent-123").strip()
         self.session_cookie_name: str = "session_id"
         self.session_expiry_days: int = 30
-        
+
         # Firebase Configuration
         # Firebase Admin SDK - can use service account JSON file or credentials
         firebase_creds_path = os.getenv("FIREBASE_CREDENTIALS_PATH", "").strip()
@@ -144,12 +156,75 @@ class Settings:
         self.omise_secret_key: str = os.getenv("OMISE_SECRET_KEY", "").strip()
         self.omise_public_key: str = os.getenv("OMISE_PUBLIC_KEY", "").strip()
         self.frontend_url: str = os.getenv("FRONTEND_URL", "http://localhost:5173").strip()
+        self.email_service_url: str = os.getenv("EMAIL_SERVICE_URL", "").strip()
 
         # 📱 SMS/OTP Configuration (for phone verification, e.g. Twilio)
         self.twilio_account_sid: str = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
         self.twilio_auth_token: str = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
         self.twilio_phone_number: str = os.getenv("TWILIO_PHONE_NUMBER", "").strip()
         self.sms_otp_expire_minutes: int = int(os.getenv("SMS_OTP_EXPIRE_MINUTES", "5"))
+
+    @property
+    def redis_url(self) -> str:
+        """Build Redis URL for langgraph-checkpoint-redis (decode_responses handled by client)"""
+        auth = f":{self.redis_password}@" if self.redis_password else ""
+        return f"redis://{auth}{self.redis_host}:{self.redis_port}/{self.redis_db}"
+
+    def validate(self) -> list[str]:
+        """
+        ตรวจสอบค่า config ที่จำเป็นแล้วคืน list ของคำเตือน
+        เรียกใน lifespan ของ main.py เพื่อแจ้งเตือนตอน startup
+        """
+        logger = get_logger(__name__)
+        warnings: list[str] = []
+
+        # ─── Critical: แอปทำงานไม่ได้ถ้าขาด ──────────────────────────────
+        if not self.gemini_api_key:
+            msg = "GEMINI_API_KEY ไม่ได้ตั้งค่า — chat จะไม่ทำงาน"
+            logger.error(f"[config] ❌ {msg}")
+            warnings.append(msg)
+        elif len(self.gemini_api_key) < 20:
+            msg = "GEMINI_API_KEY ดูเหมือนสั้นผิดปกติ (น้อยกว่า 20 ตัวอักษร)"
+            logger.warning(f"[config] ⚠️  {msg}")
+            warnings.append(msg)
+
+        if self.secret_key == "super-secret-key-for-travel-agent-123":
+            msg = "SECRET_KEY ยังเป็นค่า default — ควรเปลี่ยนก่อน deploy production"
+            logger.warning(f"[config] ⚠️  {msg}")
+            warnings.append(msg)
+
+        # ─── Important: ฟีเจอร์บางส่วนจะไม่ทำงาน ─────────────────────────
+        if not self.amadeus_api_key and not self.amadeus_search_api_key:
+            msg = "AMADEUS_API_KEY ไม่ได้ตั้งค่า — ค้นหาเที่ยวบิน/โรงแรมจะไม่ทำงาน"
+            logger.warning(f"[config] ⚠️  {msg}")
+            warnings.append(msg)
+
+        if not self.omise_secret_key:
+            msg = "OMISE_SECRET_KEY ไม่ได้ตั้งค่า — ระบบชำระเงินจะไม่ทำงาน"
+            logger.warning(f"[config] ⚠️  {msg}")
+            warnings.append(msg)
+
+        if not self.omise_public_key:
+            msg = "OMISE_PUBLIC_KEY ไม่ได้ตั้งค่า — ระบบชำระเงินจะไม่ทำงาน"
+            logger.warning(f"[config] ⚠️  {msg}")
+            warnings.append(msg)
+
+        if not self.firebase_project_id and not self.firebase_credentials_path:
+            msg = "FIREBASE_PROJECT_ID ไม่ได้ตั้งค่า — Firebase auth อาจไม่ทำงาน"
+            logger.warning(f"[config] ⚠️  {msg}")
+            warnings.append(msg)
+
+        # ─── Informational ────────────────────────────────────────────────
+        if not self.google_maps_api_key:
+            logger.info("[config] ℹ️  GOOGLE_MAPS_API_KEY ไม่ได้ตั้งค่า — Maps features disabled")
+        if not self.email_service_url:
+            logger.info("[config] ℹ️  EMAIL_SERVICE_URL ไม่ได้ตั้งค่า — email notifications disabled")
+        if not self.twilio_account_sid:
+            logger.info("[config] ℹ️  TWILIO_ACCOUNT_SID ไม่ได้ตั้งค่า — SMS/OTP disabled")
+
+        if not warnings:
+            logger.info("[config] ✅ การตรวจสอบ config ผ่านทั้งหมด")
+        return warnings
 
 
 # Global settings instance

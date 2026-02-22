@@ -343,6 +343,28 @@ SAVED_CARDS_INDEXES = [
     IndexModel([("updated_at", -1)]),
 ]
 
+# ประวัติ workflow ต่อ session (planning → selecting → booking) สำหรับ debug/analytics
+WORKFLOW_HISTORY_INDEXES = [
+    IndexModel([("session_id", 1), ("ts", -1)]),
+    IndexModel([("user_id", 1), ("ts", -1)]),
+    IndexModel([("to_step", 1)]),
+    IndexModel([("ts", -1)]),
+]
+
+# RL Q-table indexes (per-user, per-slot option preferences)
+RL_QTABLE_INDEXES = [
+    IndexModel([("user_id", 1), ("slot_name", 1), ("option_key", 1)], unique=True, name="rl_qtable_unique"),
+    IndexModel([("user_id", 1), ("slot_name", 1)], name="rl_qtable_user_slot"),
+    IndexModel([("last_updated", -1)], name="rl_qtable_updated"),
+]
+
+# RL reward history indexes
+RL_REWARDS_INDEXES = [
+    IndexModel([("user_id", 1), ("created_at", -1)], name="rl_rewards_user_time"),
+    IndexModel([("user_id", 1), ("slot_name", 1)], name="rl_rewards_user_slot"),
+    IndexModel([("created_at", -1)], name="rl_rewards_time"),
+]
+
 MEMORY_INDEXES = [
     # ✅ SECURITY: Index on user_id for fast queries and data isolation
     IndexModel([("user_id", 1)], name="user_id_idx"),

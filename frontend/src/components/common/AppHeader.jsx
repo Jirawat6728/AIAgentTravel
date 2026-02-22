@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import './AppHeader.css';
 import NotificationPanel from './NotificationPanel';
+import { useLanguage } from '../../context/LanguageContext';
 
 export default function AppHeader({ 
   activeTab = 'ai', 
@@ -21,8 +22,10 @@ export default function AppHeader({
   onSignIn = null,
   onNavigateToProfile = null,
   onNavigateToSettings = null,
-  onMarkNotificationAsRead = null
+  onMarkNotificationAsRead = null,
+  onClearAllNotifications = null
 }) {
+  const { t } = useLanguage();
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   const [showUserPopup, setShowUserPopup] = useState(false);
   const notificationButtonRef = useRef(null);
@@ -153,31 +156,31 @@ export default function AppHeader({
             <svg className="app-nav-icon" fill="currentColor" viewBox="0 0 24 24">
               <path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z" />
             </svg>
-            <span className="app-nav-text">เที่ยวบิน</span>
+            <span className="app-nav-text">{t('nav.flights')}</span>
           </a>
-          <a href="#" className={`app-nav-link ${activeTab === 'hotels' ? 'active' : ''}`} onClick={(e) => handleTabClick('hotels', e)} title="โรงแรม / ที่พักให้เช่า">
+          <a href="#" className={`app-nav-link ${activeTab === 'hotels' ? 'active' : ''}`} onClick={(e) => handleTabClick('hotels', e)} title={t('nav.hotels')}>
             <svg className="app-nav-icon" fill="currentColor" viewBox="0 0 24 24">
               <path d="M7 13c1.66 0 3-1.34 3-3S8.66 7 7 7s-3 1.34-3 3 1.34 3 3 3zm12-6h-8v7H3V5H1v15h2v-3h18v3h2v-9c0-2.21-1.79-4-4-4z" />
             </svg>
-            <span className="app-nav-text">โรงแรม / ที่พักให้เช่า</span>
+            <span className="app-nav-text">{t('nav.hotels')}</span>
           </a>
-          <a href="#" className={`app-nav-link ${activeTab === 'ai' ? 'active' : ''}`} onClick={(e) => handleTabClick('ai', e)} title="เอเจนท์">
+          <a href="#" className={`app-nav-link ${activeTab === 'ai' ? 'active' : ''}`} onClick={(e) => handleTabClick('ai', e)} title={t('nav.agent')}>
             <svg className="app-nav-icon" fill="currentColor" viewBox="0 0 24 24">
               <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" />
             </svg>
-            <span className="app-nav-text">เอเจนท์</span>
+            <span className="app-nav-text">{t('nav.agent')}</span>
           </a>
-          <a href="#" className={`app-nav-link ${activeTab === 'car-rentals' ? 'active' : ''}`} onClick={(e) => handleTabClick('car-rentals', e)} title="รถเช่า">
+          <a href="#" className={`app-nav-link ${activeTab === 'car-rentals' ? 'active' : ''}`} onClick={(e) => handleTabClick('car-rentals', e)} title={t('nav.carRentals')}>
             <svg className="app-nav-icon" fill="currentColor" viewBox="0 0 24 24">
               <path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99zM6.5 16c-.83 0-1.5-.67-1.5-1.5S5.67 13 6.5 13s1.5.67 1.5 1.5S7.33 16 6.5 16zm11 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM5 11l1.5-4.5h11L19 11H5z" />
             </svg>
-            <span className="app-nav-text">รถเช่า</span>
+            <span className="app-nav-text">{t('nav.carRentals')}</span>
           </a>
-          <a href="#" className={`app-nav-link ${activeTab === 'bookings' ? 'active' : ''}`} onClick={(e) => handleTabClick('bookings', e)} title="การจองของฉัน">
+          <a href="#" className={`app-nav-link ${activeTab === 'bookings' ? 'active' : ''}`} onClick={(e) => handleTabClick('bookings', e)} title={t('nav.myBookings')}>
             <svg className="app-nav-icon" fill="currentColor" viewBox="0 0 24 24">
               <path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-1.99.9-1.99 2L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z" />
             </svg>
-            <span className="app-nav-text">การจองของฉัน</span>
+            <span className="app-nav-text">{t('nav.myBookings')}</span>
           </a>
         </nav>
 
@@ -186,7 +189,7 @@ export default function AppHeader({
           <button 
             className="app-mobile-menu-button"
             onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-            aria-label="เมนู"
+            aria-label={t('nav.menu')}
           >
             <svg className="app-mobile-menu-icon" fill="currentColor" viewBox="0 0 24 24">
               {isMobileMenuOpen ? (
@@ -196,7 +199,7 @@ export default function AppHeader({
               )}
             </svg>
             <span className="app-mobile-menu-text">
-              {activeTab === 'bookings' ? 'การจองของฉัน' : activeTab === 'ai' ? 'เอเจนท์' : 'เมนู'}
+              {activeTab === 'bookings' ? t('nav.myBookings') : activeTab === 'ai' ? t('nav.agent') : activeTab === 'flights' ? t('nav.flights') : activeTab === 'hotels' ? t('nav.hotels') : activeTab === 'car-rentals' ? t('nav.carRentals') : t('nav.menu')}
             </span>
           </button>
           
@@ -206,35 +209,35 @@ export default function AppHeader({
                 <svg className="app-mobile-menu-item-icon" fill="currentColor" viewBox="0 0 24 24">
                   <path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z" />
                 </svg>
-                <span>เที่ยวบิน</span>
+                <span>{t('nav.flights')}</span>
                 {activeTab === 'flights' && <span className="app-mobile-menu-check">✓</span>}
               </button>
               <button className={`app-mobile-menu-item ${activeTab === 'hotels' ? 'active' : ''}`} onClick={(e) => handleTabClick('hotels', e)}>
                 <svg className="app-mobile-menu-item-icon" fill="currentColor" viewBox="0 0 24 24">
                   <path d="M7 13c1.66 0 3-1.34 3-3S8.66 7 7 7s-3 1.34-3 3 1.34 3 3 3zm12-6h-8v7H3V5H1v15h2v-3h18v3h2v-9c0-2.21-1.79-4-4-4z" />
                 </svg>
-                <span>โรงแรม / ที่พักให้เช่า</span>
+                <span>{t('nav.hotels')}</span>
                 {activeTab === 'hotels' && <span className="app-mobile-menu-check">✓</span>}
               </button>
               <button className={`app-mobile-menu-item ${activeTab === 'ai' ? 'active' : ''}`} onClick={(e) => handleTabClick('ai', e)}>
                 <svg className="app-mobile-menu-item-icon" fill="currentColor" viewBox="0 0 24 24">
                   <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" />
                 </svg>
-                <span>เอเจนท์</span>
+                <span>{t('nav.agent')}</span>
                 {activeTab === 'ai' && <span className="app-mobile-menu-check">✓</span>}
               </button>
               <button className={`app-mobile-menu-item ${activeTab === 'car-rentals' ? 'active' : ''}`} onClick={(e) => handleTabClick('car-rentals', e)}>
                 <svg className="app-mobile-menu-item-icon" fill="currentColor" viewBox="0 0 24 24">
                   <path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99zM6.5 16c-.83 0-1.5-.67-1.5-1.5S5.67 13 6.5 13s1.5.67 1.5 1.5S7.33 16 6.5 16zm11 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM5 11l1.5-4.5h11L19 11H5z" />
                 </svg>
-                <span>รถเช่า</span>
+                <span>{t('nav.carRentals')}</span>
                 {activeTab === 'car-rentals' && <span className="app-mobile-menu-check">✓</span>}
               </button>
               <button className={`app-mobile-menu-item ${activeTab === 'bookings' ? 'active' : ''}`} onClick={(e) => handleTabClick('bookings', e)}>
                 <svg className="app-mobile-menu-item-icon" fill="currentColor" viewBox="0 0 24 24">
                   <path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-1.99.9-1.99 2L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z" />
                 </svg>
-                <span>การจองของฉัน</span>
+                <span>{t('nav.myBookings')}</span>
                 {activeTab === 'bookings' && <span className="app-mobile-menu-check">✓</span>}
               </button>
             </div>
@@ -242,22 +245,11 @@ export default function AppHeader({
         </div>
 
         <div className="app-user-section">
-          {/* ✅ Mobile: My Bookings Button */}
-          <button 
-            className={`app-btn-bookings-mobile ${activeTab === 'bookings' ? 'active' : ''}`}
-            onClick={(e) => handleTabClick('bookings', e)}
-            title="การจองของฉัน / My Bookings"
-          >
-            <svg className="app-bookings-icon-mobile" fill="currentColor" viewBox="0 0 24 24">
-              <path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-1.99.9-1.99 2L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z"/>
-            </svg>
-          </button>
-          
           <button 
             ref={notificationButtonRef}
             className={`app-btn-notification ${isNotificationOpen ? 'active' : ''}`}
             onClick={handleNotificationClick}
-            title="การแจ้งเตือน"
+            title={t('nav.notifications')}
           >
             <svg className="app-notification-icon" fill="currentColor" viewBox="0 0 24 24">
               <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/>
@@ -347,7 +339,7 @@ export default function AppHeader({
                           <svg className="app-user-popup-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                           </svg>
-                          แก้ไขโปรไฟล์
+                          {t('nav.editProfile')}
                         </button>
                       )}
                       {onNavigateToSettings && (
@@ -362,7 +354,7 @@ export default function AppHeader({
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                           </svg>
-                          การตั้งค่า
+                          {t('nav.settings')}
                         </button>
                       )}
                       {onLogout && (
@@ -402,6 +394,7 @@ export default function AppHeader({
         position={notificationPosition}
         onNavigateToBookings={onNavigateToBookings}
         onMarkAsRead={onMarkNotificationAsRead}
+        onClearAll={onClearAllNotifications}
       />
     </header>
   );

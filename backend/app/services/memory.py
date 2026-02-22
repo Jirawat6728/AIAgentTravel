@@ -93,6 +93,7 @@ class MemoryService:
         
         ✅ SECURITY: All memories are strictly associated with user_id to prevent data leakage
         ✅ PRIVACY: AI memory/brain is completely isolated per user - memories never mix between users
+        ✅ PRIVACY: Respects user's dataSharing preference — if disabled, skip memory consolidation
         
         Args:
             user_id: User identifier (MUST be provided, cannot be empty)
@@ -105,6 +106,17 @@ class MemoryService:
             return
         
         user_id = user_id.strip()  # ✅ Normalize user_id to prevent whitespace issues
+
+        # ✅ PRIVACY: Check user's dataSharing preference before learning from conversation
+        try:
+            users_collection = self.db.get_collection("users")
+            user_doc = await users_collection.find_one({"user_id": user_id}, {"preferences": 1})
+            prefs = (user_doc or {}).get("preferences") or {}
+            if prefs.get("dataSharing") is False:
+                logger.debug(f"Skipping memory consolidation for user {user_id}: dataSharing is disabled")
+                return
+        except Exception as pref_err:
+            logger.debug(f"Could not check dataSharing preference for user {user_id}: {pref_err}")
         prompt = f"""You are the memory consolidation module of a travel agent AI.
 Analyze the following interaction and extract any NEW important facts or preferences about the user.
 

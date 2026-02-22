@@ -1,5 +1,5 @@
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: 'Noto Sans Thai', system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
@@ -111,4 +111,79 @@ body.page-home::-webkit-scrollbar-corner,
 body.page-bookings::-webkit-scrollbar-corner {
   background: #e0e7ff;
   border-radius: 0 0 10px 0;
+}
+
+/* ========== Font Size System ========== */
+/* ค่า default (medium) */
+:root {
+  --fs-base:   15px;
+  --fs-sm:     13px;
+  --fs-lg:     18px;
+  --fs-xl:     22px;
+  --fs-2xl:    26px;
+  --fs-label:  13px;
+  --fs-small:  12px;
+}
+
+[data-font-size="small"] {
+  --fs-base:   13px;
+  --fs-sm:     11px;
+  --fs-lg:     15px;
+  --fs-xl:     19px;
+  --fs-2xl:    22px;
+  --fs-label:  11px;
+  --fs-small:  10px;
+}
+
+[data-font-size="medium"] {
+  --fs-base:   15px;
+  --fs-sm:     13px;
+  --fs-lg:     18px;
+  --fs-xl:     22px;
+  --fs-2xl:    26px;
+  --fs-label:  13px;
+  --fs-small:  12px;
+}
+
+[data-font-size="large"] {
+  --fs-base:   18px;
+  --fs-sm:     15px;
+  --fs-lg:     22px;
+  --fs-xl:     26px;
+  --fs-2xl:    30px;
+  --fs-label:  15px;
+  --fs-small:  13px;
+}
+
+/* Apply base font size ทั่วทั้ง app */
+[data-font-size] {
+  font-size: var(--fs-base);
+}
+[data-font-size] p,
+[data-font-size] span,
+[data-font-size] li,
+[data-font-size] td,
+[data-font-size] th,
+[data-font-size] input,
+[data-font-size] select,
+[data-font-size] textarea,
+[data-font-size] button {
+  font-size: var(--fs-base);
+}
+[data-font-size] small,
+[data-font-size] .text-sm,
+[data-font-size] .settings-item-label small {
+  font-size: var(--fs-small);
+}
+[data-font-size] h1 { font-size: var(--fs-2xl); }
+[data-font-size] h2 { font-size: var(--fs-xl); }
+[data-font-size] h3 { font-size: var(--fs-lg); }
+[data-font-size] h4,
+[data-font-size] h5,
+[data-font-size] h6 { font-size: var(--fs-base); }
+[data-font-size] label { font-size: var(--fs-label); }
+
+/* ใช้ตอน lazy load หน้าเอเย่นต์ (แชท) */
+@keyframes chat-loading-spin {
+  to { transform: rotate(360deg); }
 }

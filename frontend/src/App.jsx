@@ -1,11 +1,14 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useEffect, useState, useCallback, useRef, Suspense, lazy } from "react";
 import LoginPage from "./pages/auth/LoginPage.jsx";
 import RegisterPage from "./pages/auth/RegisterPage.jsx";
 import ResetPasswordPage from "./pages/auth/ResetPasswordPage.jsx";
 import VerifyEmailPage from "./pages/auth/VerifyEmailPage.jsx";
 import VerifyEmailSentPage from "./pages/auth/VerifyEmailSentPage.jsx";
-import AITravelChat from "./pages/chat/AITravelChat.jsx";
+import VerifyEmailChangePage from "./pages/auth/VerifyEmailChangePage.jsx";
 import HomePage from "./pages/home/HomePage.jsx";
+
+// ✅ Lazy load หน้าแชท (เอเย่นต์) เพื่อไม่ให้กดแท็บแล้วค้าง — แสดง "กำลังโหลด" แทน
+const AITravelChat = lazy(() => import("./pages/chat/AITravelChat.jsx"));
 import UserProfileEditPage from "./pages/profile/UserProfileEditPage.jsx";
 import SettingsPage from "./pages/settings/SettingsPage.jsx";
 import MyBookingsPage from "./pages/bookings/MyBookingsPage.jsx";
@@ -18,6 +21,9 @@ import loadingAnimation from "./assets/loading.json";
 import { clearAllUserData, checkAndClearIfUserChanged } from "./utils/userDataManager.js";
 import { sha256Password } from "./utils/passwordHash.js";
 import { ThemeProvider } from "./context/ThemeContext.jsx";
+import { LanguageProvider } from "./context/LanguageContext.jsx";
+import { FontSizeProvider } from "./context/FontSizeContext.jsx";
+import Swal from "sweetalert2";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
@@ -31,6 +37,7 @@ const VIEW_PATHS = {
   'reset-password': '/reset-password',
   'verify-email': '/verify-email',
   'verify-email-sent': '/verify-email-sent',
+  'verify-email-change': '/verify-email-change',
   'chat': '/chat',
   'profile': '/profile',
   'bookings': '/bookings',
@@ -54,6 +61,7 @@ function getViewFromPath() {
   }
   if (path === '/verify-email') return 'verify-email';
   if (path === '/verify-email-sent') return 'verify-email-sent';
+  if (path === '/verify-email-change') return 'verify-email-change';
   if (path === '/explore') return 'chat';
   return PATH_VIEWS[path] || 'home';
 }
@@ -96,14 +104,17 @@ function App() {
       const diffDays = Math.floor(diffMs / 86400000);
       
       if (diffMins < 1) return 'เมื่อสักครู่';
-      if (diffMins < 60) return `${diffMins} นาทีที่แล้ว`;
-      if (diffHours < 24) return `${diffHours} ชั่วโมงที่แล้ว`;
-      if (diffDays < 7) return `${diffDays} วันที่แล้ว`;
+      if (diffMins < 60) return `เมื่อ ${diffMins} นาทีที่แล้ว`;
+      if (diffHours < 24) return `เมื่อ ${diffHours} ชั่วโมงที่แล้ว`;
+      if (diffDays === 1) return 'เมื่อวาน';
+      if (diffDays < 7) return `เมื่อ ${diffDays} วันที่แล้ว`;
       
       return date.toLocaleDateString('th-TH', { 
         year: 'numeric', 
         month: 'short', 
-        day: 'numeric' 
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
       });
     } catch (e) {
       return 'เมื่อไม่นานมานี้';
@@ -120,11 +131,12 @@ function App() {
     
     try {
       const headers = { 'Content-Type': 'application/json' };
-      if (user?.id) {
-        headers['X-User-ID'] = user.id;
+      const userIdToSend = user?.user_id || user?.id;
+      if (userIdToSend) {
+        headers['X-User-ID'] = userIdToSend;
       }
       
-      // ✅ Fetch from notification API
+      // ✅ Fetch from notification API (X-User-ID ให้ตรงกับ booking create/list)
       const res = await fetch(`${API_BASE_URL}/api/notification/list`, {
         headers,
         credentials: 'include',
@@ -164,9 +176,8 @@ function App() {
   const handleMarkNotificationAsRead = useCallback(async (notificationId) => {
     try {
       const headers = { 'Content-Type': 'application/json' };
-      if (user?.id) {
-        headers['X-User-ID'] = user.id;
-      }
+      const uid = user?.user_id || user?.id;
+      if (uid) headers['X-User-ID'] = uid;
       
       // ✅ Mark as read in backend
       await fetch(`${API_BASE_URL}/api/notification/mark-read?notification_id=${notificationId}`, {
@@ -187,6 +198,25 @@ function App() {
       console.error("Failed to mark notification as read:", error);
     }
   }, [user]);
+
+  // ล้างทั้งหมด = ลบการแจ้งเตือนทั้งหมดของ user นั้น แล้ว refetch
+  const handleMarkAllNotificationsAsRead = useCallback(async () => {
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      const uid = user?.user_id || user?.id;
+      if (uid) headers['X-User-ID'] = uid;
+      await fetch(`${API_BASE_URL}/api/notification/clear-all`, {
+        method: 'POST',
+        headers,
+        credentials: 'include',
+      });
+      setNotifications([]);
+      setNotificationCount(0);
+      await fetchNotificationCount();
+    } catch (error) {
+      console.error("Failed to clear all notifications:", error);
+    }
+  }, [user, fetchNotificationCount]);
 
   // Fetch notifications on mount and when user/view changes
   useEffect(() => {
@@ -583,9 +613,24 @@ function App() {
       setNotificationCount(0);
       setNotifications([]);
       
-      // Set new user data
+      // Set new user data — ใช้ user_id เป็น id หลัก; ถ้า backend ไม่ส่งรูปแต่ id_token มี picture ให้ดึงมาใช้
+      let userData = { ...data.user, id: data.user.user_id || data.user.id };
+      if (!userData.profile_image && !userData.picture && idToken) {
+        try {
+          const payload = JSON.parse(decodeURIComponent(escape(atob(idToken.split('.')[1]))));
+          const picture = payload.picture || payload.picture_url || payload.photoURL;
+          if (picture) {
+            userData = { ...userData, profile_image: picture };
+            await fetch(`${API_BASE_URL}/api/auth/profile`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json", ...(userData.id && { "X-User-ID": userData.id }) },
+              credentials: "include",
+              body: JSON.stringify({ profile_image: picture }),
+            }).catch(() => {});
+          }
+        } catch (_) { /* ignore decode errors */ }
+      }
       setIsLoggedIn(true);
-      const userData = { ...data.user, id: data.user.id };
       setUser(userData);
       // Save to localStorage for persistent login
       localStorage.setItem("is_logged_in", "true");
@@ -912,9 +957,20 @@ function App() {
       setNotificationCount(0);
       setNotifications([]);
       
-      // Set new user data
-      setIsLoggedIn(true);
-      const userData = { ...data.user, id: data.user.user_id || data.user.id };
+      // Set new user data — ถ้า backend ไม่ส่งรูปแต่ Firebase มี photoURL ให้ใช้และบันทึกลง backend
+      const photoURL = result.user?.photoURL || result.user?.photoUrl;
+      let userData = { ...data.user, id: data.user.user_id || data.user.id };
+      if (photoURL && !userData.profile_image && !userData.picture) {
+        userData = { ...userData, profile_image: photoURL };
+        try {
+          await fetch(`${API_BASE_URL}/api/auth/profile`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json", ...(userData.id && { "X-User-ID": userData.id }) },
+            credentials: "include",
+            body: JSON.stringify({ profile_image: photoURL }),
+          });
+        } catch (_) { /* ignore */ }
+      }
       setUser(userData);
       localStorage.setItem("is_logged_in", "true");
       localStorage.setItem("user_data", JSON.stringify(userData));
@@ -1060,15 +1116,14 @@ function App() {
       if (!data?.ok) {
         throw new Error(data?.detail || "Failed to save profile");
       }
-      // ✅ Update user state with new profile data (including profile_image)
+      // ✅ Update user state with new profile data (including profile_image and address)
       const updatedUser = { ...user, ...data.user };
       setUser(updatedUser);
       
-      // ✅ Update localStorage to persist profile_image
+      // ✅ Update localStorage to persist profile (image, address, etc.)
       localStorage.setItem("user_data", JSON.stringify(updatedUser));
       
-      // Redirect to chat
-      navigateToView("chat");
+      // ✅ ไม่ redirect ไปหน้า Agent — ให้อยู่หน้าแก้ไขโปรไฟล์ต่อ (SweetAlert แสดง "บันทึกสำเร็จ" แล้วผู้ใช้กดตกลงอยู่หน้าเดิม)
     } catch (error) {
       throw error;
     }
@@ -1121,7 +1176,9 @@ function App() {
   }
 
   return (
+    <LanguageProvider user={user}>
     <ThemeProvider user={user}>
+    <FontSizeProvider user={user}>
     <div>
       {view === "home" && (
         <HomePage
@@ -1167,24 +1224,56 @@ function App() {
         />
       )}
 
-      {view === "chat" && isLoggedIn && (
-        <AITravelChat 
-          user={user} 
-          onLogout={handleSignOut} 
-          onSignIn={handleNavigateToLogin}
-          initialPrompt={pendingPrompt}
-          onNavigateToBookings={() => navigateToView("bookings")}
-          onNavigateToFlights={() => navigateToView("flights")}
-          onNavigateToHotels={() => navigateToView("hotels")}
-          onNavigateToCarRentals={() => navigateToView("car-rentals")}
-          onNavigateToProfile={handleNavigateToProfile}
-          onNavigateToSettings={handleNavigateToSettings}
+      {view === "verify-email-change" && (
+        <VerifyEmailChangePage
           onNavigateToHome={() => navigateToView("home")}
-          onRefreshNotifications={fetchNotificationCount}
-          notificationCount={notificationCount}
-          notifications={notifications}
-          onMarkNotificationAsRead={handleMarkNotificationAsRead}
+          onNavigateToSettings={() => navigateToView("settings")}
         />
+      )}
+
+      {view === "chat" && isLoggedIn && (
+        <Suspense
+          fallback={
+            <div className="chat-loading-fallback" style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              minHeight: '60vh',
+              gap: '16px',
+              color: 'var(--text-primary, #1f2937)',
+            }}>
+              <div style={{
+                width: 40,
+                height: 40,
+                border: '3px solid #e5e7eb',
+                borderTopColor: '#2563eb',
+                borderRadius: '50%',
+                animation: 'chat-loading-spin 0.7s linear infinite',
+              }} />
+              <p style={{ margin: 0, fontSize: '1rem' }}>กำลังโหลดเอเย่นต์...</p>
+            </div>
+          }
+        >
+          <AITravelChat 
+            user={user} 
+            onLogout={handleSignOut} 
+            onSignIn={handleNavigateToLogin}
+            initialPrompt={pendingPrompt}
+            onNavigateToBookings={() => navigateToView("bookings")}
+            onNavigateToFlights={() => navigateToView("flights")}
+            onNavigateToHotels={() => navigateToView("hotels")}
+            onNavigateToCarRentals={() => navigateToView("car-rentals")}
+            onNavigateToProfile={handleNavigateToProfile}
+            onNavigateToSettings={handleNavigateToSettings}
+            onNavigateToHome={() => navigateToView("home")}
+            onRefreshNotifications={fetchNotificationCount}
+            notificationCount={notificationCount}
+            notifications={notifications}
+            onMarkNotificationAsRead={handleMarkNotificationAsRead}
+            onClearAllNotifications={handleMarkAllNotificationsAsRead}
+          />
+        </Suspense>
       )}
 
 
@@ -1218,8 +1307,9 @@ function App() {
 
       {view === "bookings" && isLoggedIn && (
         <MyBookingsPage
-          key={`bookings-${user?.id || 'anonymous'}-${Date.now()}`} // ✅ Force refresh when user changes or time updates
+          key={`bookings-${user?.id || user?.user_id || 'anonymous'}`}
           user={user}
+          isActive={true}
           onBack={() => setView("chat")}
           onLogout={handleSignOut}
           onSignIn={handleNavigateToLogin}
@@ -1249,6 +1339,7 @@ function App() {
           notificationCount={notificationCount}
           notifications={notifications}
           onMarkNotificationAsRead={handleMarkNotificationAsRead}
+          onClearAllNotifications={handleMarkAllNotificationsAsRead}
         />
       )}
 
@@ -1263,12 +1354,16 @@ function App() {
             user={user}
             onBack={() => navigateToView("bookings")}
             onPaymentSuccess={(bookingId, chargeData) => {
-              // Reload bookings and show success
               navigateToView("bookings");
-              // Show success message after a short delay
               setTimeout(() => {
-                alert('✅ ชำระเงินสำเร็จ!');
-              }, 500);
+                Swal.fire({
+                  icon: 'success',
+                  title: 'ชำระเงินสำเร็จ',
+                  text: 'การชำระเงินของคุณดำเนินการเรียบร้อยแล้ว คุณสามารถดูรายการจองได้ที่ My Bookings',
+                  confirmButtonText: 'ตกลง',
+                  confirmButtonColor: '#2563eb'
+                });
+              }, 400);
             }}
             onNavigateToHome={() => navigateToView("home")}
             onNavigateToProfile={handleNavigateToProfile}
@@ -1290,6 +1385,8 @@ function App() {
           onNavigateToHotels={() => navigateToView("hotels")}
           onNavigateToCarRentals={() => navigateToView("car-rentals")}
           onNavigateToHome={() => navigateToView("home")}
+          onNavigateToProfile={handleNavigateToProfile}
+          onNavigateToSettings={handleNavigateToSettings}
         />
       )}
 
@@ -1301,7 +1398,11 @@ function App() {
           onNavigateToBookings={() => setView("bookings")}
           onNavigateToAI={() => setView("chat")}
           onNavigateToFlights={() => setView("flights")}
+          onNavigateToHotels={() => navigateToView("hotels")}
           onNavigateToCarRentals={() => setView("car-rentals")}
+          onNavigateToHome={() => navigateToView("home")}
+          onNavigateToProfile={handleNavigateToProfile}
+          onNavigateToSettings={handleNavigateToSettings}
         />
       )}
 
@@ -1334,12 +1435,46 @@ function App() {
           onNavigateToCarRentals={() => navigateToView("car-rentals")}
           notificationCount={notificationCount}
           onSendVerificationEmailSuccess={(email) => {
-            setPendingVerifyEmail(email || user?.email || "");
-            navigateToView("verify-email-sent");
+            const emailDisplay = email || user?.email || "อีเมลของคุณ";
+            const html = `
+              <p style="color:#6366f1; font-weight:600; margin:0 0 1rem; word-break:break-all;">${emailDisplay}</p>
+              <p style="color:#4b5563; margin:0 0 0.75rem; line-height:1.6;">
+                เราได้ส่งลิงก์ยืนยันอีเมลไปที่กล่องจดหมายของคุณแล้ว<br/>
+                กรุณาคลิกปุ่ม <strong>「ยืนยันอีเมล」</strong> ในอีเมลเพื่อดำเนินการต่อ
+              </p>
+              <p style="color:#9ca3af; font-size:0.9rem; margin:0;">ไม่พบอีเมล? ตรวจสอบโฟลเดอร์ Spam หรือ Junk</p>
+            `;
+            Swal.fire({
+              icon: 'info',
+              title: 'กรุณาตรวจสอบอีเมล',
+              html,
+              showConfirmButton: true,
+              confirmButtonText: 'ตกลง',
+              confirmButtonColor: '#6366f1',
+              allowOutsideClick: true,
+              allowEscapeKey: true,
+            });
           }}
           onUpdateEmailSuccess={(email) => {
-            setPendingVerifyEmail(email || "");
-            navigateToView("verify-email-sent");
+            const emailDisplay = email || "อีเมลของคุณ";
+            const html = `
+              <p style="color:#6366f1; font-weight:600; margin:0 0 1rem; word-break:break-all;">${emailDisplay}</p>
+              <p style="color:#4b5563; margin:0 0 0.75rem; line-height:1.6;">
+                เราได้ส่งลิงก์ยืนยันอีเมลไปที่กล่องจดหมายของคุณแล้ว<br/>
+                กรุณาคลิกปุ่ม <strong>「ยืนยันอีเมล」</strong> ในอีเมลเพื่อดำเนินการต่อ
+              </p>
+              <p style="color:#9ca3af; font-size:0.9rem; margin:0;">ไม่พบอีเมล? ตรวจสอบโฟลเดอร์ Spam หรือ Junk</p>
+            `;
+            Swal.fire({
+              icon: 'info',
+              title: 'กรุณาตรวจสอบอีเมล',
+              html,
+              showConfirmButton: true,
+              confirmButtonText: 'ตกลง',
+              confirmButtonColor: '#6366f1',
+              allowOutsideClick: true,
+              allowEscapeKey: true,
+            });
           }}
           onRefreshUser={async () => {
             // Refresh user data
@@ -1361,7 +1496,9 @@ function App() {
         />
       )}
     </div>
+    </FontSizeProvider>
     </ThemeProvider>
+    </LanguageProvider>
   );
 }
 

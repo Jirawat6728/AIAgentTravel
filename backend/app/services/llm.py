@@ -243,7 +243,7 @@ class LLMService:
                             retry_match = re.search(r'retry.*?(\d+(?:\.\d+)?)', error_msg_full, re.IGNORECASE)
                             if retry_match:
                                 retry_delay = max(int(float(retry_match.group(1))), 10)  # At least 10 seconds
-                        except:
+                        except Exception:
                             pass
                     
                     error_msg = (
@@ -372,7 +372,7 @@ class LLMService:
                     text = response.text
                     if text and text.strip():
                         return text
-            except:
+            except Exception:
                 pass
             # ✅ FIX: Return fallback message instead of empty string
             return "ขออภัยค่ะ เกิดข้อผิดพลาดในการดึงข้อมูลคำตอบ กรุณาลองใหม่อีกครั้งนะคะ"
@@ -488,9 +488,9 @@ class LLMService:
                 # Basic cleanup
                 json_str = json_str.replace('\n', ' ')
                 return json.loads(json_str)
-            except:
+            except Exception:
                 pass
-                
+
             # If still fails, try to find a more robust way (e.g., by line)
             lines = text.splitlines()
             for line in lines:
@@ -1050,426 +1050,21 @@ class BrainType(str, Enum):
     INTELLIGENCE = "intelligence"  # Analysis brain (smart selection, reasoning)
 
 
-class ProductionLLMService:
-    """
-    Production-grade LLM service with three specialized brains.
-    Automatic model selection, quota fallback, controller/responder/intelligence helpers.
-    ชื่อโมเดล Flash/Pro อ่านจาก settings (.env: GEMINI_FLASH_MODEL, GEMINI_PRO_MODEL)
-    """
-    # Fallback เมื่อ settings ยังไม่มีค่า (ใช้เฉพาะ default ใน get_model_name)
-    MODEL_MAP_FALLBACK = {
-        ModelType.FLASH: "gemini-2.5-flash",
-        ModelType.PRO: "gemini-2.5-pro",
-    }
-    BRAIN_MODEL_PREFERENCES = {
-        BrainType.CONTROLLER: ModelType.PRO,
-        BrainType.RESPONDER: ModelType.FLASH,
-        BrainType.INTELLIGENCE: ModelType.PRO
-    }
-    BRAIN_TEMPERATURES = {
-        BrainType.CONTROLLER: 0.3,
-        BrainType.RESPONDER: 0.7,
-        BrainType.INTELLIGENCE: 0.4
-    }
-
-    def __init__(self, api_key: Optional[str] = None):
-        if not _gemini_available:
-            raise LLMException("Google Generative AI library not installed. Please install: pip install google-generativeai")
-        self.api_key = api_key or settings.gemini_api_key
-        if not self.api_key:
-            raise LLMException("GEMINI_API_KEY is required")
-        genai.configure(api_key=self.api_key)
-        self.model_version = os.getenv("GEMINI_MODEL_VERSION", "preview").lower()
-        logger.info(f"ProductionLLMService initialized with API key: {self.api_key[:6]}...{self.api_key[-4:]}")
-        logger.info(f"Model version: {self.model_version}")
-
-    def get_model_name(self, model_type: ModelType, version: Optional[str] = None) -> str:
-        """อ่านชื่อโมเดลจาก settings (.env) ถ้าไม่มีใช้ fallback"""
-        if model_type == ModelType.FLASH:
-            name = (getattr(settings, "gemini_flash_model", None) or "").strip()
-            return name or self.MODEL_MAP_FALLBACK[ModelType.FLASH]
-        if model_type == ModelType.PRO:
-            name = (getattr(settings, "gemini_pro_model", None) or "").strip()
-            return name or self.MODEL_MAP_FALLBACK[ModelType.PRO]
-        return self.MODEL_MAP_FALLBACK.get(model_type, self.MODEL_MAP_FALLBACK[ModelType.FLASH])
-
-    def select_model_for_brain(
-        self,
-        brain_type: BrainType,
-        complexity: Optional[str] = None,
-        force_model: Optional[ModelType] = None
-    ) -> tuple[str, ModelType]:
-        if force_model:
-            model_type = force_model
-            logger.info(f"Model forced to {model_type.value} for {brain_type.value}")
-        else:
-            preferred_type = self.BRAIN_MODEL_PREFERENCES.get(brain_type, ModelType.FLASH)
-            if complexity == "complex":
-                model_type = ModelType.PRO if preferred_type == ModelType.FLASH else preferred_type
-            elif complexity == "simple":
-                model_type = ModelType.FLASH
-            else:
-                model_type = preferred_type
-        model_name = self.get_model_name(model_type)
-        logger.debug(f"Selected model for {brain_type.value}: {model_name} (type={model_type.value}, complexity={complexity})")
-        return model_name, model_type
-
-    @retry(
-        retry=retry_if_exception_type((LLMException, Exception)),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10)
-    )
-    async def generate(
-        self,
-        prompt: str,
-        brain_type: BrainType,
-        system_prompt: Optional[str] = None,
-        model_type: Optional[ModelType] = None,
-        complexity: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: int = 2500,
-        response_format: str = "text"
-    ) -> str:
-        model_name, selected_type = self.select_model_for_brain(
-            brain_type=brain_type, complexity=complexity, force_model=model_type
-        )
-        if temperature is None:
-            temperature = self.BRAIN_TEMPERATURES.get(brain_type, 0.7)
-        try:
-            generation_config = genai.types.GenerationConfig(
-                temperature=temperature,
-                max_output_tokens=max_tokens
-            )
-            safety_settings = {
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-            }
-            full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-            model = genai.GenerativeModel(model_name=model_name)
-            loop = asyncio.get_running_loop()
-            def _call_gemini():
-                return model.generate_content(
-                    full_prompt,
-                    generation_config=generation_config,
-                    safety_settings=safety_settings
-                )
-            try:
-                response = await asyncio.wait_for(
-                    loop.run_in_executor(None, _call_gemini),
-                    timeout=settings.gemini_timeout_seconds
-                )
-            except asyncio.TimeoutError:
-                logger.error(f"LLM call timed out after {settings.gemini_timeout_seconds}s (brain={brain_type.value}, model={model_name})")
-                raise LLMException("LLM call timed out")
-            except ResourceExhausted as quota_error:
-                error_str = str(quota_error)
-                if "quota" in error_str.lower() or "429" in error_str:
-                    logger.warning(f"Quota exceeded for {model_name}, falling back to default model version")
-                    if self.model_version == "preview":
-                        fallback_model_name = self.get_model_name(selected_type, version="default")
-                        logger.info(f"Retrying with fallback model: {fallback_model_name}")
-                        try:
-                            model = genai.GenerativeModel(model_name=fallback_model_name)
-                            def _call_gemini_fallback():
-                                return model.generate_content(
-                                    full_prompt,
-                                    generation_config=generation_config,
-                                    safety_settings=safety_settings
-                                )
-                            response = await asyncio.wait_for(
-                                loop.run_in_executor(None, _call_gemini_fallback),
-                                timeout=settings.gemini_timeout_seconds
-                            )
-                            text = self._extract_text(response, fallback_model_name)
-                            logger.info(f"Successfully used fallback model: {fallback_model_name}")
-                            return text
-                        except Exception as fallback_error:
-                            logger.error(f"Fallback model also failed: {fallback_error}")
-                            if selected_type == ModelType.PRO:
-                                try:
-                                    flash_model_name = self.get_model_name(ModelType.FLASH, version="default")
-                                    logger.info(f"Trying final fallback to FLASH model: {flash_model_name}")
-                                    model = genai.GenerativeModel(model_name=flash_model_name)
-                                    def _call_gemini_flash():
-                                        return model.generate_content(
-                                            full_prompt,
-                                            generation_config=generation_config,
-                                            safety_settings=safety_settings
-                                        )
-                                    response = await asyncio.wait_for(
-                                        loop.run_in_executor(None, _call_gemini_flash),
-                                        timeout=settings.gemini_timeout_seconds
-                                    )
-                                    text = self._extract_text(response, flash_model_name)
-                                    logger.info(f"Successfully used FLASH fallback model: {flash_model_name}")
-                                    return text
-                                except Exception as flash_error:
-                                    logger.error(f"FLASH fallback model also failed: {flash_error}")
-                            raise LLMException(f"LLM call failed (quota exceeded and all fallbacks failed): {quota_error}") from quota_error
-                    else:
-                        raise LLMException(f"LLM call failed (quota exceeded): {quota_error}") from quota_error
-                else:
-                    raise LLMException(f"LLM call failed: {quota_error}") from quota_error
-            text = self._extract_text(response, model_name)
-            if not text or not text.strip():
-                logger.warning(f"Empty response from {brain_type.value} (model={model_name})")
-                text = "ขออภัยค่ะ ฉันไม่สามารถสร้างคำตอบได้ในขณะนี้ กรุณาลองใหม่อีกครั้งนะคะ"
-            return text
-        except ResourceExhausted as quota_error:
-            error_str = str(quota_error)
-            if "quota" in error_str.lower() or "429" in error_str:
-                logger.warning(f"Quota exceeded for {model_name} (outer catch), falling back to default model version")
-                if self.model_version == "preview":
-                    fallback_model_name = self.get_model_name(selected_type, version="default")
-                    logger.info(f"Retrying with fallback model: {fallback_model_name}")
-                    try:
-                        model = genai.GenerativeModel(model_name=fallback_model_name)
-                        loop = asyncio.get_running_loop()
-                        def _call_gemini_fallback():
-                            return model.generate_content(
-                                full_prompt,
-                                generation_config=generation_config,
-                                safety_settings=safety_settings
-                            )
-                        response = await asyncio.wait_for(
-                            loop.run_in_executor(None, _call_gemini_fallback),
-                            timeout=settings.gemini_timeout_seconds
-                        )
-                        text = self._extract_text(response, fallback_model_name)
-                        logger.info(f"Successfully used fallback model: {fallback_model_name}")
-                        return text
-                    except Exception as fallback_error:
-                        logger.error(f"Fallback model also failed: {fallback_error}")
-                        if selected_type == ModelType.PRO:
-                            try:
-                                flash_model_name = self.get_model_name(ModelType.FLASH, version="default")
-                                logger.info(f"Trying final fallback to FLASH model: {flash_model_name}")
-                                model = genai.GenerativeModel(model_name=flash_model_name)
-                                loop = asyncio.get_running_loop()
-                                def _call_gemini_flash():
-                                    return model.generate_content(
-                                        full_prompt,
-                                        generation_config=generation_config,
-                                        safety_settings=safety_settings
-                                    )
-                                response = await asyncio.wait_for(
-                                    loop.run_in_executor(None, _call_gemini_flash),
-                                    timeout=settings.gemini_timeout_seconds
-                                )
-                                text = self._extract_text(response, flash_model_name)
-                                logger.info(f"Successfully used FLASH fallback model: {flash_model_name}")
-                                return text
-                            except Exception as flash_error:
-                                logger.error(f"FLASH fallback model also failed: {flash_error}")
-                        raise LLMException(f"LLM call failed (quota exceeded and all fallbacks failed): {quota_error}") from quota_error
-                raise LLMException(f"LLM call failed (quota exceeded): {quota_error}") from quota_error
-        except Exception as e:
-            logger.error(f"LLM generation error in {brain_type.value}: {e}", exc_info=True)
-            raise LLMException(f"LLM call failed: {e}") from e
-
-    async def generate_json(
-        self,
-        prompt: str,
-        brain_type: BrainType,
-        system_prompt: Optional[str] = None,
-        model_type: Optional[ModelType] = None,
-        complexity: Optional[str] = None,
-        temperature: Optional[float] = None
-    ) -> Dict[str, Any]:
-        text = await self.generate(
-            prompt=prompt,
-            brain_type=brain_type,
-            system_prompt=system_prompt,
-            model_type=model_type,
-            complexity=complexity,
-            temperature=temperature,
-            max_tokens=4000,
-            response_format="json"
-        )
-        try:
-            parsed = self._extract_json_from_text(text)
-            if not parsed:
-                logger.warning(f"Empty JSON from {brain_type.value}: {text[:200]}...")
-                return {}
-            return parsed
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON from {brain_type.value}: {e}")
-            logger.error(f"Raw text: {text[:500]}")
-            return {}
-        except Exception as e:
-            logger.error(f"Unexpected error parsing JSON: {e}")
-            return {}
-
-    def _extract_text(self, response, model_name: str) -> str:
-        """Extract text from Gemini response safely (ProductionLLMService)."""
-        try:
-            if hasattr(response, 'parts') and response.parts:
-                text = response.text
-                if text and text.strip():
-                    return text
-            if hasattr(response, 'text') and response.text:
-                text = response.text
-                if text and text.strip():
-                    return text
-            if hasattr(response, 'candidates') and response.candidates:
-                candidate = response.candidates[0]
-                finish_reason = getattr(candidate, 'finish_reason', None)
-                if finish_reason == 2:  # SAFETY
-                    logger.warning(f"Response blocked by safety (model={model_name})")
-                    return "ขออภัยค่ะ ฉันไม่สามารถตอบคำถามนี้ได้เนื่องจากการตรวจสอบความปลอดภัย กรุณาลองถามใหม่อีกครั้งค่ะ"
-                elif finish_reason == 3:  # MAX_TOKENS
-                    logger.warning(f"Response truncated (model={model_name})")
-                    if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts') and candidate.content.parts:
-                        text = candidate.content.parts[0].text
-                        if text and text.strip():
-                            return text
-                elif finish_reason == 4:  # RECITATION
-                    return "ขอภัยค่ะ ฉันตรวจพบว่าคำตอบอาจจะคล้ายกับเนื้อหาที่มีลิขสิทธิ์ กรุณาลองถามด้วยวิธีอื่นค่ะ"
-                elif finish_reason == 1:  # STOP (normal)
-                    if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts') and candidate.content.parts:
-                        text = candidate.content.parts[0].text
-                        if text and text.strip():
-                            return text
-                if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts') and candidate.content.parts:
-                    for part in candidate.content.parts:
-                        if hasattr(part, 'text') and part.text:
-                            text = part.text
-                            if text and text.strip():
-                                return text
-            logger.warning(f"Unexpected response structure (model={model_name})")
-            return "ขออภัยค่ะ ฉันไม่สามารถสร้างคำตอบได้ในขณะนี้ กรุณาลองใหม่อีกครั้งนะคะ"
-        except Exception as e:
-            logger.error(f"Error extracting text: {e}", exc_info=True)
-            return "ขออภัยค่ะ เกิดข้อผิดพลาดในการดึงข้อมูลคำตอบ กรุณาลองใหม่อีกครั้งนะคะ"
-
-    def _extract_json_from_text(self, text: str) -> Optional[Dict[str, Any]]:
-        """Extract JSON object from text (ProductionLLMService)."""
-        if not text:
-            return None
-        text = text.strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-        start_idx = text.find('{')
-        end_idx = text.rfind('}')
-        if start_idx == -1 or end_idx == -1:
-            return None
-        json_str = text[start_idx:end_idx + 1]
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            try:
-                json_str = json_str.replace('\n', ' ')
-                return json.loads(json_str)
-            except Exception:
-                pass
-            for line in text.splitlines():
-                try:
-                    if line.strip().startswith('{') and line.strip().endswith('}'):
-                        return json.loads(line.strip())
-                except Exception:
-                    continue
-            return None
-
-    async def controller_generate(
-        self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        model_type: Optional[ModelType] = None,
-        complexity: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Generate controller decision (JSON)."""
-        try:
-            result = await self.generate_json(
-                prompt=prompt,
-                brain_type=BrainType.CONTROLLER,
-                system_prompt=system_prompt,
-                model_type=model_type,
-                complexity=complexity
-            )
-            if not result or not isinstance(result, dict):
-                logger.warning("Controller returned invalid JSON, using fallback")
-                return {"error": "invalid_response", "action": "ASK_USER", "payload": {"message": "กรุณาลองใหม่อีกครั้ง"}}
-            return result
-        except LLMException as e:
-            logger.error(f"Controller LLM error: {e}")
-            return {"error": "llm_error", "action": "ASK_USER", "payload": {"message": "เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง"}}
-        except Exception as e:
-            logger.error(f"Unexpected error in controller_generate: {e}", exc_info=True)
-            return {"error": "unexpected_error", "action": "ASK_USER", "payload": {"message": "เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง"}}
-
-    async def responder_generate(
-        self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        model_type: Optional[ModelType] = None,
-        complexity: Optional[str] = None
-    ) -> str:
-        """Generate responder message (text)."""
-        try:
-            response_text = await self.generate(
-                prompt=prompt,
-                brain_type=BrainType.RESPONDER,
-                system_prompt=system_prompt,
-                model_type=model_type,
-                complexity=complexity,
-                max_tokens=2500
-            )
-            if not response_text or not response_text.strip():
-                logger.warning("Responder returned empty text, using fallback")
-                response_text = "ขออภัยค่ะ ฉันไม่สามารถสร้างคำตอบได้ในขณะนี้ กรุณาลองใหม่อีกครั้งนะคะ"
-            return response_text
-        except LLMException as e:
-            logger.error(f"Responder LLM error: {e}")
-            error_str = str(e).lower()
-            if "429" in error_str or "quota" in error_str or "exceeded" in error_str:
-                return (
-                    "⚠️ ขออภัยค่ะ API quota หมดแล้วสำหรับวันนี้\n\n"
-                    "Free tier limit: 20 requests/day per model\n\n"
-                    "กรุณา:\n"
-                    "1. รอจนกว่า quota จะ reset (ทุกวัน)\n"
-                    "2. หรือ upgrade Google Cloud plan เพื่อเพิ่ม quota\n\n"
-                    "หากต้องการใช้งานต่อทันที กรุณาติดต่อ support"
-                )
-            elif "api" in error_str and "key" in error_str:
-                return "ขออภัยค่ะ ระบบไม่สามารถเชื่อมต่อกับ AI service ได้ กรุณาตรวจสอบ GEMINI_API_KEY ในไฟล์ .env"
-            elif "timeout" in error_str:
-                return "ขออภัยค่ะ ระบบใช้เวลาประมวลผลนานเกินไป กรุณาลองใหม่อีกครั้ง"
-            else:
-                return "ขออภัยค่ะ เกิดข้อผิดพลาดในการสร้างคำตอบ กรุณาลองใหม่อีกครั้ง"
-        except Exception as e:
-            logger.error(f"Unexpected error in responder_generate: {e}", exc_info=True)
-            return "ขออภัยค่ะ ระบบไม่สามารถสร้างคำตอบได้ในขณะนี้ กรุณาลองใหม่อีกครั้งนะคะ"
-
-    async def intelligence_generate(
-        self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        model_type: Optional[ModelType] = None,
-        complexity: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Generate intelligence analysis (JSON)."""
-        return await self.generate_json(
-            prompt=prompt,
-            brain_type=BrainType.INTELLIGENCE,
-            system_prompt=system_prompt,
-            model_type=model_type,
-            complexity=complexity
-        )
+_production_llm_service = None  # LangChainProductionLLM or None (ใช้ LCEL เท่านั้น)
 
 
-_production_llm_service: Optional[ProductionLLMService] = None
-
-
-def get_production_llm() -> ProductionLLMService:
-    """Get or create global ProductionLLMService instance."""
+def get_production_llm():
+    """Get or create global Production LLM instance. ใช้ LangChain (LCEL) เท่านั้น"""
     global _production_llm_service
     if _production_llm_service is None:
-        _production_llm_service = ProductionLLMService()
+        if getattr(settings, "enable_langchain_orchestration", True):
+            try:
+                from app.orchestration.langchain_llm import LangChainProductionLLM
+                _production_llm_service = LangChainProductionLLM()
+                logger.info("Using LangChain orchestration (LCEL) for Production LLM")
+            except Exception as e:
+                logger.warning(f"LangChain orchestration failed: {e}, production_llm will be None")
+                _production_llm_service = None
+        else:
+            _production_llm_service = None
     return _production_llm_service

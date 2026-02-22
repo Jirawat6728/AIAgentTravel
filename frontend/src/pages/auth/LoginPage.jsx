@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import './LoginPage.css';
+import { useLanguage } from '../../context/LanguageContext';
 
 export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister, onNavigateToResetPassword, onNavigateToHome }) {
   // ✅ Load saved email and rememberMe preference from localStorage
@@ -10,7 +11,7 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(savedRememberMe);
-  const [lang, setLang] = useState('th');
+  const { t } = useLanguage();
   const [errors, setErrors] = useState({});
   const [isLoading, setIsLoading] = useState(false);
   const [passwordError, setPasswordError] = useState(false);
@@ -22,13 +23,13 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
     const newErrors = {};
     
     if (!email.trim()) {
-      newErrors.email = lang === 'th' ? 'กรุณากรอกอีเมล' : 'Email is required';
+      newErrors.email = t('auth.errEmailRequired');
     } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      newErrors.email = lang === 'th' ? 'รูปแบบอีเมลไม่ถูกต้อง' : 'Invalid email format';
+      newErrors.email = t('auth.errEmailInvalid');
     }
     
     if (!password) {
-      newErrors.password = lang === 'th' ? 'กรุณากรอกรหัสผ่าน' : 'Password is required';
+      newErrors.password = t('auth.errPasswordRequired');
     }
     
     setErrors(newErrors);
@@ -123,7 +124,7 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
         setPasswordError(true);
         setShakePassword(true);
         setErrors({
-          general: lang === 'th' ? 'อีเมลหรือรหัสผ่านไม่ถูกต้อง' : 'Email or password is incorrect'
+          general: t('auth.errInvalidCredentials')
         });
         
         // Remove shake animation class after animation completes (600ms)
@@ -135,9 +136,7 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
         setPassword('');
       } else {
         setErrors({
-          general: lang === 'th' 
-            ? 'เกิดข้อผิดพลาดในการเข้าสู่ระบบ: ' + errorMessage
-            : 'Login failed: ' + errorMessage
+          general: t('auth.errLoginFailed') + errorMessage
         });
       }
     } finally {
@@ -151,33 +150,6 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
     }
   };
 
-  // 🈯️ ข้อความ 2 ภาษา
-  const text = {
-    en: {
-      title: 'Log In',
-      email: 'Email',
-      password: 'Password',
-      remember: 'Remember me',
-      signIn: 'Sign In',
-      signUp: 'Sign Up',
-      forgot: 'Forgot Password?',
-      orContinue: 'Or continue with',
-      google: 'Login with Google',
-      appName: 'AI Travel Agent',
-    },
-    th: {
-      title: 'เข้าสู่ระบบ',
-      email: 'อีเมล',
-      password: 'รหัสผ่าน',
-      remember: 'จำฉันไว้',
-      signIn: 'เข้าสู่ระบบ',
-      signUp: 'สมัครสมาชิก',
-      forgot: 'ลืมรหัสผ่าน?',
-      orContinue: 'หรือต่อด้วย',
-      google: 'เข้าสู่ระบบด้วย Google',
-      appName: 'ผู้ช่วยท่องเที่ยวอัจฉริยะ',
-    },
-  };
 
   return (
     <div className="login-container">
@@ -227,15 +199,15 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
           {/* Right Side - Login Form */}
           <div className="login-form-section">
             <div className="login-card">
-            <h2 className="login-title">{text[lang].title}</h2>
+            <h2 className="login-title">{t('auth.login')}</h2>
             <p className="login-subtitle">
-              {lang === 'th' ? 'ยินดีต้อนรับกลับมา! กรุณาเข้าสู่ระบบเพื่อใช้งาน' : 'Welcome back! Please login to your account.'}
+              {t('auth.welcomeBack')}
             </p>
 
             <form onSubmit={handleLoginClick} className="form-content">
               {/* Email */}
               <div className="form-group">
-                <label htmlFor="email" className="form-label">{text[lang].email}</label>
+                <label htmlFor="email" className="form-label">{t('auth.email')}</label>
                 <div className={shakeEmail ? 'shake' : ''}>
                   <input
                     type="email"
@@ -243,21 +215,21 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
                     name="email"
                     value={email}
                     onChange={handleChange}
-                    placeholder={text[lang].email}
+                    placeholder={t('auth.email')}
                     className={`form-input ${savedEmail && rememberMe ? 'remembered' : ''} ${emailError ? 'error' : ''}`}
                     autoComplete="email"
                   />
                 </div>
                 {emailError && (
                   <div className="error-message" style={{ color: '#dc2626', fontSize: '0.875rem', marginTop: '0.25rem' }}>
-                    {lang === 'th' ? 'ไม่พบอีเมลนี้ในระบบ' : 'Email not found'}
+                    {t('auth.errEmailNotFound')}
                   </div>
                 )}
               </div>
 
               {/* Password */}
               <div className="form-group">
-                <label htmlFor="password" className="form-label">{text[lang].password}</label>
+                <label htmlFor="password" className="form-label">{t('auth.password')}</label>
                 <div className={`password-input-wrapper ${shakePassword ? 'shake' : ''}`}>
                   <input
                     type={showPassword ? "text" : "password"}
@@ -265,7 +237,7 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
                     name="password"
                     value={password}
                     onChange={handleChange}
-                    placeholder={text[lang].password}
+                    placeholder={t('auth.password')}
                     className={`form-input has-toggle ${passwordError ? 'error' : ''}`}
                   />
                   <button
@@ -300,12 +272,12 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
                     className="checkbox"
                   />
                   <label htmlFor="remember" className="checkbox-label">
-                    {text[lang].remember}
+                    {t('auth.rememberMe')}
                   </label>
                 </div>
                 <div className="forgot-password">
                   <button type="button" onClick={onNavigateToResetPassword} className="forgot-link" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}>
-                    {text[lang].forgot}
+                    {t('auth.forgotPassword')}
                   </button>
                 </div>
               </div>
@@ -319,20 +291,20 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
 
               {/* Submit Button */}
               <button type="submit" className="btn-login" disabled={isLoading}>
-                {isLoading ? (lang === 'th' ? 'กำลังเข้าสู่ระบบ...' : 'Signing in...') : text[lang].signIn}
+                {isLoading ? t('auth.signingIn') : t('auth.login')}
               </button>
 
               {/* Register Link */}
               <div className="register-link">
-                <span>{lang === 'th' ? 'ยังไม่มีบัญชี? ' : "Don't have an account? "}</span>
+                <span>{t('auth.noAccount')}</span>
                 <button type="button" onClick={onNavigateToRegister} className="link-button">
-                  {text[lang].signUp}
+                  {t('auth.register')}
                 </button>
               </div>
 
               {/* Divider */}
               <div className="divider">
-                <span className="divider-text">{text[lang].orContinue}</span>
+                <span className="divider-text">{t('auth.orContinueWith')}</span>
               </div>
 
               {/* Google Login */}
@@ -348,7 +320,7 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
                   <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
                   <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
                 </svg>
-                {text[lang].google}
+                {t('auth.loginWithGoogle')}
               </button>
             </form>
             </div>

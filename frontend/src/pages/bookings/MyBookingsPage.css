@@ -377,6 +377,49 @@
   cursor: not-allowed;
 }
 
+.btn-refund {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 8px;
+  font-size: clamp(14px, 2vw, 15px);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: linear-gradient(135deg, #0d9488 0%, #0f766e 100%);
+  color: white;
+}
+
+.btn-refund:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(13, 148, 136, 0.4);
+}
+
+.btn-refund:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-refund-confirm-full,
+.btn-refund-confirm-partial {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-refund-confirm-full {
+  background: #0d9488;
+  color: white;
+}
+
+.btn-refund-confirm-partial {
+  background: #ccfbf1;
+  color: #0f766e;
+  border: 1px solid #0d9488;
+}
+
 .booking-cancelled-note {
   padding: 12px;
   background: #fee2e2;
@@ -407,7 +450,8 @@
 
   .btn-payment,
   .btn-edit,
-  .btn-cancel {
+  .btn-cancel,
+  .btn-refund {
     width: 100%;
     min-width: unset;
   }

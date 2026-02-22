@@ -1,7 +1,7 @@
 """
 เซอร์วิสอีเมลยืนยันตัวตนผ่าน Firebase
 การส่งอีเมลยืนยันทำที่ฝั่ง Client ด้วย Firebase Auth sendEmailVerification()
-Backend ไม่ส่งอีเมลเอง — ใช้เป็น no-op และเก็บ interface สำหรับ register/update-email
+สำหรับเปลี่ยนอีเมล: ส่งลิงก์ยืนยันไปอีเมลใหม่ (ใช้ EMAIL_SERVICE_URL ถ้ามี)
 """
 
 from __future__ import annotations
@@ -18,19 +18,21 @@ logger = get_logger(__name__)
 class EmailService:
     """
     Email service: การยืนยันอีเมลใช้ Firebase Auth บนฝั่ง Client
-    send_verification_email() เป็น no-op — คืน True เพื่อให้ flow ทำงานต่อได้
+    สำหรับเปลี่ยนอีเมล: send_email_change_verification() ส่งลิงก์ไปอีเมลใหม่ (EMAIL_SERVICE_URL หรือ no-op)
     """
 
     def __init__(self):
         self.frontend_url = getattr(settings, "frontend_url", "") or ""
-        # ใช้ Firebase เป็นช่องทางยืนยันอีเมล — ไม่ต้องมี Nodemailer/EMAIL_SERVICE_URL
-        self.is_configured = bool(
+        self.email_service_url = getattr(settings, "email_service_url", "") or ""
+        has_firebase = bool(
             getattr(settings, "firebase_project_id", None)
             or getattr(settings, "firebase_credentials_path", None)
         )
-        if not self.is_configured:
+        # ยืนยันอีเมลใช้ได้เมื่อมี Firebase (ฝั่ง Client) หรือ EMAIL_SERVICE_URL (ส่งลิงก์ทางอีเมล)
+        self.is_configured = bool(has_firebase or self.email_service_url)
+        if not has_firebase:
             logger.debug(
-                "Firebase not configured. Email verification is handled by Firebase on the client."
+                "Firebase not configured. Email verification can use EMAIL_SERVICE_URL to send link."
             )
 
     def generate_verification_token(self) -> str:
@@ -42,6 +44,11 @@ class EmailService:
         verification_path = f"/verify-email?token={urllib.parse.quote(token)}"
         return f"{self.frontend_url.rstrip('/')}{verification_path}"
 
+    def create_email_change_verification_url(self, token: str) -> str:
+        """Create verification URL for email change (กดลิงก์แล้วเปลี่ยนอีเมลและยืนยันในครั้งเดียว)"""
+        path = f"/verify-email-change?token={urllib.parse.quote(token)}"
+        return f"{self.frontend_url.rstrip('/')}{path}"
+
     def send_verification_email(
         self,
         to_email: str,
@@ -49,12 +56,65 @@ class EmailService:
         user_name: Optional[str] = None,
     ) -> bool:
         """
-        No-op: การส่งอีเมลยืนยันทำที่ฝั่ง Client ด้วย Firebase Auth sendEmailVerification()
-        คืน True เพื่อให้ register/update-email ทำงานต่อได้
+        ส่งอีเมลยืนยัน: ถ้ามี EMAIL_SERVICE_URL จะส่งลิงก์ /verify-email?token=... ทางอีเมล
+        ถ้าไม่มี (ใช้เฉพาะ Firebase) เป็น no-op — ฝั่ง Client ใช้ Firebase sendEmailVerification()
         """
-        logger.info(
-            f"Email verification for {to_email} is handled by Firebase on the client (sendEmailVerification)."
+        link_url = self.create_verification_url(token)
+        subject = "ยืนยันอีเมล - AI Travel Agent"
+        name = user_name or "คุณ"
+        if self.email_service_url:
+            try:
+                import httpx
+                url = f"{self.email_service_url.rstrip('/')}/send"
+                payload = {
+                    "to": to_email,
+                    "subject": subject,
+                    "template": "verify-email",
+                    "context": {"userName": name, "linkUrl": link_url},
+                }
+                r = httpx.post(url, json=payload, timeout=10.0)
+                if r.is_success:
+                    logger.info(f"Verification email sent to {to_email}")
+                    return True
+                logger.warning(f"Email service returned {r.status_code}: {r.text[:200]}")
+            except Exception as e:
+                logger.warning(f"Failed to send verification email via EMAIL_SERVICE_URL: {e}")
+        logger.warning(
+            f"Email verification for {to_email}: no email sent (EMAIL_SERVICE_URL not set; use Firebase on client or set EMAIL_SERVICE_URL in .env)."
         )
+        return False
+
+    def send_email_change_verification(
+        self,
+        to_email: str,
+        token: str,
+        user_name: Optional[str] = None,
+    ) -> bool:
+        """
+        ส่งอีเมลเปลี่ยนอีเมลไปที่อีเมลใหม่ มีลิงก์กดเพื่อยืนยันและอัปเดตอีเมลใน MongoDB
+        ถ้ามี EMAIL_SERVICE_URL จะ POST { to, subject, template, context } ไปที่ {url}/send (NestJS Mailer)
+        """
+        link_url = self.create_email_change_verification_url(token)
+        subject = "ยืนยันการเปลี่ยนอีเมล - AI Travel Agent"
+        name = user_name or "คุณ"
+        if self.email_service_url:
+            try:
+                import httpx
+                url = f"{self.email_service_url.rstrip('/')}/send"
+                payload = {
+                    "to": to_email,
+                    "subject": subject,
+                    "template": "verify-email-change",
+                    "context": {"userName": name, "newEmail": to_email, "linkUrl": link_url},
+                }
+                r = httpx.post(url, json=payload, timeout=10.0)
+                if r.is_success:
+                    logger.info(f"Email change verification sent to {to_email}")
+                    return True
+                logger.warning(f"Email service returned {r.status_code}: {r.text[:200]}")
+            except Exception as e:
+                logger.warning(f"Failed to send email via EMAIL_SERVICE_URL: {e}")
+        logger.info(f"Email change verification link for {to_email} (no mail sent): {link_url[:50]}...")
         return True
 
 

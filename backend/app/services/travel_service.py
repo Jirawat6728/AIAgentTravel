@@ -820,7 +820,7 @@ class TravelOrchestrator:
             
             data = response_json.get("data", [])
             meta = response_json.get("meta", {})
-            
+
             # ✅ Check for warnings/errors in response (log clearly when using production)
             if "warnings" in response_json:
                 logger.warning(f"⚠️ Amadeus API warnings: {response_json['warnings']}")
@@ -829,7 +829,19 @@ class TravelOrchestrator:
                 logger.error(f"❌ Amadeus API errors (status={resp.status_code}): {err_list}")
                 for err in (err_list if isinstance(err_list, list) else [err_list]):
                     logger.error(f"   Amadeus error: code={err.get('code')} title={err.get('title')} detail={err.get('detail')}")
-            
+
+            # ✅ บินตรง: กรองเฉพาะเที่ยวบินตรง (ทุก itinerary ต้องมี 1 segment) แม้ API ส่งต่อเครื่องมา
+            if data and non_stop:
+                def _is_non_stop_offer(offer: dict) -> bool:
+                    for itin in (offer.get("itineraries") or []):
+                        if len(itin.get("segments") or []) > 1:
+                            return False
+                    return True
+                before = len(data)
+                data = [o for o in data if _is_non_stop_offer(o)]
+                if before > len(data):
+                    logger.warning(f"✅ Non-stop filter: removed {before - len(data)} connecting offers (kept {len(data)} direct)")
+
             # ✅ Log results with detailed information
             if data:
                 logger.info(f"✅ Found {len(data)} flight options for {origin_code} → {dest_code} on {date}")
@@ -854,6 +866,8 @@ class TravelOrchestrator:
                     if resp_itm.status_code == 200:
                         data_itm = resp_itm.json().get("data", [])
                         if data_itm:
+                            if non_stop:
+                                data_itm = [o for o in data_itm if all(len(itin.get("segments") or []) <= 1 for itin in (o.get("itineraries") or []))]
                             logger.info(f"✅ Found {len(data_itm)} flights via ITM (Osaka Itami)")
                             return data_itm[:10]
                 except Exception as e_itm:
@@ -912,6 +926,8 @@ class TravelOrchestrator:
                             continue
                     
                     if data:
+                        if non_stop:
+                            data = [o for o in data if all(len(itin.get("segments") or []) <= 1 for itin in (o.get("itineraries") or []))]
                         logger.info(f"✅ Found {len(data)} total flight options (including fallback dates) → will show PlanChoiceCard")
                         return data[:10]
                 except asyncio.TimeoutError:

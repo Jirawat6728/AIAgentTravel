@@ -1,12 +1,13 @@
 """
-โมดูล Reinforcement Learning สำหรับ AI Travel Agent
-เรียนรู้จากการโต้ตอบของผู้ใช้และปรับปรุงการแนะนำให้ดีขึ้นในแต่ละรอบ
+Reinforcement Learning Service สำหรับ AI Travel Agent
+เรียนรู้จากพฤติกรรมผู้ใช้จริง เก็บ Q-values ใน MongoDB per-user
+ใช้ปรับปรุงการแนะนำและ auto-select ใน Agent Mode
 """
 
 from __future__ import annotations
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 
 from app.core.logging import get_logger
@@ -14,257 +15,297 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 
-@dataclass
-class RewardSignal:
-    """Reward signal from user interaction"""
-    timestamp: datetime
-    action_type: str  # "select_option", "book", "reject", "edit"
-    slot_name: str
-    option_index: int
-    reward_value: float  # -1.0 to 1.0
-    context: Dict[str, Any]
+# ---------------------------------------------------------------------------
+# Reward constants
+# ---------------------------------------------------------------------------
+REWARD_SELECT_OPTION   =  0.3   # user เลือก option
+REWARD_COMPLETE_BOOKING =  1.0  # จองสำเร็จ
+REWARD_POSITIVE_FEEDBACK=  0.5  # feedback ดี
+REWARD_REJECT_OPTION   = -0.2   # ปฏิเสธ option
+REWARD_CANCEL_BOOKING  = -0.5   # ยกเลิกการจอง
+REWARD_NEGATIVE_FEEDBACK= -0.3  # feedback แย่
+REWARD_EDIT_SELECTION  = -0.1   # แก้ไขการเลือก
 
 
-class RewardFunction:
+def _calc_reward(action_type: str, context: Optional[Dict] = None) -> float:
+    ctx = context or {}
+    if action_type in ("select_option",):
+        return REWARD_SELECT_OPTION
+    if action_type in ("book", "complete_booking"):
+        return REWARD_COMPLETE_BOOKING
+    if action_type == "positive_feedback":
+        return REWARD_POSITIVE_FEEDBACK * ctx.get("feedback_score", 1.0)
+    if action_type in ("reject", "reject_option"):
+        return REWARD_REJECT_OPTION
+    if action_type in ("cancel", "cancel_booking"):
+        return REWARD_CANCEL_BOOKING
+    if action_type == "negative_feedback":
+        return REWARD_NEGATIVE_FEEDBACK * abs(ctx.get("feedback_score", 1.0))
+    if action_type in ("edit", "edit_selection"):
+        return REWARD_EDIT_SELECTION
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
+# MongoDB-backed RL Service (per-user Q-table)
+# ---------------------------------------------------------------------------
+class RLService:
     """
-    Reward Function สำหรับประเมินความพึงพอใจของผู้ใช้ในระยะยาว
-    
-    Reward signals:
-    - Positive: User selects option, completes booking, positive feedback
-    - Negative: User rejects option, cancels booking, negative feedback
+    Reinforcement Learning Service ที่เก็บ Q-values ใน MongoDB per-user.
+
+    Q-table schema (collection: rl_qtable):
+      user_id, slot_name, option_key, q_value, visit_count, last_updated
+
+    Reward history schema (collection: rl_rewards):
+      user_id, action_type, slot_name, option_key, reward, context, created_at
     """
-    
-    # Reward values
-    REWARD_SELECT_OPTION = 0.3  # User selects an option
-    REWARD_COMPLETE_BOOKING = 1.0  # User completes booking
-    REWARD_POSITIVE_FEEDBACK = 0.5  # User gives positive feedback
-    REWARD_REJECT_OPTION = -0.2  # User rejects an option
-    REWARD_CANCEL_BOOKING = -0.5  # User cancels booking
-    REWARD_NEGATIVE_FEEDBACK = -0.3  # User gives negative feedback
-    REWARD_EDIT_SELECTION = -0.1  # User edits selection (minor negative)
-    
+
+    GAMMA = 0.9          # discount factor
+    ALPHA = 0.3          # learning rate
+    MAX_HISTORY = 500    # max reward records per user
+
+    def __init__(self):
+        self._db = None
+
+    def _get_db(self):
+        if self._db is None:
+            from app.storage.connection_manager import ConnectionManager
+            self._db = ConnectionManager.get_instance().get_mongo_database()
+        return self._db
+
+    # ------------------------------------------------------------------
+    # Option key: fingerprint ที่ระบุ option อย่าง stable
+    # ------------------------------------------------------------------
     @staticmethod
-    def calculate_reward(
+    def _option_key(slot_name: str, option: Any) -> str:
+        """สร้าง key ที่ stable สำหรับ option หนึ่งๆ"""
+        if isinstance(option, dict):
+            # ใช้ flight_number หรือ hotel name หรือ display_name
+            parts = [slot_name]
+            for field in ("flight_number", "name", "display_name", "airline", "hotel_id", "id"):
+                v = option.get(field)
+                if v:
+                    parts.append(str(v)[:40])
+                    break
+            price = option.get("price_amount") or option.get("price_total") or option.get("price", 0)
+            parts.append(f"p{int(float(price or 0))}")
+            return ":".join(parts)
+        return f"{slot_name}:unknown"
+
+    # ------------------------------------------------------------------
+    # Record reward → MongoDB
+    # ------------------------------------------------------------------
+    async def record_reward(
+        self,
+        user_id: str,
         action_type: str,
         slot_name: str,
-        option_index: int,
-        context: Optional[Dict[str, Any]] = None
-    ) -> float:
-        """
-        คำนวณ reward จาก user action
-        
-        Args:
-            action_type: Type of action ("select_option", "book", "reject", "edit", "feedback")
-            slot_name: Slot name (e.g., "flights_outbound", "accommodation")
-            option_index: Index of selected option
-            context: Additional context (e.g., feedback score, booking status)
-            
-        Returns:
-            Reward value (-1.0 to 1.0)
-        """
-        context = context or {}
-        
-        if action_type == "select_option":
-            return RewardFunction.REWARD_SELECT_OPTION
-        elif action_type == "book" or action_type == "complete_booking":
-            return RewardFunction.REWARD_COMPLETE_BOOKING
-        elif action_type == "positive_feedback":
-            # Scale by feedback score if provided
-            feedback_score = context.get("feedback_score", 1.0)
-            return RewardFunction.REWARD_POSITIVE_FEEDBACK * feedback_score
-        elif action_type == "reject" or action_type == "reject_option":
-            return RewardFunction.REWARD_REJECT_OPTION
-        elif action_type == "cancel" or action_type == "cancel_booking":
-            return RewardFunction.REWARD_CANCEL_BOOKING
-        elif action_type == "negative_feedback":
-            feedback_score = abs(context.get("feedback_score", -1.0))
-            return RewardFunction.REWARD_NEGATIVE_FEEDBACK * feedback_score
-        elif action_type == "edit" or action_type == "edit_selection":
-            return RewardFunction.REWARD_EDIT_SELECTION
-        else:
-            return 0.0  # Unknown action
+        option: Any = None,
+        context: Optional[Dict] = None,
+    ) -> None:
+        """บันทึก reward และอัปเดต Q-value ใน MongoDB"""
+        if not user_id:
+            return
+        reward = _calc_reward(action_type, context)
+        option_key = self._option_key(slot_name, option) if option else f"{slot_name}:unknown"
 
+        db = self._get_db()
+        if db is None:
+            logger.warning("RL: DB not available, skipping record_reward")
+            return
 
-class ReinforcementLearner:
-    """
-    Reinforcement Learning Agent
-    ใช้เทคนิค Reinforcement Learning เพื่อเรียนรู้จากการโต้ตอบของผู้ใช้
-    และปรับปรุงการแนะนำให้ดีขึ้นในแต่ละรอบ
-    """
-    
-    def __init__(self, discount_factor: float = 0.9, total_rounds: int = 10):
-        """
-        Initialize RL Agent
-        
-        Args:
-            discount_factor: ค่าการลดทอน (Discount Factor, 0 < γ < 1)
-            total_rounds: จำนวนรอบการเรียนรู้ทั้งหมด (T)
-        """
-        self.gamma = discount_factor  # γ (gamma)
-        self.T = total_rounds  # T (total rounds)
-        self.reward_history: List[RewardSignal] = []
-        self.logger = get_logger(__name__)
-        
-        self.logger.info(f"ReinforcementLearner initialized: γ={self.gamma}, T={self.T}")
-    
-    def calculate_expected_return(
-        self,
-        state: Dict[str, Any],
-        time_step: int = 0
-    ) -> float:
-        """
-        คำนวณค่ารางวัลคาดหวัง (Expected Return)
-        
-        สมการ: Rt = E[ Σ_{k=0}^{T-t} γ^k r_{t+k+1} | S_t ] (3)
-        
-        โดยที่:
-        - Rt = ค่ารางวัลรวมที่คาดหวังในสถานะ St
-        - rt = ค่ารางวัลที่ได้รับในช่วงเวลา t
-        - γ = ค่าการลดทอน (Discount Factor, 0 < γ < 1)
-        - T = จำนวนรอบการเรียนรู้ทั้งหมด
-        
-        Args:
-            state: Current state S_t
-            time_step: Current time step t
-            
-        Returns:
-            Expected return R_t
-        """
-        if time_step >= self.T:
-            return 0.0
-        
-        # Calculate expected return: Σ_{k=0}^{T-t} γ^k r_{t+k+1}
-        expected_return = 0.0
-        
-        # Use historical rewards to estimate future rewards
-        # If we have reward history, use it to estimate future rewards
-        if self.reward_history:
-            # Average reward from similar states
-            similar_rewards = [
-                r.reward_value for r in self.reward_history
-                if self._is_similar_state(r.context, state)
-            ]
-            
-            if similar_rewards:
-                avg_reward = sum(similar_rewards) / len(similar_rewards)
+        try:
+            # 1. บันทึก reward history
+            rewards_col = db["rl_rewards"]
+            await rewards_col.insert_one({
+                "user_id": user_id,
+                "action_type": action_type,
+                "slot_name": slot_name,
+                "option_key": option_key,
+                "reward": reward,
+                "context": context or {},
+                "created_at": datetime.utcnow().isoformat(),
+            })
+
+            # ตัด history เก่าออก (keep MAX_HISTORY ล่าสุด)
+            count = await rewards_col.count_documents({"user_id": user_id})
+            if count > self.MAX_HISTORY:
+                oldest = await rewards_col.find(
+                    {"user_id": user_id},
+                    {"_id": 1}
+                ).sort("created_at", 1).limit(count - self.MAX_HISTORY).to_list(length=count)
+                ids = [d["_id"] for d in oldest]
+                if ids:
+                    await rewards_col.delete_many({"_id": {"$in": ids}})
+
+            # 2. อัปเดต Q-value ด้วย Q-learning update rule:
+            #    Q(s,a) ← Q(s,a) + α * (r + γ * max_Q_next - Q(s,a))
+            #    เนื่องจาก travel booking เป็น episodic ไม่มี next state ที่ชัดเจน
+            #    ใช้ simplified: Q ← Q + α * (r - Q)
+            qtable_col = db["rl_qtable"]
+            existing = await qtable_col.find_one({
+                "user_id": user_id,
+                "slot_name": slot_name,
+                "option_key": option_key,
+            })
+
+            if existing:
+                old_q = existing.get("q_value", 0.0)
+                new_q = old_q + self.ALPHA * (reward - old_q)
+                await qtable_col.update_one(
+                    {"_id": existing["_id"]},
+                    {"$set": {
+                        "q_value": round(new_q, 4),
+                        "visit_count": existing.get("visit_count", 0) + 1,
+                        "last_updated": datetime.utcnow().isoformat(),
+                        "last_action": action_type,
+                    }}
+                )
             else:
-                # Use overall average if no similar states
-                avg_reward = sum(r.reward_value for r in self.reward_history) / len(self.reward_history)
-        else:
-            # No history yet, use default optimistic estimate
-            avg_reward = 0.1  # Small positive default
-        
-        # Calculate discounted sum: Σ_{k=0}^{T-t} γ^k * avg_reward
-        for k in range(self.T - time_step):
-            discounted_reward = (self.gamma ** k) * avg_reward
-            expected_return += discounted_reward
-        
-        return expected_return
-    
-    def _is_similar_state(self, state1: Dict[str, Any], state2: Dict[str, Any]) -> bool:
-        """Check if two states are similar"""
-        # Compare key features
-        key_features = ["slot_name", "destination", "trip_type"]
-        for feature in key_features:
-            if state1.get(feature) != state2.get(feature):
-                return False
-        return True
-    
-    def record_reward(
+                await qtable_col.insert_one({
+                    "user_id": user_id,
+                    "slot_name": slot_name,
+                    "option_key": option_key,
+                    "q_value": round(reward * self.ALPHA, 4),
+                    "visit_count": 1,
+                    "last_updated": datetime.utcnow().isoformat(),
+                    "last_action": action_type,
+                })
+
+            logger.info(
+                f"🧠 RL: user={user_id[:8]} action={action_type} "
+                f"slot={slot_name} reward={reward:+.2f} key={option_key[:30]}"
+            )
+
+        except Exception as e:
+            logger.warning(f"RL record_reward error: {e}")
+
+    # ------------------------------------------------------------------
+    # Get Q-scores for a list of options → ใช้ rank ใน Agent Mode
+    # ------------------------------------------------------------------
+    async def get_option_scores(
         self,
-        action_type: str,
+        user_id: str,
         slot_name: str,
-        option_index: int,
-        context: Optional[Dict[str, Any]] = None
-    ):
+        options: List[Any],
+    ) -> List[float]:
         """
-        บันทึก reward จาก user interaction
-        
-        Args:
-            action_type: Type of action
-            slot_name: Slot name
-            option_index: Option index
-            context: Additional context
+        คืน RL score สำหรับแต่ละ option (index ตรงกับ options list)
+        score > 0 = user เคยชอบ option แบบนี้
+        score < 0 = user เคยปฏิเสธ/ยกเลิก
+        score = 0 = ไม่มีข้อมูล
         """
-        reward_value = RewardFunction.calculate_reward(
-            action_type, slot_name, option_index, context
-        )
-        
-        reward_signal = RewardSignal(
-            timestamp=datetime.utcnow(),
-            action_type=action_type,
-            slot_name=slot_name,
-            option_index=option_index,
-            reward_value=reward_value,
-            context=context or {}
-        )
-        
-        self.reward_history.append(reward_signal)
-        
-        # Keep only last T rounds
-        if len(self.reward_history) > self.T:
-            self.reward_history = self.reward_history[-self.T:]
-        
-        self.logger.info(
-            f"RL: Recorded reward {reward_value:.2f} for {action_type} "
-            f"on {slot_name}[{option_index}]"
-        )
-    
-    def get_expected_return_for_option(
+        if not user_id or not options:
+            return [0.0] * len(options)
+
+        db = self._get_db()
+        if db is None:
+            return [0.0] * len(options)
+
+        try:
+            keys = [self._option_key(slot_name, opt) for opt in options]
+            qtable_col = db["rl_qtable"]
+            docs = await qtable_col.find(
+                {"user_id": user_id, "slot_name": slot_name, "option_key": {"$in": keys}}
+            ).to_list(length=len(keys))
+
+            q_map = {d["option_key"]: d["q_value"] for d in docs}
+            return [q_map.get(k, 0.0) for k in keys]
+
+        except Exception as e:
+            logger.warning(f"RL get_option_scores error: {e}")
+            return [0.0] * len(options)
+
+    # ------------------------------------------------------------------
+    # Build RL context string สำหรับ inject เข้า LLM prompt
+    # ------------------------------------------------------------------
+    async def build_rl_context(
         self,
+        user_id: str,
         slot_name: str,
-        option_index: int,
-        state: Dict[str, Any]
-    ) -> float:
+        options: List[Any],
+    ) -> str:
         """
-        คำนวณ expected return สำหรับ option นี้
-        
-        Args:
-            slot_name: Slot name
-            option_index: Option index
-            state: Current state
-            
-        Returns:
-            Expected return value
+        สร้าง context string ที่บอก LLM ว่า user เคยชอบ/ไม่ชอบ option แบบไหน
         """
-        # Create context for this option
-        option_state = {
-            **state,
-            "slot_name": slot_name,
-            "option_index": option_index
-        }
-        
-        return self.calculate_expected_return(option_state)
-    
-    def get_reward_statistics(self) -> Dict[str, Any]:
-        """Get statistics about reward history"""
-        if not self.reward_history:
+        if not user_id:
+            return ""
+
+        scores = await self.get_option_scores(user_id, slot_name, options)
+
+        lines = []
+        for i, (opt, score) in enumerate(zip(options, scores)):
+            if abs(score) < 0.01:
+                continue  # ไม่มีข้อมูล ข้ามไป
+            label = "✅ user เคยชอบ/เลือก" if score > 0 else "❌ user เคยปฏิเสธ/ยกเลิก"
+            name = ""
+            if isinstance(opt, dict):
+                name = opt.get("display_name") or opt.get("name") or opt.get("flight_number", f"option {i}")
+            lines.append(f"  - Option {i} ({name}): {label} (score={score:+.3f})")
+
+        if not lines:
+            return ""
+
+        return (
+            "\n=== 🧠 RL USER PREFERENCE HISTORY ===\n"
+            "Based on this user's past behavior:\n"
+            + "\n".join(lines)
+            + "\nUse this to BOOST options the user historically preferred and AVOID ones they rejected.\n"
+        )
+
+    # ------------------------------------------------------------------
+    # Get user stats (สำหรับ debug / admin)
+    # ------------------------------------------------------------------
+    async def get_user_stats(self, user_id: str) -> Dict:
+        db = self._get_db()
+        if db is None:
+            return {}
+        try:
+            rewards_col = db["rl_rewards"]
+            qtable_col = db["rl_qtable"]
+            total_rewards = await rewards_col.count_documents({"user_id": user_id})
+            qtable_entries = await qtable_col.count_documents({"user_id": user_id})
+            recent = await rewards_col.find(
+                {"user_id": user_id}
+            ).sort("created_at", -1).limit(10).to_list(length=10)
+            avg_reward = 0.0
+            if recent:
+                avg_reward = sum(r.get("reward", 0) for r in recent) / len(recent)
             return {
-                "total_rewards": 0,
-                "average_reward": 0.0,
-                "positive_rewards": 0,
-                "negative_rewards": 0
+                "total_reward_records": total_rewards,
+                "qtable_entries": qtable_entries,
+                "recent_avg_reward": round(avg_reward, 3),
             }
-        
-        rewards = [r.reward_value for r in self.reward_history]
-        positive = sum(1 for r in rewards if r > 0)
-        negative = sum(1 for r in rewards if r < 0)
-        
-        return {
-            "total_rewards": len(self.reward_history),
-            "average_reward": sum(rewards) / len(rewards),
-            "positive_rewards": positive,
-            "negative_rewards": negative,
-            "positive_ratio": positive / len(self.reward_history) if self.reward_history else 0.0
-        }
+        except Exception as e:
+            logger.warning(f"RL get_user_stats error: {e}")
+            return {}
 
 
-# Global RL instance
-_rl_learner: Optional[ReinforcementLearner] = None
+# ---------------------------------------------------------------------------
+# Backward-compat shim: keep get_rl_learner() working for old call sites
+# ---------------------------------------------------------------------------
+class _LegacyShim:
+    """Thin wrapper ให้ old code ที่ call get_rl_learner().record_reward() ยังทำงานได้
+    แต่ไม่ทำอะไร (ถูกแทนที่ด้วย RLService.record_reward ที่ async แล้ว)"""
+    def record_reward(self, action_type, slot_name, option_index, context=None):
+        logger.debug(f"RL legacy shim: {action_type} {slot_name}[{option_index}] — use RLService instead")
 
-def get_rl_learner() -> ReinforcementLearner:
-    """Get or create global RL learner instance"""
-    global _rl_learner
-    if _rl_learner is None:
-        _rl_learner = ReinforcementLearner(discount_factor=0.9, total_rounds=10)
-    return _rl_learner
+
+_legacy_shim = _LegacyShim()
+
+
+def get_rl_learner() -> _LegacyShim:
+    """Backward compat — returns shim. New code should use get_rl_service()."""
+    return _legacy_shim
+
+
+# Singleton RLService
+_rl_service: Optional[RLService] = None
+
+
+def get_rl_service() -> RLService:
+    """Get singleton RLService instance"""
+    global _rl_service
+    if _rl_service is None:
+        _rl_service = RLService()
+    return _rl_service

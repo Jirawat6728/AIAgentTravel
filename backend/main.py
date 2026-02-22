@@ -63,6 +63,11 @@ async def lifespan(app: FastAPI):
         logger.warning("⚠️  Gemini is disabled (ENABLE_GEMINI=false)")
     
     logger.info("="*60)
+
+    # ✅ Validate required config on startup
+    config_warnings = settings.validate()
+    if config_warnings:
+        logger.warning(f"[startup] มีการตั้งค่าที่ขาด/ผิดพลาด {len(config_warnings)} รายการ — ดูรายละเอียดด้านบน")
     
     # Store connection managers for health checks
     app.state.mongo_mgr = None
@@ -246,11 +251,12 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
     
     async def dispatch(self, request: Request, call_next):
         try:
-            # ✅ Optimized timeouts: 90 seconds for chat (1.5 minute target), 60 for amadeus-viewer/search, 30 for others
+            # ✅ Timeout ดึงจาก settings เพื่อให้ตรงกับ timeout ใน chat.py
+            # chat_middleware_timeout = chat_timeout_agent + 15s (buffer)
             if request.url.path.startswith("/api/chat"):
-                timeout = 90  # ✅ Changed from 60s to 90s for 1.5-minute search completion target
+                timeout = settings.chat_middleware_timeout
             elif request.url.path.startswith("/api/amadeus-viewer/search"):
-                timeout = 60  # 1 minute timeout for Amadeus search (optimized for speed)
+                timeout = 60
             else:
                 timeout = 30
             
@@ -304,22 +310,34 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(ErrorLoggingMiddleware)
 
-# Rate Limiting Middleware
+def _cors_headers_for_request(request: Request) -> dict:
+    """Add CORS headers so browser can read error responses (e.g. 429) from middlewares that run before CORSMiddleware."""
+    origin = request.headers.get("origin") or ""
+    allow_origin = origin if origin in _cors_origins else (_cors_origins[0] if _cors_origins else "*")
+    return {
+        "Access-Control-Allow-Origin": allow_origin,
+        "Access-Control-Allow-Credentials": "true",
+    }
+
+
+# Rate Limiting Middleware (merged from root: Select appropriate rate limiter based on path)
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Middleware to enforce rate limits"""
-    
+
     async def dispatch(self, request: Request, call_next):
         # Get client identifier
         client_ip = request.client.host if request.client else "unknown"
-        
-        # Select appropriate rate limiter based on path
-        if request.url.path.startswith("/api/chat"):
+
+        # GET /api/chat/history (preload) ใช้ api limiter เพื่อไม่ให้กินโควต้า chat และลดโอกาส 429
+        if request.method == "GET" and "/api/chat/" in request.url.path and "/history" in request.url.path:
+            limiter = api_rate_limiter
+        elif request.url.path.startswith("/api/chat"):
             limiter = chat_rate_limiter
         elif request.url.path.startswith("/api/booking/payment"):
             limiter = payment_rate_limiter
         else:
             limiter = api_rate_limiter
-        
+
         # Check rate limit (support both sync and async rate limiters)
         if hasattr(limiter, 'is_allowed_async'):
             is_allowed, remaining = await limiter.is_allowed_async(client_ip)
@@ -327,9 +345,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             is_allowed, remaining = await limiter.is_allowed(client_ip)
         else:
             is_allowed, remaining = limiter.is_allowed(client_ip)
-        
+
         if not is_allowed:
             logger.warning(f"Rate limit exceeded for {client_ip} on {request.url.path}")
+            headers = {"Retry-After": "60", **_cors_headers_for_request(request)}
             return JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 content={
@@ -337,7 +356,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     "message": "Too many requests. Please try again later.",
                     "retry_after": 60
                 },
-                headers={"Retry-After": "60"}
+                headers=headers
             )
         
         # Add rate limit headers

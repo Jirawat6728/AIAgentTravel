@@ -189,16 +189,32 @@ class AmadeusMCP:
             departure_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
             logger.info(f"📅 No departure_date provided, using default: {departure_date}")
 
-        logger.info(f"🔍 Searching flights: {origin} → {destination} on {departure_date} for {adults} adult(s)")
+        # ✅ บินตรง: ใช้ non_stop จาก params (เมื่อผู้ใช้ขอ "บินตรง" / direct)
+        non_stop = params.get("non_stop") is True or params.get("direct_flight") is True
+        logger.info(f"🔍 Searching flights: {origin} → {destination} on {departure_date} for {adults} adult(s) (non_stop={non_stop})")
 
         try:
             results = await self.orchestrator.get_flights(
                 origin=origin,
                 destination=destination,
                 departure_date=departure_date,
-                adults=adults
+                adults=adults,
+                non_stop=non_stop,
             )
             logger.info(f"📊 Amadeus API returned {len(results) if results else 0} flight results")
+
+            # ✅ Validate: ถ้าขอบินตรง ให้กรองเฉพาะเที่ยวบินที่จริงๆ เป็น non-stop (ป้องกัน API คืนต่อเครื่องมา)
+            if non_stop and results:
+                def _is_non_stop_offer(offer: dict) -> bool:
+                    itins = offer.get("itineraries") or []
+                    for itin in itins:
+                        if len(itin.get("segments") or []) > 1:
+                            return False
+                    return True
+                before = len(results)
+                results = [r for r in results if _is_non_stop_offer(r)]
+                if before > len(results):
+                    logger.warning(f"✅ Validated non-stop: filtered out {before - len(results)} connecting offers (kept {len(results)} direct)")
 
             if not results or len(results) == 0:
                 try:
@@ -244,7 +260,8 @@ class AmadeusMCP:
                     "origin": origin,
                     "destination": destination,
                     "date": departure_date,
-                    "adults": adults
+                    "adults": adults,
+                    "non_stop": non_stop,
                 }
             }
         except Exception as e:

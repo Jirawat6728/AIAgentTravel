@@ -1,5 +1,188 @@
 /* ========== Theme: Content Area Only (ไม่รวม header) ========== */
 
+[data-theme="light"] {
+  --content-bg: #f8fafc;
+  --content-bg-card: #ffffff;
+  --content-bg-hover: #f1f5f9;
+  --content-text: #1e293b;
+  --content-text-muted: #64748b;
+  --content-border: #e2e8f0;
+  --content-accent: #2563eb;
+}
+
+/* Chat Light Theme — พื้นหลังไล่สีน้ำเงิน → ม่วง กล่องแชทขาว */
+[data-theme="light"].chat-container {
+  background: linear-gradient(135deg, #3b5fc0 0%, #5b54c4 30%, #8b6fd4 65%, #a78bda 100%) !important;
+}
+
+[data-theme="light"].chat-main {
+  background: transparent !important;
+}
+
+/* กล่องแชทหลัก — ขาว */
+[data-theme="light"] .chat-box {
+  background: #ffffff !important;
+  border-color: #e2e8f0 !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2) !important;
+}
+
+/* Sidebar — ขาว */
+[data-theme="light"] .trip-sidebar {
+  background: #ffffff !important;
+  border-color: #e2e8f0 !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15) !important;
+}
+
+[data-theme="light"] .trip-sidebar-title {
+  color: #1e293b !important;
+}
+
+[data-theme="light"] .trip-sidebar-header {
+  color: #1e293b !important;
+  border-bottom-color: #e2e8f0 !important;
+}
+
+[data-theme="light"] .trip-item {
+  background: #f8fafc !important;
+  border-color: #e2e8f0 !important;
+  color: #374151 !important;
+}
+
+[data-theme="light"] .trip-item:hover,
+[data-theme="light"] .trip-item-active {
+  background: #eff6ff !important;
+  color: #1e40af !important;
+}
+
+[data-theme="light"] .trip-item-title {
+  color: #374151 !important;
+}
+
+[data-theme="light"] .trip-item-meta,
+[data-theme="light"] .trip-item-date,
+[data-theme="light"] .trip-item-sub {
+  color: #6b7280 !important;
+  opacity: 1 !important;
+}
+
+/* พื้นที่ข้อความ */
+[data-theme="light"] .messages-area {
+  background: #f8fafc !important;
+}
+
+/* กล่องข้อความ bot */
+[data-theme="light"] .message-bot {
+  background: #ffffff !important;
+  border-color: #e2e8f0 !important;
+  color: #1e293b !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06) !important;
+}
+
+[data-theme="light"] .message-bot:hover {
+  border-color: #cbd5e1 !important;
+}
+
+[data-theme="light"] .message-bot .message-text,
+[data-theme="light"] .message-bot .message-content {
+  color: #1e293b !important;
+}
+
+[data-theme="light"] .message-user .message-text,
+[data-theme="light"] .message-user .message-content,
+[data-theme="light"] .message-user * {
+  color: #ffffff !important;
+}
+
+[data-theme="light"] .message-bubble:has(.plan-choices-grid) .message-text,
+[data-theme="light"] .message-bubble:has(.plan-choices-block) .message-text {
+  background: #f1f5f9 !important;
+  color: #1e293b !important;
+}
+
+/* ช่องพิมพ์ข้อความ */
+[data-theme="light"] .input-area {
+  background: #ffffff !important;
+  border-top-color: #e2e8f0 !important;
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.04) !important;
+}
+
+[data-theme="light"] .input-field {
+  background: #f8fafc !important;
+  border-color: #e2e8f0 !important;
+  color: #1e293b !important;
+}
+
+[data-theme="light"] .input-field::placeholder {
+  color: #9ca3af !important;
+}
+
+[data-theme="light"] .input-field:focus {
+  border-color: #2563eb !important;
+  background: #ffffff !important;
+}
+
+/* ปุ่ม sidebar */
+[data-theme="light"] .trip-new-btn {
+  background: #2563eb !important;
+  color: #ffffff !important;
+  border-color: #2563eb !important;
+}
+
+[data-theme="light"] .trip-new-btn:hover {
+  background: #1d4ed8 !important;
+}
+
+/* Settings Light Theme */
+[data-theme="light"].settings-content-area {
+  background-color: #f5f5f5;
+}
+
+[data-theme="light"] .settings-sidebar,
+[data-theme="light"] .settings-content {
+  background: #ffffff;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+[data-theme="light"] .settings-sidebar h2,
+[data-theme="light"] .settings-section h3,
+[data-theme="light"] .settings-item label {
+  color: #333333;
+}
+
+[data-theme="light"] .settings-item-label small {
+  color: #666666;
+}
+
+[data-theme="light"] .settings-nav-item {
+  color: #666666;
+}
+
+[data-theme="light"] .settings-nav-item:hover {
+  background-color: #f5f5f5;
+  color: #333333;
+}
+
+[data-theme="light"] .settings-nav-item.active {
+  background-color: #1e40af;
+  color: #ffffff;
+}
+
+[data-theme="light"] .settings-content .settings-item-control span {
+  color: #1e293b;
+}
+
+[data-theme="light"] .settings-content .settings-item-control .btn-link {
+  color: #1e40af;
+}
+
+[data-theme="light"] .form-select,
+[data-theme="light"] .form-input,
+[data-theme="light"] .form-textarea {
+  background: #ffffff;
+  border-color: #e2e8f0;
+  color: #1e293b;
+}
+
 [data-theme="dark"] {
   --content-bg: #1e1e2e;
   --content-bg-card: #2d2d3d;
@@ -119,6 +302,11 @@
 [data-theme="dark"] .trip-sidebar .trip-sidebar-title,
 [data-theme="dark"] .trip-sidebar .trip-item-title {
   color: var(--content-text);
+}
+
+[data-theme="dark"] .trip-sidebar .trip-item-sub {
+  color: rgba(255, 255, 255, 0.6) !important;
+  opacity: 1 !important;
 }
 
 [data-theme="dark"] .chat-messages-container {

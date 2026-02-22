@@ -8,21 +8,15 @@ export default function NotificationPanel({
   notifications = [],
   position = { right: 0, top: 0 },
   onNavigateToBookings = null,
-  onMarkAsRead = null  // ✅ New callback to sync with parent
+  onMarkAsRead = null,
+  onClearAll = null  // เรียกเมื่อกดล้างทั้งหมด (ให้ parent ทำ mark-all-read + refetch)
 }) {
-  const [activeTab, setActiveTab] = useState('all');
-  const [taskCategoryFilter, setTaskCategoryFilter] = useState('all'); // all | booking | email_confirm | add_info
   const [localNotifications, setLocalNotifications] = useState(notifications);
 
   // Update local notifications when prop changes
   React.useEffect(() => {
     setLocalNotifications(notifications);
   }, [notifications]);
-
-  // รีเซ็ต task category filter เมื่อเปลี่ยนไปแท็บอื่น
-  React.useEffect(() => {
-    if (activeTab !== 'tasks') setTaskCategoryFilter('all');
-  }, [activeTab]);
 
   const handleMarkAsRead = (id) => {
     // Update local state
@@ -41,22 +35,11 @@ export default function NotificationPanel({
     setLocalNotifications(prev => 
       prev.map(notif => ({ ...notif, isRead: true }))
     );
+    if (onClearAll) onClearAll();
   };
 
   const newNotifications = localNotifications.filter(n => !n.isRead);
   const previousNotifications = localNotifications.filter(n => n.isRead);
-
-  const taskNotifications = localNotifications.filter(n => n.type === 'task');
-  const taskFilteredByCategory =
-    taskCategoryFilter === 'all'
-      ? taskNotifications
-      : taskNotifications.filter(n => (n.taskCategory || 'add_info') === taskCategoryFilter);
-
-  const filteredNotifications = activeTab === 'all'
-    ? localNotifications
-    : activeTab === 'tasks'
-    ? taskFilteredByCategory
-    : localNotifications.filter(n => n.type === 'reminder');
 
   if (!isOpen) return null;
 
@@ -73,84 +56,26 @@ export default function NotificationPanel({
         {/* Header */}
         <div className="notification-panel-header">
           <div className="notification-panel-title">
-            <span>YOUR NOTIFICATIONS</span>
+            <span>แจ้งเตือนรวม</span>
             {newNotifications.length > 0 && (
-              <span className="notification-badge-new">{newNotifications.length} New</span>
+              <span className="notification-badge-new">{newNotifications.length} ใหม่</span>
             )}
           </div>
           <button className="notification-clear-all-btn" onClick={handleClearAll}>
-            X Clear All
+            ล้างทั้งหมด
           </button>
         </div>
 
-        {/* Tabs */}
-        <div className="notification-panel-tabs">
-          <button 
-            className={`notification-tab ${activeTab === 'all' ? 'active' : ''}`}
-            onClick={() => setActiveTab('all')}
-          >
-            VIEW ALL
-          </button>
-          <button 
-            className={`notification-tab ${activeTab === 'tasks' ? 'active' : ''}`}
-            onClick={() => setActiveTab('tasks')}
-          >
-            TASKS
-          </button>
-          <button 
-            className={`notification-tab ${activeTab === 'reminders' ? 'active' : ''}`}
-            onClick={() => setActiveTab('reminders')}
-          >
-            REMINDERS
-          </button>
-        </div>
-
-        {/* หมวดย่อยสำหรับ TASKS: การจองตั๋ว | ยืนยันอีเมลก่อนจอง | การเพิ่มข้อมูล */}
-        {activeTab === 'tasks' && (
-          <div className="notification-task-categories">
-            <button
-              className={`notification-task-cat-btn ${taskCategoryFilter === 'all' ? 'active' : ''}`}
-              onClick={() => setTaskCategoryFilter('all')}
-            >
-              ทั้งหมด
-            </button>
-            <button
-              className={`notification-task-cat-btn ${taskCategoryFilter === 'booking' ? 'active' : ''}`}
-              onClick={() => setTaskCategoryFilter('booking')}
-            >
-              การจองตั๋ว
-            </button>
-            <button
-              className={`notification-task-cat-btn ${taskCategoryFilter === 'email_confirm' ? 'active' : ''}`}
-              onClick={() => setTaskCategoryFilter('email_confirm')}
-            >
-              ยืนยันอีเมลก่อนจอง
-            </button>
-            <button
-              className={`notification-task-cat-btn ${taskCategoryFilter === 'add_info' ? 'active' : ''}`}
-              onClick={() => setTaskCategoryFilter('add_info')}
-            >
-              การเพิ่มข้อมูล
-            </button>
-          </div>
-        )}
-
-        {/* Content */}
+        {/* Content - แสดงการแจ้งเตือนที่ผ่านมาทั้งหมด */}
         <div className="notification-panel-content">
           {/* New Notifications */}
           {newNotifications.length > 0 && (
             <div className="notification-section">
+              <div className="notification-section-header">
+                <span>แจ้งเตือนใหม่</span>
+              </div>
               <div className="notification-list">
-                {newNotifications
-                  .filter(n => {
-                    if (activeTab === 'all') return true;
-                    if (activeTab === 'reminders') return n.type === 'reminder';
-                    if (activeTab === 'tasks' && n.type === 'task') {
-                      return taskCategoryFilter === 'all' || (n.taskCategory || 'add_info') === taskCategoryFilter;
-                    }
-                    return false;
-                  })
-                  .map((notification) => (
+                {newNotifications.map((notification) => (
                     <div 
                       key={notification.id} 
                       className="notification-item new"
@@ -191,9 +116,9 @@ export default function NotificationPanel({
                           e.stopPropagation();
                           handleMarkAsRead(notification.id);
                         }}
-                        title="Mark As Read"
+                        title="ทำเครื่องหมายว่าอ่านแล้ว"
                       >
-                        Mark As Read
+                        อ่านแล้ว
                       </button>
                     </div>
                   ))}
@@ -201,56 +126,47 @@ export default function NotificationPanel({
             </div>
           )}
 
-          {/* Previous Notifications */}
-          {previousNotifications.length > 0 && (
-            <div className="notification-section">
-              <div className="notification-section-header">
-                <span>PREVIOUS NOTIFICATIONS</span>
+          {/* การแจ้งเตือนที่ผ่านมา — แสดงเสมอ (มีหรือไม่มีรายการ) */}
+          <div className="notification-section">
+            <div className="notification-section-header">
+              <span>การแจ้งเตือนที่ผ่านมา</span>
+              {localNotifications.some(n => !n.isRead) && (
                 <button className="notification-clear-all-btn-small" onClick={handleClearAll}>
-                  X Clear All
+                  ล้างทั้งหมด
                 </button>
-              </div>
+              )}
+            </div>
+            {previousNotifications.length > 0 ? (
               <div className="notification-list">
-                {previousNotifications
-                  .filter(n => {
-                    if (activeTab === 'all') return true;
-                    if (activeTab === 'reminders') return n.type === 'reminder';
-                    if (activeTab === 'tasks' && n.type === 'task') {
-                      return taskCategoryFilter === 'all' || (n.taskCategory || 'add_info') === taskCategoryFilter;
-                    }
-                    return false;
-                  })
-                  .map((notification) => (
-                    <div key={notification.id} className="notification-item previous">
-                      <div className="notification-icon">
-                        {notification.type === 'task' ? (
-                          <div className="icon-task">✓</div>
-                        ) : (
-                          <div className="icon-bell">🔔</div>
-                        )}
-                      </div>
-                      <div className="notification-content">
-                        <div className="notification-text">{notification.message}</div>
-                        <div className="notification-time">
-                          <span className="time-icon">🕐</span>
-                          {notification.time}
-                        </div>
-                      </div>
-                      <div className="notification-actions">
-                        <button className="notification-action-btn">✕</button>
-                        <button className="notification-action-btn check">✓</button>
+                {previousNotifications.map((notification) => (
+                  <div key={notification.id} className="notification-item previous">
+                    <div className="notification-icon">
+                      {notification.type === 'task' ? (
+                        <div className="icon-task">✓</div>
+                      ) : (
+                        <div className="icon-bell">🔔</div>
+                      )}
+                    </div>
+                    <div className="notification-content">
+                      <div className="notification-text">{notification.message}</div>
+                      <div className="notification-time">
+                        <span className="time-icon">🕐</span>
+                        {notification.time}
                       </div>
                     </div>
-                  ))}
+                  </div>
+                ))}
               </div>
-            </div>
-          )}
+            ) : (
+              <p className="notification-empty-inline" style={{ margin: '8px 0', color: '#6b7280', fontSize: 14 }}>ยังไม่มีการแจ้งเตือนที่อ่านแล้ว</p>
+            )}
+          </div>
 
           {/* Empty State */}
-          {filteredNotifications.length === 0 && (
+          {localNotifications.length === 0 && (
             <div className="notification-empty">
               <div className="notification-empty-icon">🔔</div>
-              <div className="notification-empty-text">No notifications</div>
+              <div className="notification-empty-text">ยังไม่มีการแจ้งเตือน</div>
             </div>
           )}
         </div>

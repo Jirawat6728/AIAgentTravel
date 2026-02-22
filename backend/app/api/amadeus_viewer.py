@@ -170,32 +170,32 @@ def _fallback_extract_info(query: str) -> ExtractTravelInfoResponse:
 
 
 async def require_admin(request: Request) -> bool:
-    """Check if user is admin@example.com"""
-    # Get user from session cookie
+    """Check if user is admin (is_admin flag or email matches ADMIN_EMAIL)."""
     from app.core.config import settings
     from app.storage.mongodb_storage import MongoStorage
     from app.models.database import User
-    
+
     user_id = request.cookies.get(settings.session_cookie_name)
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    
+
     try:
         storage = MongoStorage()
         await storage.connect()
         users_collection = storage.db["users"]
         user_data = await users_collection.find_one({"user_id": user_id})
-        
+
         if not user_data:
             raise HTTPException(status_code=401, detail="User not found")
-        
+
         user = User(**user_data)
-        is_admin = user.is_admin if hasattr(user, 'is_admin') else False
-        is_admin_email = user.email == "admin@example.com"
-        
+        is_admin = getattr(user, "is_admin", False)
+        admin_email = getattr(settings, "admin_email", "admin@example.com") or "admin@example.com"
+        is_admin_email = (user.email or "").strip().lower() == (admin_email or "").strip().lower()
+
         if not (is_admin or is_admin_email):
             raise HTTPException(status_code=403, detail="Access denied. Admin only.")
-        
+
         return True
     except HTTPException:
         raise

@@ -168,7 +168,7 @@ class RedisStorage(StorageInterface):
             for item in items:
                 try:
                     messages.append(json.loads(item))
-                except:
+                except Exception:
                     continue
             return messages
         except Exception as e:

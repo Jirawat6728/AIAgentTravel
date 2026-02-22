@@ -1,10 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import Swal from 'sweetalert2';
 import { formatCardNumber, getCardType, validateCardNumber } from '../../utils/cardUtils';
-import { sha256Password } from '../../utils/passwordHash.js';
+import { loadOmiseScript, createTokenAsync } from '../../utils/omiseLoader';
+import { sha256Password, validatePasswordStrength } from '../../utils/passwordHash.js';
 import './SettingsPage.css';
 import AppHeader from '../../components/common/AppHeader';
 import { useTheme } from '../../context/ThemeContext';
+import { useLanguage } from '../../context/LanguageContext';
+import { useFontSize } from '../../context/FontSizeContext';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
@@ -76,6 +79,9 @@ export default function SettingsPage({
   onRefreshUser = null,
   onSendVerificationEmailSuccess = null
 }) {
+  const theme = useTheme();
+  const { t } = useLanguage();
+  const fontSize = useFontSize();
   const [activeSection, setActiveSection] = useState('account');
   const [settings, setSettings] = useState({
     // Account Settings
@@ -114,6 +120,11 @@ export default function SettingsPage({
   const [isSaving, setIsSaving] = useState(false);
   const [notificationSaveStatus, setNotificationSaveStatus] = useState(null);
   const [notificationSaveError, setNotificationSaveError] = useState(null);
+  const [privacySaveStatus, setPrivacySaveStatus] = useState(null);
+  const [privacySaveError, setPrivacySaveError] = useState(null);
+  const [aiSaveStatus, setAiSaveStatus] = useState(null);
+  const [aiSaveError, setAiSaveError] = useState(null);
+  const [themeSaveStatus, setThemeSaveStatus] = useState(null);
   const [showDeletePopup, setShowDeletePopup] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [changePasswordData, setChangePasswordData] = useState({
@@ -124,13 +135,6 @@ export default function SettingsPage({
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [showUpdateEmail, setShowUpdateEmail] = useState(false);
   const [newEmail, setNewEmail] = useState('');
-  // เปลี่ยนเบอร์โทร (OTP)
-  const [showChangePhone, setShowChangePhone] = useState(false);
-  const [newPhone, setNewPhone] = useState('');
-  const [phoneOtp, setPhoneOtp] = useState('');
-  const [phoneOtpSent, setPhoneOtpSent] = useState(false);
-  const [phoneOtpLoading, setPhoneOtpLoading] = useState(false);
-  const [phoneError, setPhoneError] = useState('');
   // บัตรเครดิต/เดบิต (saved cards)
   const [savedCards, setSavedCards] = useState([]);
   const [primaryCardId, setPrimaryCardId] = useState(null);
@@ -140,14 +144,22 @@ export default function SettingsPage({
   const [settingPrimaryId, setSettingPrimaryId] = useState(null);
 
   useEffect(() => {
-    // Load settings from user preferences
+    // Load settings from user preferences (ไม่ให้ preferences เขียนทับ emailVerified/authProvider — ใช้ค่าจาก backend เท่านั้น)
     if (user?.preferences) {
+      const { emailVerified: _ev, authProvider: _ap, ...prefs } = user.preferences;
       setSettings(prev => ({
         ...prev,
-        ...user.preferences
+        ...prefs,
+        emailVerified: user?.email_verified ?? prev.emailVerified,
+        authProvider: user?.auth_provider ?? prev.authProvider,
       }));
     }
   }, [user]);
+
+  // ดึง user ล่าสุดจาก backend ตอนเปิด Settings เพื่อให้สถานะยืนยันอีเมลตรงกับ DB
+  useEffect(() => {
+    if (user && onRefreshUser) onRefreshUser();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- รันครั้งเดียวตอนเปิดหน้า
 
   // Sync email_verified from Firebase when user is Firebase (after they verified via Firebase link)
   useEffect(() => {
@@ -179,10 +191,11 @@ export default function SettingsPage({
 
   // โหลดรายการบัตรเมื่อเปิดหมวดบัตรเครดิต/เดบิต
   useEffect(() => {
-    if (activeSection !== 'cards' || !user?.id) return;
+    const uid = user?.user_id || user?.id;
+    if (activeSection !== 'cards' || !uid) return;
     setCardsLoading(true);
     setCardsError(null);
-    const headers = { 'X-User-ID': user.id };
+    const headers = { 'X-User-ID': uid };
     fetch(`${API_BASE_URL}/api/booking/saved-cards`, { headers, credentials: 'include' })
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error('โหลดบัตรไม่สำเร็จ'))))
       .then((data) => {
@@ -191,7 +204,7 @@ export default function SettingsPage({
       })
       .catch((err) => setCardsError(err.message || 'โหลดบัตรไม่สำเร็จ'))
       .finally(() => setCardsLoading(false));
-  }, [activeSection, user?.id]);
+  }, [activeSection, user?.user_id, user?.id]);
 
 
   const handleClickAddCard = () => {
@@ -333,15 +346,29 @@ export default function SettingsPage({
     }).then(async (result) => {
       if (result.isConfirmed && result.value) {
         const { cardNumber, cardName, cardExpiry, cardCvv } = result.value;
-        const last4 = cardNumber.replace(/\s/g, '').slice(-4);
-        const brand = getCardType(cardNumber) || 'visa';
         const [mm, yy] = cardExpiry.split('/').map((p) => p.trim());
+        const num = cardNumber.replace(/\s/g, '');
         try {
-          const res = await fetch(`${API_BASE_URL}/api/booking/saved-cards/add-local`, {
+          await loadOmiseScript(API_BASE_URL);
+          if (!window.Omise) throw new Error('โหลดระบบบัตรไม่สำเร็จ');
+          const configRes = await fetch(`${API_BASE_URL}/api/booking/payment-config`, { credentials: 'include' });
+          const configData = configRes.ok ? await configRes.json() : {};
+          const pubKey = configData.public_key;
+          if (!pubKey) throw new Error('ไม่พบ Omise Public Key');
+          window.Omise.setPublicKey(pubKey);
+          const card = {
+            name: cardName,
+            number: num,
+            expiration_month: mm,
+            expiration_year: '20' + yy,
+            security_code: cardCvv,
+          };
+          const tokenResponse = await createTokenAsync(card);
+          const res = await fetch(`${API_BASE_URL}/api/booking/saved-cards`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-User-ID': user?.id || '' },
+            headers: { 'Content-Type': 'application/json', 'X-User-ID': user?.user_id || user?.id || '' },
             credentials: 'include',
-            body: JSON.stringify({ last4, brand, expiry_month: mm, expiry_year: yy, name: cardName })
+            body: JSON.stringify({ token: tokenResponse.id, email: (user?.email || '').trim() || undefined, name: cardName || undefined })
           });
           const data = await res.json();
           if (data.ok) {
@@ -349,7 +376,7 @@ export default function SettingsPage({
             if (data.primary_card_id !== undefined) setPrimaryCardId(data.primary_card_id);
             Swal.fire({ icon: 'success', title: 'บันทึกสำเร็จ', text: 'บัตรของคุณถูกบันทึกแล้ว', confirmButtonText: 'ตกลง' });
           } else {
-            throw new Error(data.detail || 'บันทึกไม่สำเร็จ');
+            throw new Error(data.detail || data.message || 'บันทึกไม่สำเร็จ');
           }
         } catch (err) {
           Swal.fire({ icon: 'error', title: 'เกิดข้อผิดพลาด', text: err.message || 'บันทึกบัตรไม่สำเร็จ', confirmButtonText: 'ตกลง' });
@@ -358,17 +385,41 @@ export default function SettingsPage({
     });
   };
 
+  const THEME_KEYS = ['fontSize', 'language'];
+  const AI_AGENT_KEYS = ['chatLanguage', 'responseStyle', 'detailLevel', 'reinforcementLearning', 'agentPersonality'];
+
   const handleSettingChange = (key, value) => {
-    setSettings(prev => ({
-      ...prev,
-      [key]: value
-    }));
+    const next = { ...settings, [key]: value };
+    setSettings(next);
+    if (key === 'language') {
+      localStorage.setItem('app_lang', value);
+      window.dispatchEvent(new CustomEvent('app-lang-change', { detail: value }));
+    }
+    if (key === 'fontSize') {
+      localStorage.setItem('app_font_size', value);
+      window.dispatchEvent(new CustomEvent('app-font-size-change', { detail: value }));
+    }
+    // Pick which section's status to update
+    const isThemeKey = THEME_KEYS.includes(key);
+    const setStatus = isThemeKey
+      ? (v) => { setThemeSaveStatus(v); if (v === 'saved') setTimeout(() => setThemeSaveStatus(null), 2000); }
+      : (v) => { setAiSaveStatus(v); if (v === 'saved') setTimeout(() => setAiSaveStatus(null), 2000); };
+    const setErr = isThemeKey ? () => {} : (v) => { setAiSaveError(v); };
+
+    setStatus(null);
+    savePreferencesToBackend(next).then(() => {
+      setStatus('saved');
+    }).catch((err) => {
+      setErr(err.message || 'บันทึกไม่สำเร็จ');
+      setStatus('error');
+      setTimeout(() => { setAiSaveStatus(null); setAiSaveError(null); setThemeSaveStatus(null); }, 3000);
+    });
   };
 
   const savePreferencesToBackend = async (prefs) => {
     const res = await fetch(`${API_BASE_URL}/api/auth/profile`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', ...(user?.id && { 'X-User-ID': user.id }) },
+      headers: { 'Content-Type': 'application/json', ...((user?.user_id || user?.id) && { 'X-User-ID': user?.user_id || user?.id }) },
       credentials: 'include',
       body: JSON.stringify({ preferences: prefs })
     });
@@ -381,8 +432,16 @@ export default function SettingsPage({
   const handleThemeChange = (value) => {
     const next = { ...settings, theme: value };
     setSettings(next);
-    savePreferencesToBackend(next).catch((err) => {
+    localStorage.setItem('app_theme', value);
+    window.dispatchEvent(new CustomEvent('app-theme-change', { detail: value }));
+    setThemeSaveStatus(null);
+    savePreferencesToBackend(next).then(() => {
+      setThemeSaveStatus('saved');
+      setTimeout(() => setThemeSaveStatus(null), 2000);
+    }).catch((err) => {
       console.error('Failed to save theme:', err);
+      setThemeSaveStatus('error');
+      setTimeout(() => setThemeSaveStatus(null), 3000);
     });
   };
 
@@ -399,12 +458,50 @@ export default function SettingsPage({
     });
   };
 
+  const handlePrivacyChange = (key, value) => {
+    const next = { ...settings, [key]: value };
+    setSettings(next);
+    setPrivacySaveStatus(null);
+    setPrivacySaveError(null);
+    savePreferencesToBackend(next).then(() => {
+      setPrivacySaveStatus('saved');
+      setTimeout(() => setPrivacySaveStatus(null), 2000);
+      if (onRefreshUser) onRefreshUser();
+      // Trigger auto-delete when enabled or when days change
+      const shouldAutoDelete = key === 'autoDeleteConversations' ? value : next.autoDeleteConversations;
+      if (shouldAutoDelete && (key === 'autoDeleteConversations' || key === 'autoDeleteDays')) {
+        const days = key === 'autoDeleteDays' ? value : (next.autoDeleteDays || 30);
+        triggerAutoDeleteConversations(days);
+      }
+    }).catch((err) => {
+      setPrivacySaveStatus('error');
+      setPrivacySaveError(err.message || 'บันทึกไม่สำเร็จ');
+      setTimeout(() => { setPrivacySaveStatus(null); setPrivacySaveError(null); }, 3000);
+    });
+  };
+
+  const triggerAutoDeleteConversations = async (days) => {
+    try {
+      const uid = user?.user_id || user?.id;
+      const headers = { 'Content-Type': 'application/json' };
+      if (uid) headers['X-User-ID'] = uid;
+      await fetch(`${API_BASE_URL}/api/chat/auto-delete-old`, {
+        method: 'POST',
+        headers,
+        credentials: 'include',
+        body: JSON.stringify({ older_than_days: days }),
+      });
+    } catch (e) {
+      console.warn('Auto-delete conversations failed:', e);
+    }
+  };
+
   const handleSaveSettings = async () => {
     setIsSaving(true);
     try {
       const res = await fetch(`${API_BASE_URL}/api/auth/profile`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', ...(user?.id && { 'X-User-ID': user.id }) },
+        headers: { 'Content-Type': 'application/json', ...((user?.user_id || user?.id) && { 'X-User-ID': user?.user_id || user?.id }) },
         credentials: 'include',
         body: JSON.stringify({
           preferences: settings
@@ -439,13 +536,17 @@ export default function SettingsPage({
   };
 
   const handleChangePassword = async () => {
+    if (!changePasswordData.currentPassword?.trim()) {
+      alert('กรุณากรอกรหัสผ่านปัจจุบัน');
+      return;
+    }
     if (changePasswordData.newPassword !== changePasswordData.confirmPassword) {
       alert('รหัสผ่านใหม่ไม่ตรงกัน');
       return;
     }
-    
-    if (changePasswordData.newPassword.length < 6) {
-      alert('รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร');
+    const strength = validatePasswordStrength(changePasswordData.newPassword);
+    if (!strength.valid) {
+      alert(strength.message);
       return;
     }
 
@@ -501,17 +602,16 @@ export default function SettingsPage({
       
       const data = await res.json();
       if (data.ok) {
-        const updatedEmail = data.email || newEmail;
         setNewEmail('');
         setShowUpdateEmail(false);
         if (onRefreshUser) {
           onRefreshUser();
         }
+        const successMessage = data.message || 'ส่งลิงก์ยืนยันการเปลี่ยนอีเมลแล้ว กรุณากดลิงก์ในอีเมลเพื่อเปลี่ยนอีเมลและยืนยัน';
         if (onUpdateEmailSuccess) {
-          onUpdateEmailSuccess(updatedEmail);
-        } else {
-          alert('ส่งอีเมลยืนยันไปยังอีเมลใหม่แล้ว กรุณาตรวจสอบอีเมล');
+          onUpdateEmailSuccess(data.pending_email || data.email || newEmail);
         }
+        alert(successMessage);
       } else {
         throw new Error(data.detail || 'Failed to update email');
       }
@@ -551,19 +651,20 @@ export default function SettingsPage({
         credentials: 'include'
       });
       
-      const data = await res.json();
-      if (data.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
         if (onSendVerificationEmailSuccess) {
           onSendVerificationEmailSuccess(data.email || user?.email);
         } else {
           alert('ส่งอีเมลยืนยันแล้ว กรุณาตรวจสอบอีเมล');
         }
       } else {
-        throw new Error(data.detail || 'Failed to send verification email');
+        const msg = data.detail || data.message || 'ไม่สามารถส่งอีเมลยืนยันได้';
+        throw new Error(typeof msg === 'string' ? msg : 'Failed to send verification email');
       }
     } catch (error) {
       console.error('Error sending verification email:', error);
-      alert(`เกิดข้อผิดพลาด: ${error.message}`);
+      alert(error.message || 'เกิดข้อผิดพลาดในการส่งอีเมลยืนยัน');
     }
   };
 
@@ -608,10 +709,11 @@ export default function SettingsPage({
   };
 
   const fetchSavedCards = () => {
-    if (!user?.id) return;
+    const uid = user?.user_id || user?.id;
+    if (!uid) return;
     setCardsLoading(true);
     setCardsError(null);
-    const headers = { 'X-User-ID': user.id };
+    const headers = { 'X-User-ID': uid };
     fetch(`${API_BASE_URL}/api/booking/saved-cards`, { headers, credentials: 'include' })
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error('โหลดบัตรไม่สำเร็จ'))))
       .then((data) => {
@@ -628,7 +730,7 @@ export default function SettingsPage({
     try {
       const res = await fetch(`${API_BASE_URL}/api/booking/saved-cards/${encodeURIComponent(cardId)}/set-primary`, {
         method: 'PUT',
-        headers: { 'X-User-ID': user.id },
+        headers: { 'X-User-ID': user?.user_id || user?.id },
         credentials: 'include',
       });
       const data = await res.json();
@@ -645,7 +747,7 @@ export default function SettingsPage({
     if (!user?.id || !cardId) return;
     setDeletingCardId(cardId);
     try {
-      const headers = { 'X-User-ID': user.id };
+      const headers = { 'X-User-ID': user?.user_id || user?.id };
       const res = await fetch(`${API_BASE_URL}/api/booking/saved-cards/${encodeURIComponent(cardId)}`, {
         method: 'DELETE',
         headers,
@@ -664,11 +766,11 @@ export default function SettingsPage({
 
   const renderAccountSettings = () => (
     <div className="settings-section">
-      <h3>การตั้งค่าบัญชี</h3>
+      <h3>{t('settings.account')}</h3>
       
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>เปลี่ยนรหัสผ่าน</label>
+          <label>{t('settings.changePassword')}</label>
         </div>
         <div className="settings-item-control">
           {!showChangePassword ? (
@@ -676,37 +778,37 @@ export default function SettingsPage({
               className="btn-secondary"
               onClick={() => setShowChangePassword(true)}
             >
-              เปลี่ยนรหัสผ่าน
+              {t('settings.changePassword')}
             </button>
           ) : (
             <div className="password-change-form">
               <input
                 type="password"
-                placeholder="รหัสผ่านปัจจุบัน"
+                placeholder={t('settings.currentPassword')}
                 value={changePasswordData.currentPassword}
                 onChange={(e) => setChangePasswordData(prev => ({ ...prev, currentPassword: e.target.value }))}
                 className="form-input"
               />
               <input
                 type="password"
-                placeholder="รหัสผ่านใหม่"
+                placeholder={t('settings.newPassword')}
                 value={changePasswordData.newPassword}
                 onChange={(e) => setChangePasswordData(prev => ({ ...prev, newPassword: e.target.value }))}
                 className="form-input"
               />
               <input
                 type="password"
-                placeholder="ยืนยันรหัสผ่านใหม่"
+                placeholder={t('settings.confirmNewPassword')}
                 value={changePasswordData.confirmPassword}
                 onChange={(e) => setChangePasswordData(prev => ({ ...prev, confirmPassword: e.target.value }))}
                 className="form-input"
               />
               <div className="form-actions">
                 <button className="btn-secondary" onClick={() => setShowChangePassword(false)}>
-                  ยกเลิก
+                  {t('settings.cancel')}
                 </button>
                 <button className="btn-primary" onClick={handleChangePassword} disabled={isSaving}>
-                  {isSaving ? 'กำลังบันทึก...' : 'บันทึก'}
+                  {isSaving ? t('settings.saving') : t('settings.save')}
                 </button>
               </div>
             </div>
@@ -716,8 +818,8 @@ export default function SettingsPage({
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>อัปเดตอีเมล</label>
-          <small>อีเมลปัจจุบัน: {user?.email}</small>
+          <label>{t('settings.updateEmail')}</label>
+          <small>{t('settings.currentEmail')} {user?.email}</small>
         </div>
         <div className="settings-item-control">
           {!showUpdateEmail ? (
@@ -725,23 +827,23 @@ export default function SettingsPage({
               className="btn-secondary"
               onClick={() => setShowUpdateEmail(true)}
             >
-              เปลี่ยนอีเมล
+              {t('settings.changeEmail')}
             </button>
           ) : (
             <div className="email-update-form">
               <input
                 type="email"
-                placeholder="อีเมลใหม่"
+                placeholder={t('settings.newEmail')}
                 value={newEmail}
                 onChange={(e) => setNewEmail(e.target.value)}
                 className="form-input"
               />
               <div className="form-actions">
                 <button className="btn-secondary" onClick={() => setShowUpdateEmail(false)}>
-                  ยกเลิก
+                  {t('settings.cancel')}
                 </button>
                 <button className="btn-primary" onClick={handleUpdateEmail} disabled={isSaving}>
-                  {isSaving ? 'กำลังบันทึก...' : 'บันทึก'}
+                  {isSaving ? t('settings.saving') : t('settings.save')}
                 </button>
               </div>
             </div>
@@ -751,22 +853,22 @@ export default function SettingsPage({
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>สถานะการยืนยันอีเมล</label>
+          <label>{t('settings.emailVerificationStatus')}</label>
           <small>
-            {settings.emailVerified ? (
-              <span style={{ color: 'green' }}>✓ ยืนยันแล้ว</span>
+            {(user?.email_verified === true) ? (
+              <span style={{ color: 'green' }}>{t('settings.verified')}</span>
             ) : (
-              <span style={{ color: '#6b7280' }}>ยังไม่ยืนยัน</span>
+              <span style={{ color: '#6b7280' }}>{t('settings.notVerified')}</span>
             )}
           </small>
         </div>
         <div className="settings-item-control">
-          {!settings.emailVerified && (
+          {user?.email_verified !== true && (
             <button 
               className="btn-secondary"
               onClick={handleSendVerificationEmail}
             >
-              ส่งอีเมลยืนยัน
+              {t('settings.sendVerification')}
             </button>
           )}
         </div>
@@ -774,152 +876,22 @@ export default function SettingsPage({
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>อัปเดตเบอร์โทรศัพท์</label>
-          <small>เบอร์ปัจจุบัน: {user?.phone || '—'}</small>
-        </div>
-        <div className="settings-item-control">
-          {!showChangePhone ? (
-            <button
-              className="btn-secondary"
-              onClick={() => {
-                setShowChangePhone(true);
-                setNewPhone('');
-                setPhoneOtp('');
-                setPhoneOtpSent(false);
-                setPhoneError('');
-              }}
-            >
-              เปลี่ยนเบอร์โทร
-            </button>
-          ) : (
-            <div className="phone-otp-flow" style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxWidth: '320px' }}>
-              {!phoneOtpSent ? (
-                <>
-                  <input
-                    type="tel"
-                    value={newPhone}
-                    onChange={(e) => setNewPhone(e.target.value)}
-                    placeholder="เบอร์ใหม่ เช่น 0812345678"
-                    className="form-input"
-                  />
-                  {phoneError && <small style={{ color: '#dc2626' }}>{phoneError}</small>}
-                  <div className="form-actions" style={{ display: 'flex', gap: '8px' }}>
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      disabled={phoneOtpLoading || !/^0[689]\d{8}$|^0[2-9]\d{7,8}$/.test(newPhone.replace(/[-\s()]/g, ''))}
-                      onClick={async () => {
-                        const cleaned = newPhone.replace(/[-\s()]/g, '');
-                        if (!/^0[689]\d{8}$|^0[2-9]\d{7,8}$/.test(cleaned)) {
-                          setPhoneError('รูปแบบเบอร์โทรไม่ถูกต้อง (เช่น 0812345678)');
-                          return;
-                        }
-                        setPhoneOtpLoading(true);
-                        setPhoneError('');
-                        try {
-                          const res = await fetch(`${API_BASE_URL}/api/auth/send-phone-otp`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            credentials: 'include',
-                            body: JSON.stringify({ new_phone: cleaned }),
-                          });
-                          const data = await res.json();
-                          if (res.ok && data.ok) {
-                            setPhoneOtpSent(true);
-                            setPhoneOtp('');
-                          } else {
-                            setPhoneError(data.detail || 'ส่ง OTP ไม่สำเร็จ');
-                          }
-                        } catch (err) {
-                          setPhoneError(err.message || 'ส่ง OTP ไม่สำเร็จ');
-                        } finally {
-                          setPhoneOtpLoading(false);
-                        }
-                      }}
-                    >
-                      {phoneOtpLoading ? 'กำลังส่ง...' : 'ส่ง OTP'}
-                    </button>
-                    <button type="button" className="btn-secondary" onClick={() => { setShowChangePhone(false); setNewPhone(''); setPhoneOtpSent(false); setPhoneError(''); }}>ยกเลิก</button>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <input
-                    type="text"
-                    value={phoneOtp}
-                    onChange={(e) => setPhoneOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                    placeholder="รหัส OTP 6 หลัก"
-                    className="form-input"
-                    maxLength={6}
-                  />
-                  {phoneError && <small style={{ color: '#dc2626' }}>{phoneError}</small>}
-                  <div className="form-actions" style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      disabled={phoneOtpLoading || phoneOtp.length !== 6}
-                      onClick={async () => {
-                        setPhoneOtpLoading(true);
-                        setPhoneError('');
-                        try {
-                          const res = await fetch(`${API_BASE_URL}/api/auth/verify-phone`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            credentials: 'include',
-                            body: JSON.stringify({ otp: phoneOtp }),
-                          });
-                          const data = await res.json();
-                          if (res.ok && data.ok) {
-                            setShowChangePhone(false);
-                            setNewPhone('');
-                            setPhoneOtp('');
-                            setPhoneOtpSent(false);
-                            if (onRefreshUser) onRefreshUser();
-                          } else {
-                            setPhoneError(data.detail || 'รหัส OTP ไม่ถูกต้อง');
-                          }
-                        } catch (err) {
-                          setPhoneError(err.message || 'ยืนยัน OTP ไม่สำเร็จ');
-                        } finally {
-                          setPhoneOtpLoading(false);
-                        }
-                      }}
-                    >
-                      {phoneOtpLoading ? 'กำลังยืนยัน...' : 'ยืนยัน OTP'}
-                    </button>
-                    <button type="button" className="btn-secondary" onClick={() => { setPhoneOtpSent(false); setPhoneOtp(''); setPhoneError(''); }}>ส่ง OTP ใหม่</button>
-                    <button type="button" className="btn-secondary" onClick={() => { setShowChangePhone(false); setNewPhone(''); setPhoneOtp(''); setPhoneOtpSent(false); setPhoneError(''); }}>ยกเลิก</button>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
+          <label>{t('settings.phoneNumber')}</label>
+          <small>{t('settings.currentPhone')} {user?.phone || '—'}</small>
         </div>
       </div>
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>เชื่อมต่อบัญชี</label>
-          <small>ผู้ให้บริการ: {settings.authProvider === 'google' ? 'Google' : settings.authProvider === 'firebase' ? 'Firebase' : 'Email/Password'}</small>
-        </div>
-        <div className="settings-item-control">
-          <button className="btn-secondary" disabled>
-            {settings.authProvider === 'google' || settings.authProvider === 'firebase' ? 'เชื่อมต่อแล้ว' : 'เชื่อมต่อ Google'}
-          </button>
-        </div>
-      </div>
-
-      <div className="settings-item">
-        <div className="settings-item-label">
-          <label>ลบบัญชี</label>
-          <small style={{ color: '#d32f2f' }}>⚠️ การลบบัญชีจะลบข้อมูลทั้งหมดอย่างถาวร</small>
+          <label>{t('settings.deleteAccount')}</label>
+          <small style={{ color: '#d32f2f' }}>{t('settings.deleteAccountWarning')}</small>
         </div>
         <div className="settings-item-control">
           <button 
             className="btn-danger"
             onClick={() => setShowDeletePopup(true)}
           >
-            ลบบัญชี
+            {t('settings.deleteAccount')}
           </button>
         </div>
       </div>
@@ -928,9 +900,9 @@ export default function SettingsPage({
 
   const renderNotifications = () => (
     <div className="settings-section">
-      <h3>การแจ้งเตือน</h3>
+      <h3>{t('settings.notificationsTitle')}</h3>
       {notificationSaveStatus === 'saved' && (
-        <p className="settings-save-feedback" style={{ color: '#22c55e', marginBottom: 12, fontSize: 14 }}>✓ บันทึกแล้ว</p>
+        <p className="settings-save-feedback" style={{ color: '#22c55e', marginBottom: 12, fontSize: 14 }}>{t('settings.savedLabel')}</p>
       )}
       {notificationSaveStatus === 'error' && notificationSaveError && (
         <p className="settings-save-feedback" style={{ color: '#ef4444', marginBottom: 12, fontSize: 14 }}>⚠ {notificationSaveError}</p>
@@ -938,7 +910,7 @@ export default function SettingsPage({
       
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>เปิด/ปิดการแจ้งเตือน</label>
+          <label>{t('settings.notifToggle')}</label>
         </div>
         <div className="settings-item-control">
           <label className="toggle-switch">
@@ -954,7 +926,7 @@ export default function SettingsPage({
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>การแจ้งเตือนการจอง</label>
+          <label>{t('settings.notifBooking')}</label>
         </div>
         <div className="settings-item-control">
           <label className="toggle-switch">
@@ -971,7 +943,7 @@ export default function SettingsPage({
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>การแจ้งเตือนสถานะการชำระเงิน</label>
+          <label>{t('settings.notifPayment')}</label>
         </div>
         <div className="settings-item-control">
           <label className="toggle-switch">
@@ -988,7 +960,7 @@ export default function SettingsPage({
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>การแจ้งเตือนการเปลี่ยนแปลงทริป</label>
+          <label>{t('settings.notifTrip')}</label>
         </div>
         <div className="settings-item-control">
           <label className="toggle-switch">
@@ -1005,7 +977,7 @@ export default function SettingsPage({
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>การแจ้งเตือนทางอีเมล</label>
+          <label>{t('settings.notifEmail')}</label>
         </div>
         <div className="settings-item-control">
           <label className="toggle-switch">
@@ -1024,36 +996,42 @@ export default function SettingsPage({
 
   const renderPrivacy = () => (
     <div className="settings-section">
-      <h3>ความเป็นส่วนตัว</h3>
-      
+      <h3>{t('settings.privacyTitle')}</h3>
+      {privacySaveStatus === 'saved' && (
+        <p className="settings-save-feedback" style={{ color: '#22c55e', marginBottom: 12, fontSize: 14 }}>{t('settings.savedLabel')}</p>
+      )}
+      {privacySaveStatus === 'error' && privacySaveError && (
+        <p className="settings-save-feedback" style={{ color: '#dc2626', marginBottom: 12, fontSize: 14 }}>{privacySaveError}</p>
+      )}
+
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>ระดับความเป็นส่วนตัว</label>
+          <label>{t('settings.privacyLevel')}</label>
+          <small>{t('settings.privacyLevelDesc')}</small>
         </div>
         <div className="settings-item-control">
           <select
-            value={settings.privacyLevel}
-            onChange={(e) => handleSettingChange('privacyLevel', e.target.value)}
+            value={settings.privacyLevel === 'standard' ? 'public' : settings.privacyLevel}
+            onChange={(e) => handlePrivacyChange('privacyLevel', e.target.value)}
             className="form-select"
           >
-            <option value="public">สาธารณะ</option>
-            <option value="standard">มาตรฐาน</option>
-            <option value="private">ส่วนตัว</option>
+            <option value="public">{t('settings.public')}</option>
+            <option value="private">{t('settings.private')}</option>
           </select>
         </div>
       </div>
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>การแชร์ข้อมูล</label>
-          <small>อนุญาตให้แชร์ข้อมูลเพื่อปรับปรุงบริการ</small>
+          <label>{t('settings.dataSharing')}</label>
+          <small>{t('settings.dataSharingDesc')}</small>
         </div>
         <div className="settings-item-control">
           <label className="toggle-switch">
             <input
               type="checkbox"
-              checked={settings.dataSharing}
-              onChange={(e) => handleSettingChange('dataSharing', e.target.checked)}
+              checked={!!settings.dataSharing}
+              onChange={(e) => handlePrivacyChange('dataSharing', e.target.checked)}
             />
             <span className="toggle-slider"></span>
           </label>
@@ -1062,14 +1040,15 @@ export default function SettingsPage({
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>การลบข้อมูลการสนทนา (Auto-delete)</label>
+          <label>{t('settings.autoDelete')}</label>
+          <small>{t('settings.autoDeleteDesc')}</small>
         </div>
         <div className="settings-item-control">
           <label className="toggle-switch">
             <input
               type="checkbox"
-              checked={settings.autoDeleteConversations}
-              onChange={(e) => handleSettingChange('autoDeleteConversations', e.target.checked)}
+              checked={!!settings.autoDeleteConversations}
+              onChange={(e) => handlePrivacyChange('autoDeleteConversations', e.target.checked)}
             />
             <span className="toggle-slider"></span>
           </label>
@@ -1079,15 +1058,18 @@ export default function SettingsPage({
       {settings.autoDeleteConversations && (
         <div className="settings-item">
           <div className="settings-item-label">
-            <label>ลบอัตโนมัติหลังจาก (วัน)</label>
+            <label>{t('settings.autoDeleteDays')}</label>
           </div>
           <div className="settings-item-control">
             <input
               type="number"
-              min="1"
-              max="365"
-              value={settings.autoDeleteDays}
-              onChange={(e) => handleSettingChange('autoDeleteDays', parseInt(e.target.value))}
+              min={1}
+              max={365}
+              value={settings.autoDeleteDays || 30}
+              onChange={(e) => {
+                const v = parseInt(e.target.value, 10);
+                if (!Number.isNaN(v)) handlePrivacyChange('autoDeleteDays', Math.max(1, Math.min(365, v)));
+              }}
               className="form-input"
               style={{ width: '100px' }}
             />
@@ -1099,11 +1081,17 @@ export default function SettingsPage({
 
   const renderAIAgent = () => (
     <div className="settings-section">
-      <h3>การตั้งค่า AI Agent</h3>
-      
+      <h3>{t('settings.aiTitle')}</h3>
+      {aiSaveStatus === 'saved' && (
+        <p className="settings-save-feedback" style={{ color: '#22c55e', marginBottom: 12, fontSize: 14 }}>{t('settings.savedLabel')}</p>
+      )}
+      {aiSaveStatus === 'error' && aiSaveError && (
+        <p className="settings-save-feedback" style={{ color: '#ef4444', marginBottom: 12, fontSize: 14 }}>⚠ {aiSaveError}</p>
+      )}
+
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>ภาษาในการสนทนา</label>
+          <label>{t('settings.conversationLang')}</label>
         </div>
         <div className="settings-item-control">
           <select
@@ -1113,14 +1101,14 @@ export default function SettingsPage({
           >
             <option value="th">ไทย</option>
             <option value="en">English</option>
-            <option value="auto">อัตโนมัติ</option>
+            <option value="auto">{t('settings.langAuto')}</option>
           </select>
         </div>
       </div>
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>รูปแบบการตอบกลับ</label>
+          <label>{t('settings.responseStyle')}</label>
         </div>
         <div className="settings-item-control">
           <select
@@ -1128,16 +1116,16 @@ export default function SettingsPage({
             onChange={(e) => handleSettingChange('responseStyle', e.target.value)}
             className="form-select"
           >
-            <option value="short">สั้น</option>
-            <option value="balanced">สมดุล</option>
-            <option value="long">ยาว</option>
+            <option value="short">{t('settings.styleShort')}</option>
+            <option value="balanced">{t('settings.styleBalanced')}</option>
+            <option value="long">{t('settings.styleLong')}</option>
           </select>
         </div>
       </div>
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>ระดับความละเอียดของคำแนะนำ</label>
+          <label>{t('settings.detailLevel')}</label>
         </div>
         <div className="settings-item-control">
           <select
@@ -1145,17 +1133,17 @@ export default function SettingsPage({
             onChange={(e) => handleSettingChange('detailLevel', e.target.value)}
             className="form-select"
           >
-            <option value="low">ต่ำ</option>
-            <option value="medium">ปานกลาง</option>
-            <option value="high">สูง</option>
+            <option value="low">{t('settings.levelLow')}</option>
+            <option value="medium">{t('settings.levelMedium')}</option>
+            <option value="high">{t('settings.levelHigh')}</option>
           </select>
         </div>
       </div>
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>เปิด/ปิด Reinforcement Learning</label>
-          <small>เรียนรู้จากพฤติกรรมผู้ใช้เพื่อปรับปรุงคำแนะนำ</small>
+          <label>{t('settings.rlToggle')}</label>
+          <small>{t('settings.rlDesc')}</small>
         </div>
         <div className="settings-item-control">
           <label className="toggle-switch">
@@ -1171,8 +1159,8 @@ export default function SettingsPage({
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>บุคลิก Agent</label>
-          <small>เลือกบุคลิกของ AI Agent ให้เข้ากับคุณ</small>
+          <label>{t('settings.agentPersonality')}</label>
+          <small>{t('settings.agentPersonalityDesc')}</small>
         </div>
         <div className="settings-item-control">
           <select
@@ -1193,18 +1181,18 @@ export default function SettingsPage({
 
   const renderCards = () => (
     <div className="settings-section settings-section-cards">
-      <h3>บัตรเครดิต/เดบิต</h3>
-      <p className="settings-cards-desc">จัดการบัตรสำหรับใช้ชำระเงินในระบบ — เพิ่มหรือลบบัตรได้ที่นี่</p>
-      {cardsLoading && <p className="settings-cards-loading">กำลังโหลดรายการบัตร...</p>}
+      <h3>{t('settings.cardsTitle')}</h3>
+      <p className="settings-cards-desc">{t('settings.cardsDesc')}</p>
+      {cardsLoading && <p className="settings-cards-loading">{t('settings.cardsLoading')}</p>}
       {cardsError && (
         <div className="settings-cards-error">
           <span>{cardsError}</span>
-          <button type="button" className="btn-secondary" onClick={fetchSavedCards}>โหลดใหม่</button>
+          <button type="button" className="btn-secondary" onClick={fetchSavedCards}>{t('settings.reload')}</button>
         </div> 
       )}  
       {!cardsLoading && savedCards.length > 0 && (
         <div className="settings-cards-list">
-          <h4>บัตรที่บันทึกไว้</h4>
+          <h4>{t('settings.savedCards')}</h4>
           <div className="settings-cards-scroll">
           <ul className="settings-cards-grid">
             {savedCards.map((c) => {
@@ -1217,15 +1205,15 @@ export default function SettingsPage({
                   <div className={`${cardClass} ${primaryCardId === (c.card_id || c.id) ? 'settings-card-primary' : ''}`}>
                     <div className="settings-card-visual-top">
                       {primaryCardId === (c.card_id || c.id) && (
-                        <span className="settings-card-primary-badge">บัตรหลัก</span>
+                        <span className="settings-card-primary-badge">{t('settings.primaryCard')}</span>
                       )}
                     </div>
                     <div className="settings-card-visual-mid">
                       <span className="settings-card-visual-number">•••• •••• •••• {c.last4 || '****'}</span>
-                      {c.name && <span className="settings-card-visual-name">{c.name}</span>}
+                      <span className="settings-card-visual-name">{c.name || '—'}</span>
                     </div>
                     <div className="settings-card-visual-bottom">
-                      <span className="settings-card-visual-expiry">หมดอายุ {c.expiry_month || '**'}/{c.expiry_year || '**'}</span>
+                      <span className="settings-card-visual-expiry">{t('settings.expires')} {c.expiry_month || '**'}/{c.expiry_year || '**'}</span>
                       <span className="settings-card-visual-logo"><CardBrandLogo brand={c.brand} /></span>
                     </div>
                   </div>
@@ -1237,16 +1225,29 @@ export default function SettingsPage({
                         onClick={() => handleSetPrimaryCard(c.card_id || c.id)}
                         disabled={settingPrimaryId === (c.card_id || c.id)}
                       >
-                        {settingPrimaryId === (c.card_id || c.id) ? 'กำลังตั้ง...' : 'ตั้งเป็นหลัก'}
+                        {settingPrimaryId === (c.card_id || c.id) ? t('settings.setting') : t('settings.setAsPrimary')}
                       </button>
                     )}
                     <button
                       type="button"
                       className="btn-secondary btn-delete-card"
-                      onClick={() => handleDeleteCard(c.card_id || c.id)}
+                      onClick={() => {
+                        Swal.fire({
+                          title: t('settings.confirmDelete'),
+                          text: t('settings.confirmDeleteCard'),
+                          icon: 'warning',
+                          showCancelButton: true,
+                          confirmButtonColor: '#d33',
+                          cancelButtonColor: '#3085d6',
+                          confirmButtonText: t('settings.delete'),
+                          cancelButtonText: t('settings.cancel'),
+                        }).then((result) => {
+                          if (result.isConfirmed) handleDeleteCard(c.card_id || c.id);
+                        });
+                      }}
                       disabled={deletingCardId === (c.card_id || c.id)}
                     >
-                      {deletingCardId === (c.card_id || c.id) ? 'กำลังลบ...' : 'ลบ'}
+                      {deletingCardId === (c.card_id || c.id) ? t('settings.deleting') : t('settings.delete')}
                     </button>
                   </div>
                 </li>
@@ -1259,13 +1260,13 @@ export default function SettingsPage({
 
       {!cardsLoading && (
         <div className="settings-cards-add">
-          <h4>เพิ่มบัตรใหม่</h4>
+          <h4>{t('settings.addNewCard')}</h4>
           <button
             type="button"
             className="btn-primary btn-add-card"
             onClick={handleClickAddCard}
           >
-            เพิ่มบัตร
+            {t('settings.addCard')}
           </button>
         </div>
       )}
@@ -1274,11 +1275,17 @@ export default function SettingsPage({
 
   const renderThemeDisplay = () => (
     <div className="settings-section">
-      <h3>ธีมและการแสดงผล</h3>
-      
+      <h3>{t('settings.theme')}</h3>
+      {themeSaveStatus === 'saved' && (
+        <p className="settings-save-feedback" style={{ color: '#22c55e', marginBottom: 12, fontSize: 14 }}>{t('settings.savedLabel')}</p>
+      )}
+      {themeSaveStatus === 'error' && (
+        <p className="settings-save-feedback" style={{ color: '#ef4444', marginBottom: 12, fontSize: 14 }}>⚠ {t('settings.errSave')}</p>
+      )}
+
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>โหมดสี</label>
+          <label>{t('settings.colorMode')}</label>
         </div>
         <div className="settings-item-control">
           <select
@@ -1286,16 +1293,16 @@ export default function SettingsPage({
             onChange={(e) => handleThemeChange(e.target.value)}
             className="form-select"
           >
-            <option value="light">สว่าง</option>
-            <option value="dark">มืด</option>
-            <option value="auto">อัตโนมัติ</option>
+            <option value="light">{t('settings.light')}</option>
+            <option value="dark">{t('settings.dark')}</option>
+            <option value="auto">{t('settings.auto')}</option>
           </select>
         </div>
       </div>
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>ขนาดตัวอักษร</label>
+          <label>{t('settings.fontSize')}</label>
         </div>
         <div className="settings-item-control">
           <select
@@ -1303,16 +1310,16 @@ export default function SettingsPage({
             onChange={(e) => handleSettingChange('fontSize', e.target.value)}
             className="form-select"
           >
-            <option value="small">เล็ก</option>
-            <option value="medium">ปานกลาง</option>
-            <option value="large">ใหญ่</option>
+            <option value="small">{t('settings.small')}</option>
+            <option value="medium">{t('settings.levelMedium')}</option>
+            <option value="large">{t('settings.large')}</option>
           </select>
         </div>
       </div>
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>ภาษา</label>
+          <label>{t('settings.language')}</label>
         </div>
         <div className="settings-item-control">
           <select
@@ -1330,11 +1337,11 @@ export default function SettingsPage({
 
   const renderAbout = () => (
     <div className="settings-section">
-      <h3>เกี่ยวกับ</h3>
+      <h3>{t('settings.aboutTitle')}</h3>
       
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>เวอร์ชันแอป</label>
+          <label>{t('settings.appVersion')}</label>
         </div>
         <div className="settings-item-control">
           <span>1.0.0</span>
@@ -1343,25 +1350,25 @@ export default function SettingsPage({
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>เงื่อนไขการใช้งาน</label>
+          <label>{t('settings.termsOfService')}</label>
         </div>
         <div className="settings-item-control">
-          <button className="btn-link">ดูเงื่อนไขการใช้งาน</button>
+          <button className="btn-link">{t('settings.viewTerms')}</button>
         </div>
       </div>
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>นโยบายความเป็นส่วนตัว</label>
+          <label>{t('settings.privacyPolicy')}</label>
         </div>
         <div className="settings-item-control">
-          <button className="btn-link">ดูนโยบายความเป็นส่วนตัว</button>
+          <button className="btn-link">{t('settings.viewPrivacy')}</button>
         </div>
       </div>
 
       <div className="settings-item">
         <div className="settings-item-label">
-          <label>ติดต่อผู้ดูแลระบบ</label>
+          <label>{t('settings.contactSupport')}</label>
         </div>
         <div className="settings-item-control">
           <a href="mailto:support@aitravelagent.com" className="btn-link">
@@ -1372,16 +1379,14 @@ export default function SettingsPage({
     </div>
   );
 
-  const theme = useTheme();
-
   const sections = [
-    { id: 'account', name: 'การตั้งค่าบัญชี', icon: '👤' },
-    { id: 'notifications', name: 'การแจ้งเตือน', icon: '🔔' },
-    { id: 'privacy', name: 'ความเป็นส่วนตัว', icon: '🔒' },
-    { id: 'ai-agent', name: 'การตั้งค่า AI Agent', icon: '🤖' },
-    { id: 'cards', name: 'บัตรเครดิต/เดบิต', icon: '💳' },
-    { id: 'theme', name: 'ธีมและการแสดงผล', icon: '🎨' },
-    { id: 'about', name: 'เกี่ยวกับ', icon: 'ℹ️' }
+    { id: 'account', name: t('settings.account'), icon: '👤' },
+    { id: 'notifications', name: t('settings.notifications'), icon: '🔔' },
+    { id: 'privacy', name: t('settings.privacy'), icon: '🔒' },
+    { id: 'ai-agent', name: t('settings.aiAgent'), icon: '🤖' },
+    { id: 'cards', name: t('settings.cards'), icon: '💳' },
+    { id: 'theme', name: t('settings.theme'), icon: '🎨' },
+    { id: 'about', name: t('settings.about'), icon: 'ℹ️' }
   ];
 
   return (
@@ -1399,10 +1404,10 @@ export default function SettingsPage({
         notificationCount={notificationCount}
       />
       
-      <div className="settings-content-area" data-theme={theme}>
+      <div className="settings-content-area" data-theme={theme} data-font-size={fontSize}>
       <div className="settings-container">
         <div className="settings-sidebar">
-          <h2>การตั้งค่า</h2>
+          <h2>{t('settings.title')}</h2>
           <nav className="settings-nav">
             {sections.map(section => (
               <button
@@ -1459,16 +1464,16 @@ export default function SettingsPage({
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 style={{ color: '#d32f2f', marginBottom: '16px' }}>🗑️ ลบบัญชี</h3>
+            <h3 style={{ color: '#d32f2f', marginBottom: '16px' }}>{t('settings.deleteAccountTitle')}</h3>
             <p style={{ color: '#666', marginBottom: '20px' }}>
-              การลบบัญชีจะลบข้อมูลทั้งหมดของคุณอย่างถาวร รวมถึง:
+              {t('settings.deleteAccountDesc')}
             </p>
             <ul style={{ marginBottom: '20px', paddingLeft: '20px', color: '#666' }}>
-              <li>ข้อมูลโปรไฟล์</li>
-              <li>ประวัติการจองทั้งหมด</li>
-              <li>ประวัติการสนทนา</li>
-              <li>ความจำและความชอบ</li>
-              <li>การแจ้งเตือนทั้งหมด</li>
+              <li>{t('settings.deleteItem1')}</li>
+              <li>{t('settings.deleteItem2')}</li>
+              <li>{t('settings.deleteItem3')}</li>
+              <li>{t('settings.deleteItem4')}</li>
+              <li>{t('settings.deleteItem5')}</li>
             </ul>
             <div style={{ 
               backgroundColor: '#fff3cd', 
@@ -1477,7 +1482,7 @@ export default function SettingsPage({
               padding: '12px', 
               marginBottom: '24px'
             }}>
-              <strong style={{ color: '#d32f2f' }}>⚠️ การกระทำนี้ไม่สามารถยกเลิกได้!</strong>
+              <strong style={{ color: '#d32f2f' }}>{t('settings.deleteIrreversible')}</strong>
             </div>
             <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
               <button
@@ -1485,14 +1490,14 @@ export default function SettingsPage({
                 disabled={isDeleting}
                 className="btn-secondary"
               >
-                ยกเลิก
+                {t('settings.cancel')}
               </button>
               <button
                 onClick={handleConfirmDeleteAccount}
                 disabled={isDeleting}
                 className="btn-danger"
               >
-                {isDeleting ? 'กำลังลบบัญชี...' : 'ยืนยันลบบัญชี'}
+                {isDeleting ? t('settings.deletingAccount') : t('settings.confirmDeleteAccount')}
               </button>
             </div>
           </div>

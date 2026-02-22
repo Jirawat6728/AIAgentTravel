@@ -257,6 +257,14 @@ async def create_booking(booking_request: BookingCreateRequest, fastapi_request:
                 detail="กรุณายืนยันอีเมลก่อนจึงจะจองได้ ไปที่ การตั้งค่า > สถานะการยืนยันอีเมล > ส่งอีเมลยืนยัน"
             )
         
+        # ✅ ประวัติ workflow: บันทึก summary → booking (ผู้ใช้กดยืนยันจอง)
+        _session_id = f"{user_id}::{booking_request.chat_id or booking_request.trip_id}"
+        try:
+            from app.services.workflow_history import append_workflow_event_fire_and_forget
+            append_workflow_event_fire_and_forget(_session_id, "summary", "booking")
+        except Exception:
+            pass
+        
         # ✅ Agent Mode: Still requires payment (Amadeus sandbox needs payment before booking)
         # Status is always "pending_payment" - user must pay first
         initial_status = "pending_payment"
@@ -320,9 +328,16 @@ async def create_booking(booking_request: BookingCreateRequest, fastapi_request:
         
         logger.info(f"Created booking: {booking_id} for user: {user_id} (status: {initial_status})")
         
+        session_id = f"{user_id}::{booking_request.chat_id or booking_request.trip_id}"
+        # ✅ ประวัติ workflow สำหรับ debug/analytics: บันทึก booking → done
+        try:
+            from app.services.workflow_history import append_workflow_event_fire_and_forget
+            append_workflow_event_fire_and_forget(session_id, "booking", "done", {"booking_id": booking_id, "status": initial_status})
+        except Exception as hist_err:
+            logger.debug(f"Workflow history append skip: {hist_err}")
+        
         # ✅ เคลียร์ Redis workflow + options + raw Amadeus เมื่อจองสำเร็จ (workflow เสร็จสิ้น)
         try:
-            session_id = f"{user_id}::{booking_request.chat_id or booking_request.trip_id}"
             from app.services.options_cache import get_options_cache
             from app.services.workflow_state import get_workflow_state_service
             options_cache = get_options_cache()
@@ -789,7 +804,7 @@ async def process_payment(
                     if len(booking_id) == 24:
                         try:
                             query_filter["_id"] = ObjectId(booking_id)
-                        except:
+                        except Exception:
                             query_filter["booking_id"] = booking_id
                     else:
                         query_filter["booking_id"] = booking_id
@@ -928,17 +943,17 @@ async def cancel_booking(
                 "_id": ObjectId(booking_id),
                 "user_id": user_id  # ✅ Filter by user_id FIRST
             })
-        except:
+        except Exception:
             booking = await bookings_collection.find_one({
                 "booking_id": booking_id,
                 "user_id": user_id  # ✅ Filter by user_id FIRST
             })
-        
+
         if not booking:
             # ✅ SECURITY: Don't reveal if booking exists but belongs to another user
             logger.warning(f"Booking not found or access denied: booking_id={booking_id}, user_id={user_id}")
             raise HTTPException(status_code=404, detail="Booking not found")
-        
+
         # ✅ SECURITY: Double-check user_id matches (additional safety layer)
         booking_user_id = booking.get("user_id")
         if booking_user_id != user_id:
@@ -990,7 +1005,28 @@ async def cancel_booking(
             logger.debug(f"Invalidated bookings cache for user: {user_id}")
         except Exception as cache_err:
             logger.debug(f"Failed to invalidate cache: {cache_err}")
-        
+
+        # ✅ Create trip_change notification for cancellation if user has it enabled
+        try:
+            from app.services.notification_preferences import should_create_in_app_notification
+            users_collection = storage.db["users"]
+            user_doc = await users_collection.find_one({"user_id": user_id})
+            if should_create_in_app_notification(user_doc, "trip_change"):
+                notifications_collection = storage.db.get_collection("notifications")
+                await notifications_collection.insert_one({
+                    "user_id": user_id,
+                    "type": "trip_change",
+                    "title": "ยกเลิกการจอง",
+                    "message": f"การจอง #{booking_id[:8]} ถูกยกเลิกเรียบร้อยแล้ว",
+                    "booking_id": booking_id,
+                    "read": False,
+                    "created_at": datetime.utcnow().isoformat(),
+                    "metadata": {"action": "cancelled"}
+                })
+                logger.info(f"Created cancellation notification for booking {booking_id}")
+        except Exception as notif_err:
+            logger.warning(f"Failed to create cancellation notification: {notif_err}")
+
         return {
             "ok": True,
             "message": "Booking cancelled successfully"
@@ -1096,7 +1132,7 @@ async def update_booking(
                 {"_id": ObjectId(booking_id), "user_id": user_id},  # ✅ Filter by user_id
                 {"$set": update_data}
             )
-        except:
+        except Exception:
             result = await bookings_collection.update_one(
                 {"booking_id": booking_id, "user_id": user_id},  # ✅ Filter by user_id
                 {"$set": update_data}
@@ -1116,14 +1152,36 @@ async def update_booking(
             logger.debug(f"Invalidated bookings cache for user: {user_id}")
         except Exception as cache_err:
             logger.debug(f"Failed to invalidate cache: {cache_err}")
-        
+
+        # ✅ Create trip_change notification if user has it enabled
+        try:
+            from app.services.notification_preferences import should_create_in_app_notification
+            users_collection = storage.db["users"]
+            user_doc = await users_collection.find_one({"user_id": user_id})
+            if should_create_in_app_notification(user_doc, "trip_change"):
+                notifications_collection = storage.db.get_collection("notifications")
+                changed_fields = [k for k in update_data.keys() if k != "updated_at"]
+                await notifications_collection.insert_one({
+                    "user_id": user_id,
+                    "type": "trip_change",
+                    "title": "อัปเดตการจอง",
+                    "message": f"การจอง #{booking_id[:8]} ได้รับการอัปเดตเรียบร้อยแล้ว",
+                    "booking_id": booking_id,
+                    "read": False,
+                    "created_at": datetime.utcnow().isoformat(),
+                    "metadata": {"changed_fields": changed_fields}
+                })
+                logger.info(f"Created trip_change notification for booking {booking_id}")
+        except Exception as notif_err:
+            logger.warning(f"Failed to create trip_change notification: {notif_err}")
+
         # ✅ SECURITY: Return updated booking with user_id filter
         try:
             updated_booking = await bookings_collection.find_one({
                 "_id": ObjectId(booking_id),
                 "user_id": user_id  # ✅ Filter by user_id
             })
-        except:
+        except Exception:
             updated_booking = await bookings_collection.find_one({
                 "booking_id": booking_id,
                 "user_id": user_id  # ✅ Filter by user_id
@@ -1325,15 +1383,16 @@ async def payment_page(
                 raise HTTPException(status_code=401, detail="Authentication required")
             
             # ✅ CRITICAL: Always query with user_id filter to prevent data leakage
+            booking = None
             try:
                 if len(booking_id) == 24:
                     booking = await bookings_collection.find_one({
                         "_id": ObjectId(booking_id),
                         "user_id": user_id  # ✅ Filter by user_id FIRST
                     })
-            except:
+            except Exception:
                 pass
-            
+
             if not booking:
                 booking = await bookings_collection.find_one({
                     "booking_id": booking_id,
@@ -1506,15 +1565,16 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
         booking = None
         
         # ✅ CRITICAL: Always query with user_id filter to prevent data leakage
+        booking = None
         try:
             if len(request.booking_id) == 24:
                 booking = await bookings_collection.find_one({
                     "_id": ObjectId(request.booking_id),
                     "user_id": user_id  # ✅ Filter by user_id FIRST
                 })
-        except:
+        except Exception:
             pass
-        
+
         if not booking:
             booking = await bookings_collection.find_one({
                 "booking_id": request.booking_id,
@@ -1630,6 +1690,7 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
                     logger.info(f"Charge created successfully for booking {request.booking_id}: {charge_data.get('id')}")
                     
                     # ✅ Invalidate bookings list cache for this user
+                    booking_for_cache = None
                     try:
                         booking_for_cache = await bookings_collection.find_one({"_id": ObjectId(request.booking_id)})
                         if not booking_for_cache:
@@ -1643,7 +1704,47 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
                                 logger.debug(f"Invalidated bookings cache for user: {user_id_for_cache}")
                     except Exception as cache_err:
                         logger.debug(f"Failed to invalidate cache after payment: {cache_err}")
-                    
+
+                    # ✅ Create payment_status notification if user has it enabled
+                    try:
+                        from app.services.notification_preferences import should_create_in_app_notification
+                        _bk = booking_for_cache
+                        if not _bk:
+                            try:
+                                _bk = await bookings_collection.find_one({"_id": ObjectId(request.booking_id)})
+                            except Exception:
+                                _bk = await bookings_collection.find_one({"booking_id": request.booking_id})
+                        if _bk:
+                            _uid = _bk.get("user_id")
+                            if _uid:
+                                users_collection = storage.db["users"]
+                                user_doc = await users_collection.find_one({"user_id": _uid})
+                                if should_create_in_app_notification(user_doc, "payment_status"):
+                                    is_paid = charge_data.get("paid", False)
+                                    notifications_collection = storage.db.get_collection("notifications")
+                                    await notifications_collection.insert_one({
+                                        "user_id": _uid,
+                                        "type": "payment_status",
+                                        "title": "ชำระเงินสำเร็จ" if is_paid else "การชำระเงินล้มเหลว",
+                                        "message": (
+                                            f"ชำระเงินสำเร็จสำหรับการจอง #{request.booking_id[:8]}"
+                                            if is_paid else
+                                            f"การชำระเงินสำหรับการจอง #{request.booking_id[:8]} ไม่สำเร็จ"
+                                        ),
+                                        "booking_id": request.booking_id,
+                                        "read": False,
+                                        "created_at": datetime.utcnow().isoformat(),
+                                        "metadata": {
+                                            "charge_id": charge_data.get("id"),
+                                            "paid": is_paid,
+                                            "amount": _bk.get("total_price"),
+                                            "currency": _bk.get("currency", "THB"),
+                                        }
+                                    })
+                                    logger.info(f"Created payment_status notification for booking {request.booking_id}")
+                    except Exception as notif_err:
+                        logger.warning(f"Failed to create payment notification: {notif_err}")
+
                     return {
                         "ok": True,
                         "message": "Payment successful",
@@ -1721,6 +1822,7 @@ class AddSavedCardRequest(BaseModel):
     """Request model for adding a saved card"""
     token: str = Field(..., description="Omise token from frontend (single-use)")
     email: Optional[str] = Field(None, description="Customer email (for Omise customer)")
+    name: Optional[str] = Field(None, description="Cardholder name (ชื่อผู้ถือบัตร)")
 
 
 class AddSavedCardLocalRequest(BaseModel):
@@ -1797,6 +1899,8 @@ async def add_saved_card(fastapi_request: Request, body: AddSavedCardRequest):
                     "expiry_month": str(new_card.get("expiration_month", "")),
                     "expiry_year": str(new_card.get("expiration_year", ""))[-2:],
                 }
+                if body.name and body.name.strip():
+                    card_info["name"] = body.name.strip()
                 await coll.update_one(
                     {"user_id": user_id},
                     {"$set": {"user_id": user_id, "omise_customer_id": customer_id, "updated_at": datetime.utcnow().isoformat()}, "$push": {"cards": card_info}},
@@ -1826,6 +1930,8 @@ async def add_saved_card(fastapi_request: Request, body: AddSavedCardRequest):
                     "expiry_month": str(new_card.get("expiration_month", "")),
                     "expiry_year": str(new_card.get("expiration_year", ""))[-2:],
                 }
+                if body.name and body.name.strip():
+                    card_info["name"] = body.name.strip()
                 await coll.update_one(
                     {"user_id": user_id},
                     {"$push": {"cards": card_info}, "$set": {"updated_at": datetime.utcnow().isoformat()}},

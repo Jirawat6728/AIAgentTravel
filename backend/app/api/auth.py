@@ -549,7 +549,8 @@ async def update_profile(request: Request, profile: ProfileUpdateRequest):
     """
     Update current user profile
     """
-    user_id = request.cookies.get(settings.session_cookie_name)
+    from app.core.security import extract_user_id_from_request
+    user_id = extract_user_id_from_request(request)
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
@@ -645,7 +646,8 @@ async def change_password(request: Request, password_data: dict):
 @router.post("/update-email")
 async def update_email(request: Request, email_data: dict):
     """
-    Update user email (requires verification)
+    ขอเปลี่ยนอีเมล: เก็บอีเมลใหม่แบบ pending ส่งลิงก์ยืนยันไปอีเมลใหม่
+    เมื่อผู้ใช้กดลิงก์ที่ /verify-email-change → อีเมลจะถูกอัปเดตใน MongoDB และยืนยันในครั้งเดียว
     """
     user_id = request.cookies.get(settings.session_cookie_name)
     if not user_id:
@@ -661,54 +663,51 @@ async def update_email(request: Request, email_data: dict):
         await storage.connect()
         users_collection = storage.db["users"]
         
-        # Check if email already exists
-        normalized_email = new_email.lower().strip()
-        existing_user = await users_collection.find_one({"email": normalized_email})
-        if existing_user:
-            existing_user_id = existing_user.get("user_id")
-            if existing_user_id != user_id:
-                raise HTTPException(status_code=400, detail="อีเมลนี้ถูกใช้งานแล้ว")
+        user_data = await users_collection.find_one({"user_id": user_id})
+        if not user_data:
+            raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้")
         
-        # Get email service
+        current_email = (user_data.get("email") or "").strip().lower()
+        if new_email == current_email:
+            raise HTTPException(status_code=400, detail="อีเมลใหม่เหมือนอีเมลปัจจุบัน")
+        
+        # Check if new email already used by another user
+        normalized_new = new_email.lower().strip()
+        existing_user = await users_collection.find_one({"email": normalized_new})
+        if existing_user and existing_user.get("user_id") != user_id:
+            raise HTTPException(status_code=400, detail="อีเมลนี้ถูกใช้งานแล้ว")
+        
         from app.services.email_service import get_email_service
         email_service = get_email_service()
-        
-        # Generate verification token
         verification_token = email_service.generate_verification_token()
         
-        # Update user with new email (unverified)
+        # เก็บ pending_new_email + token (ยังไม่เปลี่ยน email จนกว่าจะกดลิงก์)
         await users_collection.update_one(
             {"user_id": user_id},
             {
                 "$set": {
-                    "email": normalized_email,
-                    "email_verified": False,
+                    "pending_new_email": normalized_new,
                     "email_verification_token": verification_token,
-                    "email_verification_sent_at": datetime.utcnow()
+                    "email_verification_sent_at": datetime.utcnow(),
                 }
             }
         )
         
-        # Send verification email to new address (every time email is changed)
-        user_data = await users_collection.find_one({"user_id": user_id})
-        user_name = (user_data or {}).get("full_name") or (user_data or {}).get("first_name") or None
+        user_name = user_data.get("full_name") or user_data.get("first_name") or None
         try:
-            email_sent = email_service.send_verification_email(
-                normalized_email, verification_token, user_name=user_name
+            email_sent = email_service.send_email_change_verification(
+                normalized_new, verification_token, user_name=user_name
             )
             if email_sent:
-                logger.info(f"Verification email sent to {normalized_email} for user {user_id}")
-            else:
-                logger.warning(f"Verification email not sent (service not configured?) to {normalized_email}")
+                logger.info(f"Email change verification sent to {normalized_new} for user {user_id}")
         except Exception as email_error:
-            logger.error(f"Failed to send verification email: {email_error}", exc_info=True)
-            # Don't fail the request if email sending fails
-
+            logger.error(f"Failed to send email change verification: {email_error}", exc_info=True)
+        
         return {
             "ok": True,
-            "message": "กรุณายืนยันอีเมลในแอป (Firebase จะส่งลิงก์ยืนยันให้)",
-            "email": normalized_email,
-            "use_firebase": True,
+            "message": f"ส่งลิงก์ยืนยันการเปลี่ยนอีเมลไปที่ {normalized_new} แล้ว กรุณากดลิงก์ในอีเมลเพื่อเปลี่ยนอีเมลและยืนยัน",
+            "email": current_email,
+            "pending_email": normalized_new,
         }
     
     except HTTPException:
@@ -961,20 +960,22 @@ async def register(request: RegisterRequest, response: Response, raw_request: Re
             raise
         logger.info(f"Registered new user: {request.email}")
         
-        # Send verification email (ทุกเมล ยกเว้น admin)
+        # ส่งอีเมลยืนยันทันทีหลังลงทะเบียน (ทุกเมล ยกเว้น admin)
+        verification_email_sent = False
         if normalized_email != admin_email_normalized and email_verification_token:
             email_service = get_email_service()
             if email_service.is_configured:
                 user_name = f"{request.first_name} {request.last_name}"
                 email_sent = email_service.send_verification_email(
-                    to_email=request.email,
+                    to_email=normalized_email,
                     token=email_verification_token,
                     user_name=user_name
                 )
                 if email_sent:
-                    logger.info(f"✅ Verification email sent to {request.email}")
+                    logger.info(f"✅ Verification email sent to {normalized_email} (after registration)")
+                    verification_email_sent = True
                 else:
-                    logger.warning(f"⚠️ Failed to send verification email to {request.email}")
+                    logger.warning(f"⚠️ Failed to send verification email to {normalized_email}")
 
         # Create user response (without password hash)
         user = User(
@@ -998,7 +999,11 @@ async def register(request: RegisterRequest, response: Response, raw_request: Re
             samesite="lax",
             secure=False
         )
-        return {"ok": True, "user": user.model_dump()}
+        result = {"ok": True, "user": user.model_dump()}
+        if verification_email_sent:
+            result["verification_email_sent"] = True
+            result["message"] = f"ลงทะเบียนสำเร็จ ระบบได้ส่งอีเมลยืนยันไปที่ {normalized_email} แล้ว กรุณากดลิงก์ในอีเมลเพื่อยืนยัน (ลิงก์ใช้ได้ 24 ชั่วโมง)"
+        return result
 
     except HTTPException:
         raise
@@ -1499,12 +1504,12 @@ async def send_verification_email(request: Request):
                 "email_verified": True
             }
         
-        # Generate new verification token (เก็บใน DB สำหรับ /verify-email ถ้ามี custom flow)
+        # Generate new verification token (เก็บใน DB สำหรับ /verify-email)
         email_service = get_email_service()
         if not email_service.is_configured:
             raise HTTPException(
                 status_code=503,
-                detail="Firebase ยังไม่ได้ตั้งค่า กรุณาตั้งค่า FIREBASE_PROJECT_ID หรือ FIREBASE_CREDENTIALS_PATH ใน backend/.env"
+                detail="กรุณาตั้งค่า FIREBASE_PROJECT_ID หรือ FIREBASE_CREDENTIALS_PATH (Firebase) หรือ EMAIL_SERVICE_URL (ส่งลิงก์ทางอีเมล) ใน backend/.env"
             )
         
         verification_token = email_service.generate_verification_token()
@@ -1521,18 +1526,22 @@ async def send_verification_email(request: Request):
             }
         )
         
-        # การส่งอีเมลยืนยันทำที่ฝั่ง Client ด้วย Firebase sendEmailVerification()
-        email_service.send_verification_email(
+        # ส่งอีเมลยืนยัน: ถ้ามี EMAIL_SERVICE_URL จะส่งลิงก์ทางอีเมล ไม่ก็ใช้ Firebase ฝั่ง Client
+        email_sent = email_service.send_verification_email(
             to_email=email,
             token=verification_token,
             user_name=user_data.get("full_name") or user_data.get("first_name", "")
         )
-        logger.info(f"Verification flow prepared for {email}; client should call Firebase sendEmailVerification()")
+        if not email_sent:
+            raise HTTPException(
+                status_code=503,
+                detail="ไม่สามารถส่งอีเมลได้ กรุณาตั้งค่า EMAIL_SERVICE_URL ใน backend/.env และให้บริการ email (เช่น email-nest) รันอยู่ หรือใช้เข้าสู่ระบบด้วย Google/Firebase เพื่อยืนยันอีเมล"
+            )
+        logger.info(f"Verification email sent to {email}")
         return {
             "ok": True,
-            "message": "กรุณายืนยันอีเมลในแอป (Firebase จะส่งลิงก์ยืนยันให้)",
+            "message": "ส่งลิงก์ยืนยันไปที่อีเมลแล้ว กรุณากดลิงก์ในอีเมล",
             "email": email,
-            "use_firebase": True,
         }
     
     except HTTPException:
@@ -1622,6 +1631,81 @@ async def verify_email(token: str = Query(..., description="Verification token f
     except Exception as e:
         logger.error(f"Error verifying email: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/verify-email-change")
+async def verify_email_change(token: str = Query(..., description="Token from email change link")):
+    """
+    ยืนยันการเปลี่ยนอีเมล: เมื่อผู้ใช้กดลิงก์ในอีเมล
+    อัปเดต email ใน MongoDB เป็น pending_new_email และตั้ง email_verified = True
+    """
+    if not token:
+        raise HTTPException(status_code=400, detail="Verification token is required")
+    
+    try:
+        storage = MongoStorage()
+        await storage.connect()
+        users_collection = storage.db["users"]
+        
+        user_data = await users_collection.find_one({"email_verification_token": token})
+        if not user_data:
+            raise HTTPException(
+                status_code=400,
+                detail="ลิงก์ไม่ถูกต้องหรือหมดอายุ กรุณาขอเปลี่ยนอีเมลใหม่"
+            )
+        
+        pending_new = (user_data.get("pending_new_email") or "").strip().lower()
+        if not pending_new:
+            raise HTTPException(
+                status_code=400,
+                detail="ไม่พบการรอเปลี่ยนอีเมล กรุณาขอเปลี่ยนอีเมลใหม่"
+            )
+        
+        verification_sent_at = user_data.get("email_verification_sent_at")
+        if verification_sent_at:
+            if isinstance(verification_sent_at, str):
+                verification_sent_at = date_parser.parse(verification_sent_at)
+            token_age = datetime.utcnow() - verification_sent_at
+            if token_age > timedelta(hours=24):
+                await users_collection.update_one(
+                    {"user_id": user_data["user_id"]},
+                    {"$unset": {
+                        "pending_new_email": "",
+                        "email_verification_token": "",
+                        "email_verification_sent_at": ""
+                    }}
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail="ลิงก์หมดอายุ (24 ชม.) กรุณาขอส่งลิงก์ใหม่จากหน้าตั้งค่า"
+                )
+        
+        await users_collection.update_one(
+            {"user_id": user_data["user_id"]},
+            {
+                "$set": {"email": pending_new, "email_verified": True},
+                "$unset": {
+                    "pending_new_email": "",
+                    "email_verification_token": "",
+                    "email_verification_sent_at": ""
+                }
+            }
+        )
+        
+        logger.info(f"✅ Email changed and verified for user {user_data.get('user_id')} -> {pending_new}")
+        
+        return {
+            "ok": True,
+            "message": "เปลี่ยนอีเมลและยืนยันสำเร็จ",
+            "email": pending_new,
+            "email_verified": True,
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error verifying email change: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="เกิดข้อผิดพลาดในการยืนยันการเปลี่ยนอีเมล")
 
 
 # =============================================================================

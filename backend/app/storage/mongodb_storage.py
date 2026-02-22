@@ -17,6 +17,9 @@ from app.models.database import (
     BOOKING_INDEXES, 
     CONVERSATION_INDEXES,
     SAVED_CARDS_INDEXES,
+    WORKFLOW_HISTORY_INDEXES,
+    RL_QTABLE_INDEXES,
+    RL_REWARDS_INDEXES,
 )
 from app.core.config import settings
 from app.core.exceptions import StorageException
@@ -129,7 +132,13 @@ class MongoStorage(StorageInterface):
             await create_indexes_safe(self.conversations_collection, CONVERSATION_INDEXES, "conversations")
             if hasattr(self, "saved_cards_collection") and self.saved_cards_collection is not None:
                 await create_indexes_safe(self.saved_cards_collection, SAVED_CARDS_INDEXES, "user_saved_cards")
-            
+            workflow_history_coll = self.db["workflow_history"]
+            await create_indexes_safe(workflow_history_coll, WORKFLOW_HISTORY_INDEXES, "workflow_history")
+            rl_qtable_coll = self.db["rl_qtable"]
+            await create_indexes_safe(rl_qtable_coll, RL_QTABLE_INDEXES, "rl_qtable")
+            rl_rewards_coll = self.db["rl_rewards"]
+            await create_indexes_safe(rl_rewards_coll, RL_REWARDS_INDEXES, "rl_rewards")
+
             logger.info("MongoDB indexes verified via shared connection (including user_id indexes for data isolation)")
         except Exception as e:
             logger.error(f"Failed to setup MongoDB indexes: {e}", exc_info=True)

@@ -1,11 +1,18 @@
 .flights-page {
+  height: 100vh;
   min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 25%, #f093fb 50%, #4facfe 75%, #00f2fe 100%);
-  background-size: 400% 400%;
-  animation: gradientShift 15s ease infinite;
+  width: 100%;
+  max-width: 100vw;
+  overflow: hidden;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  background:
+    linear-gradient(160deg, #a8b5e8 0%, #c5cae9 30%, #e8eaf6 55%, #bbdefb 75%, #90caf9 100%);
   position: relative;
 }
 
+/* ชั้นแสงนุ่ม + จุดสว่าง */
 .flights-page::before {
   content: '';
   position: absolute;
@@ -13,45 +20,344 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background: 
-    radial-gradient(circle at 20% 50%, rgba(120, 119, 198, 0.3) 0%, transparent 50%),
-    radial-gradient(circle at 80% 80%, rgba(255, 119, 198, 0.3) 0%, transparent 50%),
-    radial-gradient(circle at 40% 20%, rgba(120, 219, 255, 0.2) 0%, transparent 50%);
+  background:
+    radial-gradient(ellipse 90% 60% at 15% 30%, rgba(255, 255, 255, 0.4) 0%, transparent 50%),
+    radial-gradient(ellipse 70% 50% at 88% 20%, rgba(255, 255, 255, 0.3) 0%, transparent 45%),
+    radial-gradient(ellipse 60% 40% at 50% 85%, rgba(255, 255, 255, 0.25) 0%, transparent 50%),
+    radial-gradient(circle 40% at 75% 60%, rgba(197, 202, 233, 0.35) 0%, transparent 50%);
   pointer-events: none;
   z-index: 0;
 }
 
-@keyframes gradientShift {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
+/* รูปทรงอ่อนๆ เพิ่มมิติ (วงกลม/เมฆเบา) */
+.flights-page::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background:
+    radial-gradient(circle 25% at 10% 15%, rgba(255, 255, 255, 0.5) 0%, transparent 40%),
+    radial-gradient(circle 20% at 92% 75%, rgba(255, 255, 255, 0.4) 0%, transparent 40%),
+    radial-gradient(circle 15% at 30% 90%, rgba(255, 255, 255, 0.35) 0%, transparent 35%),
+    radial-gradient(circle 18% at 70% 25%, rgba(187, 222, 251, 0.4) 0%, transparent 35%);
+  pointer-events: none;
+  z-index: 0;
 }
 
 .flights-content {
   position: relative;
   z-index: 1;
-  padding: 2rem 1.5rem;
+  padding: 2.5rem 1.5rem 1rem;
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
   box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 0 auto;
+  overflow: hidden;
 }
 
 .flights-hero {
+  flex-shrink: 0;
   text-align: center;
-  color: white;
-  margin-bottom: 3rem;
-  padding: 2rem 0;
+  color: #1a237e;
+  margin-bottom: 2rem;
+  padding: 1.5rem 0;
 }
 
 .flights-hero h1 {
-  font-size: clamp(2rem, 5vw, 3rem);
+  font-size: clamp(1.75rem, 4.5vw, 2.5rem);
   font-weight: 700;
-  margin-bottom: 1rem;
-  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+  margin: 0;
+  letter-spacing: -0.02em;
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.8);
+}
+
+.flights-hero-desc {
+  margin: 0.75rem 0 0;
+  font-size: clamp(0.9375rem, 2.2vw, 1.0625rem);
+  font-weight: 500;
+  color: #3949ab;
+  opacity: 0.95;
+  max-width: 28em;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+}
+
+/* Search container: white card */
+.flights-search-container {
+  flex-shrink: 0;
+  max-width: 900px;
+  width: 100%;
+  min-width: 0;
+  margin: 0 auto;
+  padding: 0 1rem;
+  box-sizing: border-box;
+}
+
+.flights-search-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+  padding: 24px 28px;
+  border-radius: 20px;
+  box-shadow: 0 8px 32px rgba(26, 35, 126, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.flights-search-form .flights-input {
+  padding: 12px 16px;
+  min-width: 100px;
+  max-width: 100%;
+  box-sizing: border-box;
+  border: none;
+  border-radius: 12px;
+  font-size: 1rem;
+  font-weight: 600;
+  text-align: center;
+  letter-spacing: 0.05em;
+  background: #37474f;
+  color: #fff;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+
+.flights-search-form .flights-input::placeholder {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.flights-search-form .flights-input:focus {
+  outline: none;
+  background: #455a64;
+  box-shadow: 0 0 0 3px rgba(26, 35, 126, 0.2);
+}
+
+.flights-search-form .flights-input-date-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #37474f;
+  color: #fff;
+  padding: 8px 12px 8px 16px;
+  border-radius: 12px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.flights-search-form .flights-input-date-wrap input {
+  padding: 4px 0;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  border: none;
+  background: transparent;
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 500;
+  box-sizing: border-box;
+}
+
+.flights-search-form .flights-input-date-wrap input:focus {
+  outline: none;
+}
+
+.flights-search-form .flights-input-date-wrap input::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  opacity: 0.8;
+  cursor: pointer;
+}
+
+.flights-search-form .flights-calendar-icon {
+  font-size: 1.1rem;
+  line-height: 1;
+  opacity: 0.9;
+}
+
+.flights-search-form .flights-btn-search {
+  padding: 12px 28px;
+  border: none;
+  border-radius: 12px;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%);
+  box-shadow: 0 4px 14px rgba(21, 101, 192, 0.4);
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.2s;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.flights-search-form .flights-btn-search:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(21, 101, 192, 0.45);
+}
+
+.flights-search-form .flights-btn-search:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.flights-search-form .flights-btn-search:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+/* Results — เลื่อนได้เฉพาะส่วนนี้ */
+.flights-results {
+  margin-top: 2.5rem;
+  max-width: 900px;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  /* ลบพื้นที่ล่างเผื่อ taskbar / safe area เพื่อให้ scroll ถึงการ์ดใบล่างได้ครบ */
+  max-height: calc(100vh - 380px - env(safe-area-inset-bottom, 0px));
+  padding: 0 1rem 2rem;
+  padding-bottom: 5rem;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+.flights-result-card {
+  background: #fff;
+  padding: 20px 24px;
+  margin-bottom: 16px;
+  border-radius: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  box-shadow: 0 4px 20px rgba(26, 35, 126, 0.08), 0 1px 4px rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  transition: box-shadow 0.2s;
+}
+
+.flights-result-card:hover {
+  box-shadow: 0 8px 28px rgba(26, 35, 126, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.flights-result-card .flight-code {
+  font-weight: 700;
+  color: #1565c0;
+  font-size: 1.05rem;
+}
+
+.flights-result-card .flight-times {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin: 8px 0;
+  color: #1a237e;
+}
+
+.flights-result-card .flight-route {
+  color: #78909c;
+  font-size: 0.875rem;
+}
+
+.flights-result-card .flight-price {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #c62828;
+}
+
+.flights-result-card .flights-btn-book {
+  margin-top: 10px;
+  padding: 10px 22px;
+  background: linear-gradient(135deg, #c62828 0%, #b71c1c 100%);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 3px 12px rgba(198, 40, 40, 0.35);
+  transition: transform 0.15s, box-shadow 0.2s;
+}
+
+.flights-result-card .flights-btn-book:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(198, 40, 40, 0.4);
+}
+
+/* Dark theme: softer background so hero text stays readable */
+[data-theme="dark"] .flights-page {
+  background: linear-gradient(120deg, #2c3e50 0%, #34495e 50%, #3d5a73 100%);
+}
+
+[data-theme="dark"] .flights-page::before,
+[data-theme="dark"] .flights-page::after {
+  background: none;
+}
+
+[data-theme="dark"] .flights-hero-desc {
+  color: rgba(255, 255, 255, 0.85);
 }
 
 @media (max-width: 768px) {
   .flights-content {
-    padding: 1.5rem 1rem;
+    padding: 1.5rem clamp(0.75rem, 3vw, 1rem) 1rem;
+  }
+
+  .flights-search-container {
+    padding: 0 clamp(0.75rem, 3vw, 1rem);
+  }
+
+  .flights-search-form {
+    flex-direction: column;
+    padding: 20px 16px;
+    align-items: stretch;
+  }
+
+  .flights-search-form .flights-input,
+  .flights-search-form .flights-input-date-wrap,
+  .flights-search-form .flights-btn-search {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .flights-search-form .flights-input-date-wrap {
+    overflow: hidden;
+  }
+
+  .flights-search-form .flights-input-date-wrap input {
+    min-width: 0;
+    flex: 1 1 auto;
+    max-width: 100%;
+  }
+
+  .flights-search-form .flights-btn-search {
+    width: 100%;
+  }
+
+  .flights-result-card {
+    flex-direction: column;
+    align-items: stretch;
+    text-align: center;
+  }
+
+  .flights-result-card .flight-price-wrap {
+    text-align: center;
+  }
+
+  .flights-results {
+    padding: 0 clamp(0.75rem, 3vw, 1rem);
   }
 }
 

@@ -1,20 +1,16 @@
- import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import Swal from 'sweetalert2';
 import { formatCardNumber, getCardType, validateCardNumber } from '../../utils/cardUtils';
+import { loadOmiseScript, createTokenAsync } from '../../utils/omiseLoader';
 import { CardBrandLogo } from '../settings/SettingsPage';
 import './UserProfileEditPage.css';
 import '../settings/SettingsPage.css';
 import AppHeader from '../../components/common/AppHeader';
 import { useTheme } from '../../context/ThemeContext';
+import { useFontSize } from '../../context/FontSizeContext';
+import { useLanguage } from '../../context/LanguageContext';
 
-const PROFILE_SECTIONS = [
-  { id: 'personal', name: 'ข้อมูลส่วนตัว', icon: '👤' },
-  { id: 'passport', name: 'ข้อมูลหนังสือเดินทาง', icon: '🛂' },
-  { id: 'visa', name: 'ข้อมูลวีซ่า', icon: '🛂' },
-  { id: 'address_emergency', name: 'ที่อยู่ / ติดต่อฉุกเฉิน', icon: '📍' },
-  { id: 'family', name: 'ผู้จองร่วม', icon: '👨‍👩‍👧‍👦' },
-  { id: 'cards', name: 'บัตรเครดิต/เดบิต', icon: '💳' },
-];
+const PROFILE_SECTION_IDS = ['personal', 'passport', 'visa', 'address_emergency', 'family', 'cards'];
 
 export default function UserProfileEditPage({ 
   user, 
@@ -200,10 +196,11 @@ export default function UserProfileEditPage({
 
   // โหลดรายการบัตรเมื่อเปิดหมวดบัตรเครดิต/เดบิต
   useEffect(() => {
-    if (activeSection !== 'cards' || !user?.id) return;
+    const uid = user?.user_id || user?.id;
+    if (activeSection !== 'cards' || !uid) return;
     setCardsLoading(true);
     setCardsError(null);
-    const headers = { 'X-User-ID': user.id };
+    const headers = { 'X-User-ID': uid };
     fetch(`${API_BASE_URL}/api/booking/saved-cards`, { headers, credentials: 'include' })
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error('โหลดบัตรไม่สำเร็จ'))))
       .then((data) => {
@@ -212,7 +209,7 @@ export default function UserProfileEditPage({
       })
       .catch((err) => setCardsError(err.message || 'โหลดบัตรไม่สำเร็จ'))
       .finally(() => setCardsLoading(false));
-  }, [activeSection, user?.id]);
+  }, [activeSection, user?.user_id, user?.id]);
 
   // แสดง popup กรอกข้อมูลบัตร (ไม่โหลด Omise)
   const handleClickAddCard = () => {
@@ -354,15 +351,29 @@ export default function UserProfileEditPage({
     }).then(async (result) => {
       if (result.isConfirmed && result.value) {
         const { cardNumber, cardName, cardExpiry, cardCvv } = result.value;
-        const last4 = cardNumber.replace(/\s/g, '').slice(-4);
-        const brand = getCardType(cardNumber) || 'visa';
         const [mm, yy] = cardExpiry.split('/').map((p) => p.trim());
+        const num = cardNumber.replace(/\s/g, '');
         try {
-          const res = await fetch(`${API_BASE_URL}/api/booking/saved-cards/add-local`, {
+          await loadOmiseScript(API_BASE_URL);
+          if (!window.Omise) throw new Error('โหลดระบบบัตรไม่สำเร็จ');
+          const configRes = await fetch(`${API_BASE_URL}/api/booking/payment-config`, { credentials: 'include' });
+          const configData = configRes.ok ? await configRes.json() : {};
+          const pubKey = configData.public_key;
+          if (!pubKey) throw new Error('ไม่พบ Omise Public Key');
+          window.Omise.setPublicKey(pubKey);
+          const card = {
+            name: cardName,
+            number: num,
+            expiration_month: mm,
+            expiration_year: '20' + yy,
+            security_code: cardCvv,
+          };
+          const tokenResponse = await createTokenAsync(card);
+          const res = await fetch(`${API_BASE_URL}/api/booking/saved-cards`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-User-ID': user?.id || '' },
+            headers: { 'Content-Type': 'application/json', 'X-User-ID': user?.user_id || user?.id || '' },
             credentials: 'include',
-            body: JSON.stringify({ last4, brand, expiry_month: mm, expiry_year: yy, name: cardName })
+            body: JSON.stringify({ token: tokenResponse.id, email: (user?.email || '').trim() || undefined, name: cardName || undefined })
           });
           const data = await res.json();
           if (data.ok) {
@@ -370,7 +381,7 @@ export default function UserProfileEditPage({
             if (data.primary_card_id !== undefined) setPrimaryCardId(data.primary_card_id);
             Swal.fire({ icon: 'success', title: 'บันทึกสำเร็จ', text: 'บัตรของคุณถูกบันทึกแล้ว', confirmButtonText: 'ตกลง' });
           } else {
-            throw new Error(data.detail || 'บันทึกไม่สำเร็จ');
+            throw new Error(data.detail || data.message || 'บันทึกไม่สำเร็จ');
           }
         } catch (err) {
           Swal.fire({ icon: 'error', title: 'เกิดข้อผิดพลาด', text: err.message || 'บันทึกบัตรไม่สำเร็จ', confirmButtonText: 'ตกลง' });
@@ -827,10 +838,11 @@ export default function UserProfileEditPage({
   };
 
   const fetchSavedCards = () => {
-    if (!user?.id) return;
+    const uid = user?.user_id || user?.id;
+    if (!uid) return;
     setCardsLoading(true);
     setCardsError(null);
-    const headers = { 'X-User-ID': user.id };
+    const headers = { 'X-User-ID': uid };
     fetch(`${API_BASE_URL}/api/booking/saved-cards`, { headers, credentials: 'include' })
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error('โหลดบัตรไม่สำเร็จ'))))
       .then((data) => {
@@ -847,7 +859,7 @@ export default function UserProfileEditPage({
     try {
       const res = await fetch(`${API_BASE_URL}/api/booking/saved-cards/${encodeURIComponent(cardId)}/set-primary`, {
         method: 'PUT',
-        headers: { 'X-User-ID': user.id },
+        headers: { 'X-User-ID': user?.user_id || user?.id },
         credentials: 'include',
       });
       const data = await res.json();
@@ -864,7 +876,7 @@ export default function UserProfileEditPage({
     if (!user?.id || !cardId) return;
     setDeletingCardId(cardId);
     try {
-      const headers = { 'X-User-ID': user.id };
+      const headers = { 'X-User-ID': user?.user_id || user?.id };
       const res = await fetch(`${API_BASE_URL}/api/booking/saved-cards/${encodeURIComponent(cardId)}`, {
         method: 'DELETE',
         headers,
@@ -1171,6 +1183,17 @@ export default function UserProfileEditPage({
 
 
   const theme = useTheme();
+  const { t } = useLanguage();
+  const fontSize = useFontSize();
+
+  const PROFILE_SECTIONS = [
+    { id: 'personal', name: t('profile.personalInfo'), icon: '👤' },
+    { id: 'passport', name: t('profile.passportInfo'), icon: '🛂' },
+    { id: 'visa', name: t('profile.visaInfo'), icon: '🛂' },
+    { id: 'address_emergency', name: t('profile.addressEmergency'), icon: '📍' },
+    { id: 'family', name: t('profile.coTravelers'), icon: '👨‍👩‍👧‍👦' },
+    { id: 'cards', name: t('profile.cards'), icon: '💳' },
+  ];
 
   return (
     <div className="profile-edit-wrapper settings-page">
@@ -1191,7 +1214,7 @@ export default function UserProfileEditPage({
         />
       )}
 
-      <div className="settings-content-area" data-theme={theme}>
+      <div className="settings-content-area" data-theme={theme} data-font-size={fontSize}>
       <div className="settings-container">
         <aside className="settings-sidebar">
           <h2>แก้ไขโปรไฟล์</h2>
@@ -1213,7 +1236,7 @@ export default function UserProfileEditPage({
         <div className="settings-content">
           <div className="profile-edit-content-header">
             <button type="button" onClick={onCancel} className="btn-secondary" style={{ marginBottom: '20px' }}>
-              ← ย้อนกลับ
+              {t('profile.back')}
             </button>
           </div>
 
@@ -1250,7 +1273,7 @@ export default function UserProfileEditPage({
                             </div>
                             <div className="settings-card-visual-mid">
                               <span className="settings-card-visual-number">•••• •••• •••• {c.last4 || '****'}</span>
-                              {c.name && <span className="settings-card-visual-name">{c.name}</span>}
+                              <span className="settings-card-visual-name">{c.name || '—'}</span>
                             </div>
                             <div className="settings-card-visual-bottom">
                               <span className="settings-card-visual-expiry">หมดอายุ {c.expiry_month || '**'}/{c.expiry_year || '**'}</span>
@@ -1271,7 +1294,20 @@ export default function UserProfileEditPage({
                             <button
                               type="button"
                               className="btn-secondary btn-delete-card"
-                              onClick={() => handleDeleteCard(c.card_id || c.id)}
+                              onClick={() => {
+                                Swal.fire({
+                                  title: 'ยืนยันการลบ',
+                                  text: 'ต้องการลบบัตรใช่หรือไม่',
+                                  icon: 'warning',
+                                  showCancelButton: true,
+                                  confirmButtonColor: '#d33',
+                                  cancelButtonColor: '#3085d6',
+                                  confirmButtonText: 'ลบ',
+                                  cancelButtonText: 'ยกเลิก',
+                                }).then((result) => {
+                                  if (result.isConfirmed) handleDeleteCard(c.card_id || c.id);
+                                });
+                              }}
                               disabled={deletingCardId === (c.card_id || c.id)}
                             >
                               {deletingCardId === (c.card_id || c.id) ? 'กำลังลบ...' : 'ลบ'}

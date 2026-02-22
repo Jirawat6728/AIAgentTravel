@@ -205,6 +205,23 @@
   to { transform: rotate(360deg); }
 }
 
+/* ✅ วงหมุนตอนกำลังจอง / Agent Mode */
+.plan-card-spinner {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.plan-card-spinner--green {
+  border-color: rgba(16, 185, 129, 0.35);
+  border-top-color: #10b981;
+}
+
 /* =========================
    Trip Summary UI (matches PlanChoiceCard look)
    ========================= */

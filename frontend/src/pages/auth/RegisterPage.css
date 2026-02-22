@@ -443,6 +443,18 @@
   box-shadow: 0 12px 30px rgba(16, 185, 129, 0.4);
 }
 
+.register-verification-message {
+  margin: 1rem 0 0;
+  padding: 0.75rem 1rem;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  border-radius: 8px;
+  color: #065f46;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
 @keyframes successPulse {
   0% {
     transform: scale(1);

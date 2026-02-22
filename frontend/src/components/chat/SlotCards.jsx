@@ -90,12 +90,12 @@ export function FlightSlotCard({ flight, travelSlots }) {
         {firstSegment && lastSegment && (
           <>
             {kv('เส้นทาง', `${firstSegment.from || ''} → ${lastSegment.to || ''}`)}
-            {firstSegment.departure && kv('วัน-เวลาออก', formatThaiDateTime(firstSegment.departure))}
-            {lastSegment.arrival && kv('วัน-เวลาถึง', formatThaiDateTime(lastSegment.arrival))}
+            {(firstSegment.departure || firstSegment.depart_at) && kv('วัน-เวลาออก', formatThaiDateTime(firstSegment.departure || firstSegment.depart_at))}
+            {(lastSegment.arrival || lastSegment.arrive_at) && kv('วัน-เวลาถึง', formatThaiDateTime(lastSegment.arrival || lastSegment.arrive_at))}
             {firstSegment.carrier && kv('สายการบิน', getAirlineName(firstSegment.carrier))}
             {flight.total_duration && kv('ระยะเวลาบิน', flight.total_duration)}
             {flight.is_non_stop !== undefined && kv('บินตรง', flight.is_non_stop ? 'ใช่' : `แวะ ${flight.num_stops || 0} ครั้ง`)}
-            {flight.total_price && kv('ราคา', money(currency, flight.total_price))}
+            {(flight.total_price != null || flight.price_total != null) && kv('ราคา', money(currency, flight.total_price ?? flight.price_total))}
           </>
         )}
         {segments.length > 1 && (
@@ -105,8 +105,8 @@ export function FlightSlotCard({ flight, travelSlots }) {
               <div key={idx} className="slot-card-segment">
                 <div className="segment-number">Segment {idx + 1}</div>
                 {seg.from && seg.to && <div>{seg.from} → {seg.to}</div>}
-                {seg.departure && <div>ออก: {formatThaiDateTime(seg.departure)}</div>}
-                {seg.arrival && <div>ถึง: {formatThaiDateTime(seg.arrival)}</div>}
+                {(seg.departure || seg.depart_at) && <div>ออก: {formatThaiDateTime(seg.departure || seg.depart_at)}</div>}
+                {(seg.arrival || seg.arrive_at) && <div>ถึง: {formatThaiDateTime(seg.arrival || seg.arrive_at)}</div>}
                 {seg.carrier && <div>สายการบิน: {getAirlineName(seg.carrier)}</div>}
               </div>
             ))}
@@ -167,7 +167,7 @@ export function HotelSlotCard({ hotel, travelSlots }) {
             {hotel.nights && kv('จำนวนคืน', `${hotel.nights} คืน`)}
             {hotel.boardType && kv('ประเภทอาหาร', hotel.boardType)}
             {hotel.address && kv('ที่อยู่', hotel.address)}
-            {hotel.total_price && kv('ราคา', money(currency, hotel.total_price))}
+            {(hotel.total_price != null || hotel.price_total != null) && kv('ราคา', money(currency, hotel.total_price ?? hotel.price_total))}
           </>
         )}
         <div className="slot-card-edit-hint">

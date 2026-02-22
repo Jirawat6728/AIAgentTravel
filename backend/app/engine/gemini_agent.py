@@ -399,15 +399,23 @@ Example JSON Output (Specific Search – ไม่ระบุคน = 1):
 """
 
 
-def get_responder_system_prompt(personality: str = "friendly") -> str:
+def get_responder_system_prompt(
+    personality: str = "friendly",
+    response_style: str = "balanced",
+    detail_level: str = "medium",
+    chat_language: str = "th",
+) -> str:
     """
-    Generate RESPONDER_SYSTEM_PROMPT based on agent personality (Gemini Voice).
+    Generate RESPONDER_SYSTEM_PROMPT based on agent personality and user preferences.
 
     Args:
         personality: Agent personality type (friendly, professional, casual, teenager, detailed, concise)
+        response_style: Response length style (short, balanced, long)
+        detail_level: Recommendation detail level (low, medium, high)
+        chat_language: Conversation language (th, en, auto)
 
     Returns:
-        System prompt string customized for the personality
+        System prompt string customized for the personality and preferences
     """
     base_prompt = """You are the Voice of the Travel Agent AI.
 Generate a helpful, polite, and proactive response message in Thai.
@@ -502,7 +510,32 @@ CRITICAL RULES:
         "concise": """Tone: กระชับ ตอบสั้นๆ ตรงประเด็น ไม่พูดเยิ่นเย้อ เน้นความชัดเจนและรวดเร็ว"""
     }
     tone_instruction = personality_tones.get(personality, personality_tones["friendly"])
-    return f"{base_prompt}\n\n{tone_instruction}"
+
+    # Response style instruction
+    style_instructions = {
+        "short": "Response Length: ตอบสั้นกระชับ ใช้ประโยคน้อย ตรงประเด็น ไม่เกิน 2-3 ประโยคต่อการตอบ",
+        "balanced": "Response Length: ตอบในความยาวที่พอดี ไม่สั้นเกินไปและไม่ยาวเกินไป",
+        "long": "Response Length: ตอบอย่างละเอียด ครบถ้วน อธิบายทุกขั้นตอนอย่างชัดเจน ให้ข้อมูลเพิ่มเติมที่เป็นประโยชน์"
+    }
+    style_instr = style_instructions.get(response_style, style_instructions["balanced"])
+
+    # Detail level instruction
+    detail_instructions = {
+        "low": "Detail Level: ให้ข้อมูลเฉพาะสิ่งสำคัญ ไม่ต้องอธิบายรายละเอียดมาก",
+        "medium": "Detail Level: ให้ข้อมูลในระดับปานกลาง มีรายละเอียดพอเหมาะ",
+        "high": "Detail Level: ให้ข้อมูลอย่างละเอียดครบถ้วน รวมถึงราคา เวลา เงื่อนไข และข้อแนะนำเพิ่มเติม"
+    }
+    detail_instr = detail_instructions.get(detail_level, detail_instructions["medium"])
+
+    # Language instruction
+    if chat_language == "en":
+        lang_instr = "Language: Respond in English only. Use English for all responses."
+    elif chat_language == "auto":
+        lang_instr = "Language: Detect the user's language from their message and respond in the same language (Thai or English)."
+    else:
+        lang_instr = "Language: ตอบเป็นภาษาไทยเสมอ"
+
+    return f"{base_prompt}\n\n{tone_instruction}\n{style_instr}\n{detail_instr}\n{lang_instr}"
 
 
 # Default prompt for backward compatibility

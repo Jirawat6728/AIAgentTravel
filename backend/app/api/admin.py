@@ -96,6 +96,43 @@ def get_admin_dashboard_html() -> str:
         </div>
 
         <div class="bg-white rounded-lg shadow mb-6">
+            <div class="px-6 py-4 border-b">
+                <h2 class="text-lg font-bold text-gray-900">Amadeus Data Viewer</h2>
+                <p class="text-sm text-gray-500 mt-1">ทดสอบค้นหาเที่ยวบิน/ที่พัก ผ่าน Amadeus API (ต้องเข้าสู่ระบบเป็น Admin)</p>
+                <p id="amadeusCurrentUser" class="text-sm text-gray-600 mt-1">กำลังโหลด...</p>
+            </div>
+            <div class="p-6">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">ดึงข้อมูลจากข้อความ</label>
+                        <div class="flex gap-2">
+                            <input type="text" id="amadeusQuery" placeholder="เช่น เที่ยวบินจากกรุงเทพไปโอซาก้าวันที่ 2026-02-20" class="flex-1 border rounded px-3 py-2 text-sm">
+                            <button type="button" onclick="amadeusExtract()" class="px-3 py-2 bg-gray-600 text-white rounded text-sm hover:bg-gray-700">ดึงข้อมูล</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex flex-wrap gap-3 mb-4">
+                    <input type="text" id="amadeusOrigin" placeholder="ต้นทาง (BKK หรือ Bangkok)" class="border rounded px-3 py-2 text-sm w-40">
+                    <input type="text" id="amadeusDest" placeholder="ปลายทาง (KIX หรือ Osaka)" class="border rounded px-3 py-2 text-sm w-40">
+                    <input type="date" id="amadeusDep" class="border rounded px-3 py-2 text-sm">
+                    <input type="date" id="amadeusRet" placeholder="วันกลับ (ไม่บังคับ)" class="border rounded px-3 py-2 text-sm">
+                    <input type="number" id="amadeusAdults" value="1" min="1" max="9" class="border rounded px-3 py-2 text-sm w-20">
+                    <span class="self-center text-sm text-gray-500">ผู้ใหญ่</span>
+                    <button type="button" onclick="amadeusSearch()" id="btnAmadeusSearch" class="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">ค้นหา Amadeus</button>
+                </div>
+                <div id="amadeusResult" class="hidden mt-4">
+                    <div class="flex justify-between items-center mb-2">
+                        <span class="text-sm font-medium text-gray-700">ผลลัพธ์</span>
+                        <button type="button" onclick="toggleAmadeusRaw()" class="text-xs text-blue-600 hover:underline">แสดง/ซ่อน Raw JSON</button>
+                    </div>
+                    <div id="amadeusSummary" class="text-sm text-gray-600 mb-2"></div>
+                    <pre id="amadeusRaw" class="hidden max-h-96 overflow-auto bg-gray-900 text-green-400 font-mono text-xs p-3 rounded"></pre>
+                </div>
+                <div id="amadeusError" class="hidden mt-4 p-3 bg-red-50 border border-red-200 rounded text-sm text-red-700"></div>
+            </div>
+        </div>
+
+        <div class="bg-white rounded-lg shadow mb-6">
             <div class="px-6 py-4 border-b flex justify-between items-center">
                 <h2 class="text-lg font-bold text-gray-900">System Logs</h2>
                 <div class="flex gap-2">
@@ -109,6 +146,34 @@ def get_admin_dashboard_html() -> str:
     <script>
         const API = window.location.origin;
         const opts = { credentials: 'include' };
+        let currentUserEmail = '';
+        let currentUserIsAdmin = false;
+
+        async function loadCurrentUser() {
+            const el = document.getElementById('amadeusCurrentUser');
+            try {
+                const r = await fetch(API + '/api/auth/me', opts);
+                if (r.ok) {
+                    const d = await r.json();
+                    const user = d.user || d;
+                    currentUserEmail = user.email || '';
+                    currentUserIsAdmin = user.is_admin === true;
+                    el.textContent = currentUserEmail ? ('กำลังเข้าสู่ระบบด้วย ' + currentUserEmail) : 'ยังไม่ได้เข้าสู่ระบบ';
+                } else {
+                    currentUserEmail = '';
+                    currentUserIsAdmin = false;
+                    el.textContent = 'ยังไม่ได้เข้าสู่ระบบ';
+                }
+            } catch (e) {
+                currentUserEmail = '';
+                el.textContent = 'โหลดข้อมูลผู้ใช้ไม่สำเร็จ';
+            }
+        }
+
+        function getAmadeusErrorMsg() {
+            const who = currentUserEmail ? ('กำลังเข้าสู่ระบบด้วย ' + currentUserEmail + ' — ') : '';
+            return who + 'กรุณาเข้าสู่ระบบเป็น Admin เพื่อใช้ Amadeus Data Viewer';
+        }
 
         function showErr(msg) {
             const el = document.getElementById('error');
@@ -177,8 +242,93 @@ def get_admin_dashboard_html() -> str:
             Promise.all([loadStatus(), loadSessions()]).finally(() => { document.getElementById('btnRefresh').disabled = false; });
         }
 
+        async function amadeusExtract() {
+            const q = document.getElementById('amadeusQuery').value.trim();
+            if (!q) return;
+            try {
+                const r = await fetch(API + '/api/amadeus-viewer/extract-info', {
+                    ...opts,
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: q })
+                });
+                if (r.status === 401 || r.status === 403) {
+                    document.getElementById('amadeusError').textContent = getAmadeusErrorMsg();
+                    document.getElementById('amadeusError').classList.remove('hidden');
+                    return;
+                }
+                if (!r.ok) { document.getElementById('amadeusError').textContent = 'Error: ' + r.status; document.getElementById('amadeusError').classList.remove('hidden'); return; }
+                const d = await r.json();
+                document.getElementById('amadeusError').classList.add('hidden');
+                if (d.origin) document.getElementById('amadeusOrigin').value = d.origin;
+                if (d.destination) document.getElementById('amadeusDest').value = d.destination;
+                if (d.date) document.getElementById('amadeusDep').value = d.date;
+            } catch (e) {
+                document.getElementById('amadeusError').textContent = 'Extract failed: ' + e.message;
+                document.getElementById('amadeusError').classList.remove('hidden');
+            }
+        }
+
+        async function amadeusSearch() {
+            const origin = document.getElementById('amadeusOrigin').value.trim();
+            const dest = document.getElementById('amadeusDest').value.trim();
+            const dep = document.getElementById('amadeusDep').value;
+            const ret = document.getElementById('amadeusRet').value || null;
+            const adults = parseInt(document.getElementById('amadeusAdults').value, 10) || 1;
+            if (!origin || !dest || !dep) {
+                document.getElementById('amadeusError').textContent = 'กรุณากรอก ต้นทาง, ปลายทาง และวันเดินทาง';
+                document.getElementById('amadeusError').classList.remove('hidden');
+                return;
+            }
+            document.getElementById('btnAmadeusSearch').disabled = true;
+            document.getElementById('amadeusError').classList.add('hidden');
+            document.getElementById('amadeusResult').classList.add('hidden');
+            try {
+                const body = { origin, destination: dest, departure_date: dep, adults };
+                if (ret) body.return_date = ret;
+                const r = await fetch(API + '/api/amadeus-viewer/search', {
+                    ...opts,
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                if (r.status === 401 || r.status === 403) {
+                    document.getElementById('amadeusError').textContent = getAmadeusErrorMsg();
+                    document.getElementById('amadeusError').classList.remove('hidden');
+                    document.getElementById('btnAmadeusSearch').disabled = false;
+                    return;
+                }
+                if (!r.ok) {
+                    const err = await r.text();
+                    document.getElementById('amadeusError').textContent = 'Search failed: ' + r.status + ' ' + err;
+                    document.getElementById('amadeusError').classList.remove('hidden');
+                    document.getElementById('btnAmadeusSearch').disabled = false;
+                    return;
+                }
+                const data = await r.json();
+                document.getElementById('amadeusError').classList.add('hidden');
+                const s = data.summary || {};
+                document.getElementById('amadeusSummary').innerHTML =
+                    'เที่ยวบินขาออก: ' + (s.flights_count || 0) + ' | เที่ยวบินขากลับ: ' + (s.return_flights_count || 0) +
+                    ' | ที่พัก: ' + (s.hotels_count || 0) + ' | รถรับส่ง: ' + (s.transfers_count || 0) + ' | สถานที่: ' + (s.places_count || 0);
+                document.getElementById('amadeusRaw').textContent = JSON.stringify(data, null, 2);
+                document.getElementById('amadeusRaw').classList.add('hidden');
+                document.getElementById('amadeusResult').classList.remove('hidden');
+            } catch (e) {
+                document.getElementById('amadeusError').textContent = 'Search failed: ' + e.message;
+                document.getElementById('amadeusError').classList.remove('hidden');
+            }
+            document.getElementById('btnAmadeusSearch').disabled = false;
+        }
+
+        function toggleAmadeusRaw() {
+            const el = document.getElementById('amadeusRaw');
+            el.classList.toggle('hidden');
+        }
+
         loadStatus();
         loadSessions();
+        loadCurrentUser();
     </script>
 </body>
 </html>"""
@@ -386,6 +536,27 @@ async def get_logs(lines: int = 100, _auth: bool = Depends(verify_admin_auth)):
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read logs: {e}")
+
+
+@router.get("/workflow-history")
+async def get_workflow_history_debug(
+    session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    limit: int = 100,
+    _auth: bool = Depends(verify_admin_auth),
+):
+    """
+    ดึงประวัติ workflow (planning → selecting → booking → done) สำหรับ debug/analytics
+    กรองด้วย session_id หรือ user_id ได้
+    """
+    try:
+        from app.services.workflow_history import get_workflow_history
+        items = await get_workflow_history(session_id=session_id, user_id=user_id, limit=limit)
+        return {"count": len(items), "items": items}
+    except Exception as e:
+        logger.warning(f"get_workflow_history failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/sessions")
 async def get_recent_sessions(

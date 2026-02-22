@@ -2,79 +2,10 @@ import React, { useState, useEffect } from 'react';
 import './PaymentPage.css';
 import AppHeader from '../../components/common/AppHeader';
 import { useTheme } from '../../context/ThemeContext';
+import { useFontSize } from '../../context/FontSizeContext';
+import { loadOmiseScript, createTokenAsync } from '../../utils/omiseLoader';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-
-// Load Omise.js script (รอ window.Omise หลังโหลด + ลองซ้ำได้)
-const waitForOmise = (maxMs = 3000, intervalMs = 100) => {
-  return new Promise((resolve, reject) => {
-    if (window.Omise) {
-      resolve();
-      return;
-    }
-    const start = Date.now();
-    const t = setInterval(() => {
-      if (window.Omise) {
-        clearInterval(t);
-        resolve();
-        return;
-      }
-      if (Date.now() - start >= maxMs) {
-        clearInterval(t);
-        reject(new Error('Omise.js did not initialize in time'));
-      }
-    }, intervalMs);
-  });
-};
-
-const OMISE_CDN_URL = 'https://cdn.omise.co/omise.js';
-
-const loadOmiseScript = (retryCount = 0) => {
-  const maxRetries = 2;
-  return new Promise((resolve, reject) => {
-    if (window.Omise) {
-      resolve();
-      return;
-    }
-    const existing = document.querySelector('script[data-omise-script]');
-    if (existing) existing.remove();
-
-    const useProxy = retryCount === 0;
-    const scriptUrl = useProxy
-      ? `${API_BASE_URL}/api/booking/omise.js?t=${Date.now()}`
-      : OMISE_CDN_URL + (retryCount > 0 ? '?t=' + Date.now() : '');
-
-    const script = document.createElement('script');
-    script.setAttribute('data-omise-script', '1');
-    script.src = scriptUrl;
-    script.async = true;
-    if (!useProxy) script.crossOrigin = 'anonymous';
-
-    script.onload = () => {
-      waitForOmise()
-        .then(resolve)
-        .catch(() => {
-          if (retryCount < maxRetries) {
-            loadOmiseScript(retryCount + 1).then(resolve).catch(reject);
-          } else {
-            reject(new Error('Failed to load Omise.js'));
-          }
-        });
-    };
-    script.onerror = () => {
-      if (retryCount === 0 && useProxy) {
-        loadOmiseScript(1).then(resolve).catch(reject);
-        return;
-      }
-      if (retryCount < maxRetries) {
-        loadOmiseScript(retryCount + 1).then(resolve).catch(reject);
-      } else {
-        reject(new Error('Failed to load Omise.js'));
-      }
-    };
-    document.head.appendChild(script);
-  });
-};
 
 export default function PaymentPage({ 
   bookingId, 
@@ -98,7 +29,11 @@ export default function PaymentPage({
   const [selectedSavedCardId, setSelectedSavedCardId] = useState(null);
   const [savedCards, setSavedCards] = useState([]); // โหลดจาก API GET /api/booking/saved-cards
   const [savedCardsCustomerId, setSavedCardsCustomerId] = useState(null);
+  const [primaryCardId, setPrimaryCardId] = useState(null); // บัตรหลักจาก API
+  const [showAllSavedCards, setShowAllSavedCards] = useState(false); // true = แสดงทุกบัตร + ปุ่มเปลี่ยนบัตร
   const [saveCardChecked, setSaveCardChecked] = useState(false);
+  // ที่อยู่เรียกเก็บเงิน: ใช้ที่อยู่ปัจจุบัน (จากโปรไฟล์) หรือ ใส่ที่อยู่ใหม่
+  const [billingAddressChoice, setBillingAddressChoice] = useState('new'); // 'current' | 'new'
   
   // Form state
   const [formData, setFormData] = useState({
@@ -116,6 +51,22 @@ export default function PaymentPage({
   });
 
   const theme = useTheme();
+  const fontSize = useFontSize();
+
+  // ที่อยู่ปัจจุบันจากโปรไฟล์ (มี address_line1 หรือ city ถือว่ามีที่อยู่)
+  const userHasAddress = Boolean(
+    user?.address_line1?.trim() || user?.city?.trim() || user?.postal_code?.trim()
+  );
+  const userBillingAddress = userHasAddress
+    ? {
+        country: user?.country || 'TH',
+        address1: user?.address_line1 || '',
+        address2: user?.address_line2 || '',
+        city: user?.city || '',
+        province: user?.province || '',
+        postalCode: user?.postal_code || ''
+      }
+    : null;
 
   useEffect(() => {
     // Get booking_id from URL if not provided as prop
@@ -134,7 +85,7 @@ export default function PaymentPage({
       setLoading(false);
     }
     
-    loadOmiseScript().then(() => {
+    loadOmiseScript(API_BASE_URL).then(() => {
       setOmiseLoaded(true);
       setError(null);
     }).catch(err => {
@@ -145,32 +96,57 @@ export default function PaymentPage({
 
   const retryLoadOmise = () => {
     setError(null);
-    loadOmiseScript().then(() => {
+    loadOmiseScript(API_BASE_URL).then(() => {
       setOmiseLoaded(true);
     }).catch(() => {
       setError('omise_load_failed');
     });
   };
 
-  // โหลดบัตรที่บันทึกไว้จาก MongoDB (ต่อ User)
-  useEffect(() => {
-    if (!user?.id) return;
-    const headers = { 'Content-Type': 'application/json', 'X-User-ID': user.id };
-    fetch(`${API_BASE_URL}/api/booking/saved-cards`, { headers, credentials: 'include' })
-      .then((res) => res.ok ? res.json() : Promise.reject(new Error('Failed to load saved cards')))
+  // โหลดบัตรที่บันทึกไว้จาก MongoDB (ต่อ User) — ใช้ user_id ตรงกับ list/create-charge
+  const loadSavedCards = React.useCallback(() => {
+    const uid = user?.user_id || user?.id;
+    if (!uid) return Promise.resolve();
+    const headers = { 'Content-Type': 'application/json', 'X-User-ID': uid };
+    return fetch(`${API_BASE_URL}/api/booking/saved-cards`, { headers, credentials: 'include' })
+      .then((res) => res.ok ? res.json() : Promise.reject(new Error(res.status === 401 ? 'Unauthorized' : 'Failed to load saved cards')))
       .then((data) => {
         if (data.ok && Array.isArray(data.cards)) {
           setSavedCards(data.cards);
           if (data.customer_id) setSavedCardsCustomerId(data.customer_id);
-          if (data.cards.length > 0 && !selectedSavedCardId) {
+          if (data.primary_card_id !== undefined) setPrimaryCardId(data.primary_card_id);
+          if (data.cards.length > 0) {
             const primaryId = data.primary_card_id;
             const primaryExists = primaryId && data.cards.some((c) => c.card_id === primaryId);
             setSelectedSavedCardId(primaryExists ? primaryId : data.cards[0].card_id);
+            setPaymentMethod('saved');
           }
         }
       })
-      .catch(() => {});
-  }, [user?.id]);
+      .catch((err) => {
+        console.warn('[PaymentPage] Saved cards load failed:', err.message);
+      });
+  }, [user?.user_id, user?.id]);
+
+  useEffect(() => {
+    loadSavedCards();
+  }, [loadSavedCards]);
+
+  // โหลดบัตรอีกครั้งหลัง delay เมื่อมี user (กรณี request แรกไปก่อน user พร้อม)
+  useEffect(() => {
+    const uid = user?.user_id || user?.id;
+    if (!uid) return;
+    const t = setTimeout(loadSavedCards, 600);
+    return () => clearTimeout(t);
+  }, [user?.user_id, user?.id, loadSavedCards]);
+
+  const billingAddressChoiceInitialized = React.useRef(false);
+  useEffect(() => {
+    if (user?.id && userHasAddress && !billingAddressChoiceInitialized.current) {
+      billingAddressChoiceInitialized.current = true;
+      setBillingAddressChoice('current');
+    }
+  }, [user?.id, userHasAddress]);
 
   const loadBooking = async () => {
     setLoading(true);
@@ -191,9 +167,8 @@ export default function PaymentPage({
         'Content-Type': 'application/json'
       };
       
-      if (user?.id) {
-        headers['X-User-ID'] = user.id;
-      }
+      const userId = user?.user_id || user?.id;
+      if (userId) headers['X-User-ID'] = userId;
 
       const res = await fetch(`${API_BASE_URL}/api/booking/list`, {
         headers,
@@ -366,40 +341,59 @@ export default function PaymentPage({
       setError('ไม่พบข้อมูลการจอง');
       return;
     }
+    if (!user?.id) {
+      setError('กรุณาเข้าสู่ระบบเพื่อชำระเงิน');
+      return;
+    }
 
     if (paymentMethod === 'saved') {
       if (!selectedSavedCardId || !savedCardsCustomerId) {
         setError('กรุณาเลือกบัตรที่บันทึกไว้');
         return;
       }
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlBookingId = urlParams.get('booking_id') || urlParams.get('id');
+      const finalBookingId = [booking?.booking_id, booking?._id, bookingId, urlBookingId]
+        .map((v) => (v && typeof v === 'object' && v.$oid ? v.$oid : v))
+        .find((v) => v != null && String(v).trim() !== '');
+      const bookingIdStr = finalBookingId != null ? String(finalBookingId).trim() : '';
+      if (!bookingIdStr) {
+        setError('ไม่พบ Booking ID กรุณากลับไปเลือกการจองใหม่');
+        return;
+      }
       setProcessing(true);
       setError(null);
       try {
-        const urlParams = new URLSearchParams(window.location.search);
-        const urlBookingId = urlParams.get('booking_id') || urlParams.get('id');
-        const finalBookingId = bookingId || urlBookingId;
         const headers = { 'Content-Type': 'application/json' };
-        if (user?.id) headers['X-User-ID'] = user.id;
+        const uid = user?.user_id || user?.id;
+        if (uid) headers['X-User-ID'] = uid;
         const chargeRes = await fetch(`${API_BASE_URL}/api/booking/create-charge`, {
           method: 'POST',
           headers,
           credentials: 'include',
           body: JSON.stringify({
-            booking_id: finalBookingId,
+            booking_id: bookingIdStr,
             card_id: selectedSavedCardId,
             customer_id: savedCardsCustomerId,
-            amount: booking.total_price || 0,
-            currency: booking.currency || 'THB'
+            amount: Number(booking?.total_price) || 0,
+            currency: (booking?.currency || 'THB').toUpperCase()
           })
         });
         const chargeData = await chargeRes.json();
+        const getChargeError = (data) => {
+          const d = data?.detail;
+          if (typeof d === 'string') return d;
+          if (Array.isArray(d) && d.length > 0) return (d[0]?.msg || d[0]?.message) || d.map((e) => e.msg).filter(Boolean).join(', ');
+          if (d && typeof d === 'object' && d.message) return d.message;
+          return data?.error || 'การชำระเงินล้มเหลว';
+        };
         if (!chargeRes.ok || !chargeData.ok) {
-          throw new Error(chargeData.detail || chargeData.error || 'การชำระเงินล้มเหลว');
+          throw new Error(getChargeError(chargeData));
         }
         if (onPaymentSuccess) {
-          onPaymentSuccess(finalBookingId, chargeData);
+          onPaymentSuccess(bookingIdStr, chargeData);
         } else {
-          window.location.href = `/bookings?booking_id=${finalBookingId}&payment_status=success`;
+          window.location.href = `/bookings?booking_id=${bookingIdStr}&payment_status=success`;
         }
       } catch (err) {
         setError(err.message || 'เกิดข้อผิดพลาดในการชำระเงิน');
@@ -414,9 +408,45 @@ export default function PaymentPage({
       setError(cardValidation.message || 'เลขบัตรไม่ถูกต้อง');
       return;
     }
+    const expiryParts = (formData.cardExpiry || '').trim().split('/').map((p) => p.trim());
+    if (expiryParts.length !== 2 || expiryParts[0].length !== 2 || expiryParts[1].length !== 2) {
+      setError('กรุณากรอกวันหมดอายุบัตรรูปแบบ MM/YY');
+      return;
+    }
+    if (!(formData.cardCvv || '').replace(/\s/g, '').match(/^\d{3,4}$/)) {
+      setError('กรุณากรอก CVV 3 หรือ 4 หลัก');
+      return;
+    }
 
     setProcessing(true);
     setError(null);
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlBookingId = urlParams.get('booking_id') || urlParams.get('id');
+    const finalBookingIdRaw = [booking?.booking_id, booking?._id, bookingId, urlBookingId]
+      .map((v) => (v && typeof v === 'object' && v.$oid ? v.$oid : v))
+      .find((v) => v != null && String(v).trim() !== '');
+    const finalBookingId = finalBookingIdRaw != null ? String(finalBookingIdRaw).trim() : '';
+    if (!finalBookingId) {
+      setError('ไม่พบ Booking ID กรุณากลับไปเลือกการจองใหม่');
+      return;
+    }
+    const chargeAmount = Math.round((Number(booking?.total_price) || 0) * 100) / 100;
+    if (chargeAmount <= 0) {
+      setError('ยอดชำระไม่ถูกต้อง');
+      return;
+    }
+
+    const getChargeError = (chargeData) => {
+      const d = chargeData?.detail;
+      if (typeof d === 'string') return d;
+      if (Array.isArray(d) && d.length > 0) {
+        const first = d[0];
+        return first?.msg || first?.message || d.map((e) => e.msg || e.message).filter(Boolean).join(', ') || 'ข้อมูลไม่ถูกต้อง';
+      }
+      if (d && typeof d === 'object' && d.message) return d.message;
+      return chargeData?.error || 'การชำระเงินล้มเหลว';
+    };
 
     try {
       // Get Omise public key from backend
@@ -436,36 +466,35 @@ export default function PaymentPage({
 
       window.Omise.setPublicKey(omisePublicKey);
 
+      const billingForSubmit = billingAddressChoice === 'current' && userBillingAddress
+        ? userBillingAddress
+        : { city: formData.city, postalCode: formData.postalCode, country: formData.country };
       const card = {
         name: formData.cardName,
         number: formData.cardNumber.replace(/\s/g, ''),
-        expiration_month: formData.cardExpiry.split('/')[0],
-        expiration_year: '20' + formData.cardExpiry.split('/')[1],
+        expiration_month: expiryParts[0],
+        expiration_year: '20' + expiryParts[1],
         security_code: formData.cardCvv,
-        city: formData.city,
-        postal_code: formData.postalCode,
-        country: formData.country
+        city: billingForSubmit.city,
+        postal_code: billingForSubmit.postalCode || billingForSubmit.postal_code,
+        country: billingForSubmit.country
       };
 
-      const tokenResponse = await window.Omise.createToken('card', card);
-      
-      if (tokenResponse.object === 'error') {
-        throw new Error(tokenResponse.message || 'ข้อมูลบัตรไม่ถูกต้อง');
-      }
+      const tokenResponse = await createTokenAsync(card);
 
-      const urlParams = new URLSearchParams(window.location.search);
-      const urlBookingId = urlParams.get('booking_id') || urlParams.get('id');
-      const finalBookingId = bookingId || urlBookingId;
       const headers = { 'Content-Type': 'application/json' };
-      if (user?.id) headers['X-User-ID'] = user.id;
+      const userId = user?.user_id || user?.id;
+      if (userId) headers['X-User-ID'] = userId;
 
       let tokenToCharge = tokenResponse.id;
-      if (saveCardChecked) {
+      // บัตรที่บันทึกใน Local: ผูก Omise อัตโนมัติเมื่อชำระด้วยบัตรใหม่ (สร้าง customer + บัตร แล้วชาร์จ)
+      const shouldSaveAndChargeWithCustomer = saveCardChecked || (savedCards.length > 0 && !savedCardsCustomerId);
+      if (shouldSaveAndChargeWithCustomer) {
         const saveRes = await fetch(`${API_BASE_URL}/api/booking/saved-cards`, {
           method: 'POST',
           headers,
           credentials: 'include',
-          body: JSON.stringify({ token: tokenResponse.id, email: formData.email })
+          body: JSON.stringify({ token: tokenResponse.id, email: (formData.email || user?.email || '').trim() || undefined })
         });
         const saveData = await saveRes.json();
         if (saveData.ok && saveData.cards?.length > 0 && saveData.customer_id) {
@@ -481,13 +510,13 @@ export default function PaymentPage({
               booking_id: finalBookingId,
               card_id: lastCard.card_id,
               customer_id: saveData.customer_id,
-              amount: booking.total_price || 0,
-              currency: booking.currency || 'THB'
+              amount: chargeAmount,
+              currency: (booking?.currency || 'THB').toUpperCase()
             })
           });
           const chargeData = await chargeRes.json();
           if (!chargeRes.ok || !chargeData.ok) {
-            throw new Error(chargeData.detail || chargeData.error || 'การชำระเงินล้มเหลว');
+            throw new Error(getChargeError(chargeData));
           }
           if (onPaymentSuccess) onPaymentSuccess(finalBookingId, chargeData);
           else window.location.href = `/bookings?booking_id=${finalBookingId}&payment_status=success`;
@@ -503,15 +532,15 @@ export default function PaymentPage({
         body: JSON.stringify({
           booking_id: finalBookingId,
           token: tokenToCharge,
-          amount: booking.total_price || 0,
-          currency: booking.currency || 'THB'
+          amount: chargeAmount,
+          currency: (booking?.currency || 'THB').toUpperCase()
         })
       });
 
       const chargeData = await chargeRes.json();
 
       if (!chargeRes.ok || !chargeData.ok) {
-        throw new Error(chargeData.detail || chargeData.error || 'การชำระเงินล้มเหลว');
+        throw new Error(getChargeError(chargeData));
       }
 
       // Payment successful - reuse finalBookingId from above
@@ -543,7 +572,7 @@ export default function PaymentPage({
           onNavigateToProfile={onNavigateToProfile}
           onNavigateToSettings={onNavigateToSettings}
         />
-        <div className="payment-page-content" data-theme={theme}>
+        <div className="payment-page-content" data-theme={theme} data-font-size={fontSize}>
           <div className="payment-loading">⏳ กำลังโหลดข้อมูล...</div>
         </div>
       </div>
@@ -563,7 +592,7 @@ export default function PaymentPage({
           onNavigateToProfile={onNavigateToProfile}
           onNavigateToSettings={onNavigateToSettings}
         />
-        <div className="payment-page-content" data-theme={theme}>
+        <div className="payment-page-content" data-theme={theme} data-font-size={fontSize}>
           <div className="payment-error">
             ❌ {error === 'omise_load_failed'
               ? 'โหลด Omise ไม่สำเร็จ — ถ้ามีบัตรที่บันทึกไว้สามารถเลือก "ใช้บัตรที่บันทึกไว้" ชำระได้ หรือลองปิด Ad blocker / รีเฟรช / กดลองอีกครั้ง'
@@ -588,7 +617,8 @@ export default function PaymentPage({
   const origin = travelSlots.origin_city || travelSlots.origin || '';
   const destination = travelSlots.destination_city || travelSlots.destination || '';
   const departureDate = travelSlots.departure_date || '';
-  const amount = booking?.total_price || 0;
+  // ปัดยอดเป็น 2 ทศนิยมให้ตรงกับยอดที่ส่ง charge — แสดงและเรียกเก็บเท่ากัน
+  const amount = Math.round((Number(booking?.total_price) || 0) * 100) / 100;
   const currency = booking?.currency || 'THB';
 
   return (
@@ -604,7 +634,7 @@ export default function PaymentPage({
         onNavigateToSettings={onNavigateToSettings}
       />
       
-      <div className="payment-page-content" data-theme={theme}>
+      <div className="payment-page-content" data-theme={theme} data-font-size={fontSize}>
         <div className="payment-wrapper">
           {/* Left Panel: Order Summary */}
           <div className="payment-order-summary">
@@ -692,53 +722,82 @@ export default function PaymentPage({
               <div className="form-section">
                 <div className="section-title">วิธีการชำระเงิน</div>
                 
-                {savedCards.length > 0 && (
-                  <div className="payment-method-toggle">
-                    <div className="payment-method-options">
-                      <label className="payment-method-option">
-                        <input
-                          type="radio"
-                          name="paymentMethod"
-                          checked={paymentMethod === 'saved'}
-                          onChange={() => { setPaymentMethod('saved'); setSelectedSavedCardId(selectedSavedCardId || savedCards[0]?.card_id); setError(null); }}
-                        />
-                        <span>ใช้บัตรที่บันทึกไว้</span>
-                      </label>
-                      <label className="payment-method-option">
-                        <input
-                          type="radio"
-                          name="paymentMethod"
-                          checked={paymentMethod === 'new'}
-                          onChange={() => { setPaymentMethod('new'); setError(null); }}
-                        />
-                        <span>ใช้บัตรใหม่</span>
-                      </label>
-                    </div>
-                    {paymentMethod === 'saved' && (
+                <div className="payment-method-toggle">
+                  <div className="payment-method-options">
+                    <label className={`payment-method-option ${savedCards.length === 0 ? 'disabled' : ''}`} title={savedCards.length === 0 ? 'ไม่มีบัตรที่บันทึก หรือกดโหลดอีกครั้ง' : ''}>
+                      <input
+                        type="radio"
+                        name="paymentMethod"
+                        checked={paymentMethod === 'saved'}
+                        disabled={savedCards.length === 0}
+                        onChange={() => { setPaymentMethod('saved'); setSelectedSavedCardId(selectedSavedCardId || savedCards[0]?.card_id); setError(null); }}
+                      />
+                      <span>ใช้บัตรที่บันทึกไว้{savedCards.length === 0 ? ' (ยังไม่มีบัตร)' : ''}</span>
+                    </label>
+                    {savedCards.length === 0 && (user?.user_id || user?.id) && (
+                      <button type="button" onClick={loadSavedCards} className="btn-add-card-inline" style={{ marginLeft: 8, fontSize: '0.85rem' }}>
+                        โหลดบัตรอีกครั้ง
+                      </button>
+                    )}
+                    <label className="payment-method-option">
+                      <input
+                        type="radio"
+                        name="paymentMethod"
+                        checked={paymentMethod === 'new'}
+                        onChange={() => { setPaymentMethod('new'); setError(null); }}
+                      />
+                      <span>ใช้บัตรใหม่</span>
+                    </label>
+                  </div>
+                  {paymentMethod === 'saved' && savedCards.length > 0 && (
                       <div className="saved-cards-list">
-                        {savedCards.map((card) => (
-                          <label key={card.card_id} className={`saved-card-item ${selectedSavedCardId === card.card_id ? 'selected' : ''}`}>
-                            <input
-                              type="radio"
-                              name="savedCard"
-                              checked={selectedSavedCardId === card.card_id}
-                              onChange={() => { setSelectedSavedCardId(card.card_id); setError(null); }}
-                            />
-                            <span className="saved-card-mask">•••• •••• •••• {card.last4}</span>
-                            <span className="saved-card-brand">{card.brand}</span>
-                            <span className="saved-card-expiry">{card.expiry_month}/{card.expiry_year}</span>
-                          </label>
-                        ))}
-                        {onNavigateToSettings && (
-                          <button
-                            type="button"
-                            className="btn-add-card-inline"
-                            onClick={() => onNavigateToSettings()}
-                          >
-                            + เพิ่มบัตร
-                          </button>
-                        )}
-                        <div className="form-group saved-cvv-only">
+                        {(() => {
+                          const selectedCard = savedCards.find((c) => c.card_id === selectedSavedCardId) || savedCards[0];
+                          const cardsToShow = showAllSavedCards ? savedCards : (selectedCard ? [selectedCard] : []);
+                          return (
+                            <>
+                              {cardsToShow.map((card) => (
+                                <label key={card.card_id} className={`saved-card-item ${selectedSavedCardId === card.card_id ? 'selected' : ''}`}>
+                                  <input
+                                    type="radio"
+                                    name="savedCard"
+                                    checked={selectedSavedCardId === card.card_id}
+                                    onChange={() => {
+                                      setSelectedSavedCardId(card.card_id);
+                                      setError(null);
+                                      setShowAllSavedCards(false);
+                                    }}
+                                  />
+                                  <span className="saved-card-mask">•••• •••• •••• {card.last4}</span>
+                                  <span className="saved-card-brand">{card.brand}</span>
+                                  <span className="saved-card-expiry">{card.expiry_month}/{card.expiry_year}</span>
+                                  {primaryCardId === card.card_id && (
+                                    <span className="saved-card-primary-badge" style={{ marginLeft: '8px', fontSize: '0.75rem', color: 'var(--primary, #6366f1)', fontWeight: 600 }}>บัตรหลัก</span>
+                                  )}
+                                </label>
+                              ))}
+                              <div style={{ marginTop: '0.5rem' }}>
+                                {!showAllSavedCards ? (
+                                  <button
+                                    type="button"
+                                    className="btn-add-card-inline"
+                                    onClick={() => setShowAllSavedCards(true)}
+                                    style={{ borderStyle: 'solid', borderColor: 'var(--border, #e5e7eb)' }}
+                                  >
+                                    เปลี่ยนบัตร
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="btn-add-card-inline"
+                                    onClick={() => setShowAllSavedCards(false)}
+                                    style={{ borderStyle: 'solid', borderColor: 'var(--border, #e5e7eb)' }}
+                                  >
+                                    ยกเลิก
+                                  </button>
+                                )}
+                              </div>
+                              <div className="form-group saved-cvv-only">
                           <label className="form-label">CVV</label>
                           <input
                             type="text"
@@ -749,10 +808,12 @@ export default function PaymentPage({
                             onChange={(e) => setFormData({ ...formData, cardCvv: e.target.value.replace(/\D/g, '').substring(0, 4) })}
                           />
                         </div>
+                            </>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>
-                )}
                 
                 {paymentMethod === 'new' && (
                 <>
@@ -896,13 +957,52 @@ export default function PaymentPage({
               <div className="form-section">
                 <div className="section-title">ที่อยู่ในการเรียกเก็บเงิน</div>
                 
+                <div className="payment-method-options" style={{ marginBottom: '1rem' }}>
+                  <label className="payment-method-option">
+                    <input
+                      type="radio"
+                      name="billingAddress"
+                      checked={billingAddressChoice === 'current'}
+                      onChange={() => setBillingAddressChoice('current')}
+                      disabled={!userHasAddress}
+                    />
+                    <span>ใช้ที่อยู่ปัจจุบัน</span>
+                    {!userHasAddress && (
+                      <span className="form-hint" style={{ marginLeft: '0.5rem', fontSize: '0.85rem', color: 'var(--text-secondary, #666)' }}>
+                        (ยังไม่มีที่อยู่ในโปรไฟล์)
+                      </span>
+                    )}
+                  </label>
+                  <label className="payment-method-option">
+                    <input
+                      type="radio"
+                      name="billingAddress"
+                      checked={billingAddressChoice === 'new'}
+                      onChange={() => setBillingAddressChoice('new')}
+                    />
+                    <span>ใส่ที่อยู่ใหม่</span>
+                  </label>
+                </div>
+
+                {billingAddressChoice === 'current' && userBillingAddress && (
+                  <div className="billing-address-summary" style={{ padding: '0.75rem 1rem', background: 'var(--surface-secondary, #f5f5f5)', borderRadius: '8px', marginBottom: '1rem', fontSize: '0.9rem' }}>
+                    {[userBillingAddress.address1, userBillingAddress.address2].filter(Boolean).join(' ')}
+                    {userBillingAddress.city && ` ${userBillingAddress.city}`}
+                    {userBillingAddress.province && ` ${userBillingAddress.province}`}
+                    {userBillingAddress.postalCode && ` ${userBillingAddress.postalCode}`}
+                    {userBillingAddress.country === 'TH' && ' ไทย'}
+                  </div>
+                )}
+
+                {(billingAddressChoice === 'new' || (billingAddressChoice === 'current' && !userHasAddress)) && (
+                <>
                 <div className="form-group">
                   <label className="form-label">ประเทศ</label>
                   <select
                     className="form-input"
                     value={formData.country}
                     onChange={(e) => setFormData({...formData, country: e.target.value})}
-                    required
+                    required={billingAddressChoice === 'new' || (billingAddressChoice === 'current' && !userHasAddress)}
                   >
                     <option value="TH">ไทย</option>
                     <option value="US">United States</option>
@@ -919,7 +1019,7 @@ export default function PaymentPage({
                     className="form-input"
                     value={formData.address1}
                     onChange={(e) => setFormData({...formData, address1: e.target.value})}
-                    required
+                    required={billingAddressChoice === 'new' || (billingAddressChoice === 'current' && !userHasAddress)}
                   />
                 </div>
                 
@@ -941,7 +1041,7 @@ export default function PaymentPage({
                       className="form-input"
                       value={formData.city}
                       onChange={(e) => setFormData({...formData, city: e.target.value})}
-                      required
+                      required={billingAddressChoice === 'new' || (billingAddressChoice === 'current' && !userHasAddress)}
                     />
                   </div>
                   <div className="form-group">
@@ -951,7 +1051,7 @@ export default function PaymentPage({
                       className="form-input"
                       value={formData.province}
                       onChange={(e) => setFormData({...formData, province: e.target.value})}
-                      required
+                      required={billingAddressChoice === 'new' || (billingAddressChoice === 'current' && !userHasAddress)}
                     />
                   </div>
                 </div>
@@ -963,11 +1063,23 @@ export default function PaymentPage({
                     className="form-input"
                     value={formData.postalCode}
                     onChange={(e) => setFormData({...formData, postalCode: e.target.value.replace(/\D/g, '')})}
-                    required
+                    required={billingAddressChoice === 'new' || (billingAddressChoice === 'current' && !userHasAddress)}
                   />
                 </div>
+                </>
+                )}
               </div>
               
+              {paymentMethod === 'saved' && savedCards.length > 0 && !savedCardsCustomerId && (
+                <div className="error-message" style={{ marginBottom: '1rem' }}>
+                  ⚠️ บัตรที่บันทึกไว้ชุดนี้ยังไม่ผูกกับ Omise — ไม่สามารถกดชำระได้ กรุณาเลือก <strong>ใช้บัตรใหม่</strong> แล้วกรอกบัตรเพื่อชำระ หรือเพิ่มบัตรใหม่จาก Settings เพื่อให้มีบัตรที่ชำระได้
+                </div>
+              )}
+              {paymentMethod === 'new' && !omiseLoaded && (
+                <div className="error-message" style={{ marginBottom: '1rem' }}>
+                  ⏳ กำลังโหลดระบบชำระเงิน (Omise)... ถ้าโหลดนานเกินไป ลองปิด Ad blocker / รีเฟรชหน้า หรือกดปุ่ม "ลองโหลดอีกครั้ง" ด้านบน
+                </div>
+              )}
               <button
                 type="submit"
                 className="btn-submit"

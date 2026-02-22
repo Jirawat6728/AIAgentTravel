@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import './RegisterPage.css';
+import { useLanguage } from '../../context/LanguageContext';
 
 export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLogin, onNavigateToHome }) {
   const [formData, setFormData] = useState({
@@ -15,66 +16,30 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
   const [errors, setErrors] = useState({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
-  const [lang, setLang] = useState('th');
+  const [successMessage, setSuccessMessage] = useState(''); // ข้อความหลังลงทะเบียน (เช่น ส่งอีเมลยืนยันแล้ว)
+  const { t } = useLanguage();
   const [passwordStrength, setPasswordStrength] = useState({ score: 0, feedback: [] });
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-
-  const text = {
-    en: {
-      title: 'Create Account',
-      email: 'Email',
-      password: 'Password',
-      confirmPassword: 'Confirm Password',
-      firstName: 'First Name',
-      lastName: 'Last Name',
-      firstNameTh: 'First Name (Thai)',
-      lastNameTh: 'Last Name (Thai)',
-      phone: 'Phone Number',
-      signUp: 'Sign Up',
-      alreadyHaveAccount: 'Already have an account?',
-      signIn: 'Sign In',
-      orContinue: 'Or continue with',
-      google: 'Sign up with Google',
-      appName: 'AI Travel Agent',
-    },
-    th: {
-      title: 'สมัครสมาชิก',
-      email: 'อีเมล',
-      password: 'รหัสผ่าน',
-      confirmPassword: 'ยืนยันรหัสผ่าน',
-      firstName: 'ชื่อ',
-      lastName: 'นามสกุล',
-      firstNameTh: 'ชื่อภาษาไทย',
-      lastNameTh: 'นามสกุลภาษาไทย',
-      phone: 'เบอร์โทรศัพท์',
-      signUp: 'สมัครสมาชิก',
-      alreadyHaveAccount: 'มีบัญชีอยู่แล้ว?',
-      signIn: 'เข้าสู่ระบบ',
-      orContinue: 'หรือต่อด้วย',
-      google: 'สมัครด้วย Google',
-      appName: 'ผู้ช่วยท่องเที่ยวอัจฉริยะ',
-    },
-  };
 
   const calculatePasswordStrength = (password) => {
     let score = 0;
     const feedback = [];
 
     if (password.length >= 8) score++;
-    else feedback.push(lang === 'th' ? 'อย่างน้อย 8 ตัวอักษร' : 'At least 8 characters');
+    else feedback.push(t('auth.req8chars'));
 
     if (/[A-Z]/.test(password)) score++;
-    else feedback.push(lang === 'th' ? 'ตัวพิมพ์ใหญ่ (A-Z)' : 'Uppercase letter (A-Z)');
+    else feedback.push(t('auth.reqUppercase'));
 
     if (/[a-z]/.test(password)) score++;
-    else feedback.push(lang === 'th' ? 'ตัวพิมพ์เล็ก (a-z)' : 'Lowercase letter (a-z)');
+    else feedback.push(t('auth.reqLowercase'));
 
     if (/\d/.test(password)) score++;
-    else feedback.push(lang === 'th' ? 'ตัวเลข (0-9)' : 'Number (0-9)');
+    else feedback.push(t('auth.reqNumber'));
 
     if (/[!@#$%^&*(),.?":{}|<>]/.test(password)) score++;
-    else feedback.push(lang === 'th' ? 'อักขระพิเศษ (!@#$...)' : 'Special character (!@#$...)');
+    else feedback.push(t('auth.reqSpecial'));
 
     return { score, feedback };
   };
@@ -104,41 +69,41 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
     const newErrors = {};
 
     if (!formData.email.trim()) {
-      newErrors.email = lang === 'th' ? 'กรุณากรอกอีเมล' : 'Email is required';
+      newErrors.email = t('auth.errEmailRequired');
     } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
-      newErrors.email = lang === 'th' ? 'รูปแบบอีเมลไม่ถูกต้อง' : 'Invalid email format';
+      newErrors.email = t('auth.errEmailInvalid');
     }
 
     if (!formData.password) {
-      newErrors.password = lang === 'th' ? 'กรุณากรอกรหัสผ่าน' : 'Password is required';
+      newErrors.password = t('auth.errPasswordRequired');
     } else if (formData.password.length < 8) {
-      newErrors.password = lang === 'th' ? 'รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร' : 'Password must be at least 8 characters';
+      newErrors.password = t('auth.errPasswordMin');
     } else if (!/[A-Z]/.test(formData.password)) {
-      newErrors.password = lang === 'th' ? 'รหัสผ่านต้องมีตัวพิมพ์ใหญ่อย่างน้อย 1 ตัว' : 'Password must contain at least one uppercase letter';
+      newErrors.password = t('auth.errPasswordUppercase');
     } else if (!/[a-z]/.test(formData.password)) {
-      newErrors.password = lang === 'th' ? 'รหัสผ่านต้องมีตัวพิมพ์เล็กอย่างน้อย 1 ตัว' : 'Password must contain at least one lowercase letter';
+      newErrors.password = t('auth.errPasswordLowercase');
     } else if (!/\d/.test(formData.password)) {
-      newErrors.password = lang === 'th' ? 'รหัสผ่านต้องมีตัวเลขอย่างน้อย 1 ตัว' : 'Password must contain at least one number';
+      newErrors.password = t('auth.errPasswordNumber');
     } else if (!/[!@#$%^&*(),.?":{}|<>]/.test(formData.password)) {
-      newErrors.password = lang === 'th' ? 'รหัสผ่านต้องมีอักขระพิเศษอย่างน้อย 1 ตัว (!@#$...)' : 'Password must contain at least one special character';
+      newErrors.password = t('auth.errPasswordSpecial');
     }
 
     if (!formData.confirmPassword) {
-      newErrors.confirmPassword = lang === 'th' ? 'กรุณายืนยันรหัสผ่าน' : 'Please confirm password';
+      newErrors.confirmPassword = t('auth.errConfirmRequired');
     } else if (formData.password !== formData.confirmPassword) {
-      newErrors.confirmPassword = lang === 'th' ? 'รหัสผ่านไม่ตรงกัน' : 'Passwords do not match';
+      newErrors.confirmPassword = t('auth.errPasswordMismatch');
     }
 
     if (!formData.firstName.trim()) {
-      newErrors.firstName = lang === 'th' ? 'กรุณากรอกชื่อ' : 'First name is required';
+      newErrors.firstName = t('auth.errFirstNameRequired');
     }
 
     if (!formData.lastName.trim()) {
-      newErrors.lastName = lang === 'th' ? 'กรุณากรอกนามสกุล' : 'Last name is required';
+      newErrors.lastName = t('auth.errLastNameRequired');
     }
 
     if (formData.phone && !/^[0-9]{9,10}$/.test(formData.phone.replace(/[-\s]/g, ''))) {
-      newErrors.phone = lang === 'th' ? 'รูปแบบเบอร์โทรไม่ถูกต้อง (9-10 หลัก)' : 'Invalid phone number format';
+      newErrors.phone = t('auth.errPhoneInvalid');
     }
 
     setErrors(newErrors);
@@ -156,7 +121,7 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
     setIsSuccess(false);
     setErrors({}); // Clear previous errors
     try {
-      await onRegister({
+      const data = await onRegister({
         email: formData.email,
         password: formData.password,
         firstName: formData.firstName,
@@ -169,6 +134,9 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
       // Registration successful - show checkmark
       setIsSuccess(true);
       setIsSubmitting(false);
+      if (data?.verification_email_sent && data?.message) {
+        setSuccessMessage(data.message);
+      }
       
       // Wait 1.5 seconds then navigate to login
       setTimeout(() => {
@@ -184,23 +152,15 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
       // Check for common errors
       let displayMessage = errorMessage;
       if (errorMessage.includes('fetch') || errorMessage.includes('Failed to fetch')) {
-        displayMessage = lang === 'th' 
-          ? 'ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์ได้ กรุณาตรวจสอบว่า backend ทำงานอยู่'
-          : 'Cannot connect to server. Please check if backend is running';
+        displayMessage = t('auth.errNetworkError');
       } else if (errorMessage.includes('NetworkError') || errorMessage.includes('network')) {
-        displayMessage = lang === 'th'
-          ? 'เกิดข้อผิดพลาดทางเครือข่าย กรุณาลองใหม่อีกครั้ง'
-          : 'Network error. Please try again';
+        displayMessage = t('auth.errNetworkError');
       } else if (errorMessage.includes('Email already registered') || errorMessage.includes('already exists')) {
-        displayMessage = lang === 'th'
-          ? 'อีเมลนี้ถูกใช้งานแล้ว กรุณาใช้อีเมลอื่น'
-          : 'Email already registered. Please use a different email';
+        displayMessage = t('auth.errEmailTaken');
       }
       
       setErrors({
-        general: lang === 'th' 
-          ? 'เกิดข้อผิดพลาดในการสมัครสมาชิก: ' + displayMessage
-          : 'Registration failed: ' + displayMessage
+        general: t('auth.errRegisterFailed') + displayMessage
       });
       setIsSubmitting(false);
       setIsSuccess(false);
@@ -249,9 +209,9 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
           {/* Right Side - Register Form */}
           <div className="register-form-section">
             <div className="register-card">
-            <h2 className="register-title">{text[lang].title}</h2>
+            <h2 className="register-title">{t('auth.register')}</h2>
             <p className="register-subtitle">
-              {lang === 'th' ? 'เริ่มต้นสร้างบัญชีของคุณเพื่อเริ่มวางแผนทริป' : "Let's get started with your travel planning."}
+              {t('auth.startPlanning')}
             </p>
 
             <form onSubmit={handleSubmit} className="form-content">
@@ -272,56 +232,56 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
               {/* ชื่อ นามสกุล ชื่อภาษาไทย นามสกุลภาษาไทย - 1 แถว 4 คอลัมน์ */}
               <div className="form-row form-row-4">
                 <div className="form-group">
-                  <label htmlFor="firstName" className="form-label">{text[lang].firstName}</label>
+                  <label htmlFor="firstName" className="form-label">{t('auth.firstName')}</label>
                   <input
                     type="text"
                     id="firstName"
                     name="firstName"
                     value={formData.firstName}
                     onChange={handleChange}
-                    placeholder={text[lang].firstName}
+                    placeholder={t('auth.firstName')}
                     className={`form-input ${errors.firstName ? 'error' : ''}`}
                     disabled={isSubmitting}
                   />
                   {errors.firstName && <span className="error-message">{errors.firstName}</span>}
                 </div>
                 <div className="form-group">
-                  <label htmlFor="lastName" className="form-label">{text[lang].lastName}</label>
+                  <label htmlFor="lastName" className="form-label">{t('auth.lastName')}</label>
                   <input
                     type="text"
                     id="lastName"
                     name="lastName"
                     value={formData.lastName}
                     onChange={handleChange}
-                    placeholder={text[lang].lastName}
+                    placeholder={t('auth.lastName')}
                     className={`form-input ${errors.lastName ? 'error' : ''}`}
                     disabled={isSubmitting}
                   />
                   {errors.lastName && <span className="error-message">{errors.lastName}</span>}
                 </div>
                 <div className="form-group">
-                  <label htmlFor="firstNameTh" className="form-label">{text[lang].firstNameTh}</label>
+                  <label htmlFor="firstNameTh" className="form-label">{t('auth.firstNameTh')}</label>
                   <input
                     type="text"
                     id="firstNameTh"
                     name="firstNameTh"
                     value={formData.firstNameTh}
                     onChange={handleChange}
-                    placeholder={text[lang].firstNameTh}
+                    placeholder={t('auth.firstNameTh')}
                     className={`form-input ${errors.firstNameTh ? 'error' : ''}`}
                     disabled={isSubmitting}
                   />
                   {errors.firstNameTh && <span className="error-message">{errors.firstNameTh}</span>}
                 </div>
                 <div className="form-group">
-                  <label htmlFor="lastNameTh" className="form-label">{text[lang].lastNameTh}</label>
+                  <label htmlFor="lastNameTh" className="form-label">{t('auth.lastNameTh')}</label>
                   <input
                     type="text"
                     id="lastNameTh"
                     name="lastNameTh"
                     value={formData.lastNameTh}
                     onChange={handleChange}
-                    placeholder={text[lang].lastNameTh}
+                    placeholder={t('auth.lastNameTh')}
                     className={`form-input ${errors.lastNameTh ? 'error' : ''}`}
                     disabled={isSubmitting}
                   />
@@ -332,14 +292,14 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
               {/* Email and Phone - 2 columns */}
               <div className="form-row">
                 <div className="form-group">
-                  <label htmlFor="email" className="form-label">{text[lang].email}</label>
+                  <label htmlFor="email" className="form-label">{t('auth.email')}</label>
                   <input
                     type="email"
                     id="email"
                     name="email"
                     value={formData.email}
                     onChange={handleChange}
-                    placeholder={text[lang].email}
+                    placeholder={t('auth.email')}
                     className={`form-input ${errors.email ? 'error' : ''}`}
                     disabled={isSubmitting}
                   />
@@ -347,14 +307,14 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                 </div>
 
                 <div className="form-group">
-                  <label htmlFor="phone" className="form-label">{text[lang].phone}</label>
+                  <label htmlFor="phone" className="form-label">{t('auth.phone')}</label>
                   <input
                     type="tel"
                     id="phone"
                     name="phone"
                     value={formData.phone}
                     onChange={handleChange}
-                    placeholder={text[lang].phone}
+                    placeholder={t('auth.phone')}
                     className={`form-input ${errors.phone ? 'error' : ''}`}
                   />
                   {errors.phone && <span className="error-message">{errors.phone}</span>}
@@ -363,7 +323,7 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
 
               {/* Password */}
               <div className="form-group">
-                <label htmlFor="password" className="form-label">{text[lang].password}</label>
+                <label htmlFor="password" className="form-label">{t('auth.password')}</label>
                 <div className="password-input-wrapper">
                   <input
                     type={showPassword ? "text" : "password"}
@@ -371,7 +331,7 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                     name="password"
                     value={formData.password}
                     onChange={handleChange}
-                    placeholder={text[lang].password}
+                    placeholder={t('auth.password')}
                     className={`form-input has-toggle ${errors.password ? 'error' : ''}`}
                     disabled={isSubmitting}
                   />
@@ -407,19 +367,19 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                       ></div>
                     </div>
                     <div className="strength-text">
-                      {lang === 'th' ? 'ความแข็งแกร่ง: ' : 'Strength: '}
+                      {t('auth.strengthLabel')}
                       <span className={`strength-label strength-${passwordStrength.score}`}>
-                        {passwordStrength.score === 0 && (lang === 'th' ? 'อ่อนแอมาก' : 'Very Weak')}
-                        {passwordStrength.score === 1 && (lang === 'th' ? 'อ่อนแอ' : 'Weak')}
-                        {passwordStrength.score === 2 && (lang === 'th' ? 'พอใช้' : 'Fair')}
-                        {passwordStrength.score === 3 && (lang === 'th' ? 'ดี' : 'Good')}
-                        {passwordStrength.score === 4 && (lang === 'th' ? 'แข็งแกร่ง' : 'Strong')}
-                        {passwordStrength.score === 5 && (lang === 'th' ? 'แข็งแกร่งมาก' : 'Very Strong')}
+                        {passwordStrength.score === 0 && t('auth.strengthVeryWeak')}
+                        {passwordStrength.score === 1 && t('auth.strengthWeak')}
+                        {passwordStrength.score === 2 && t('auth.strengthFair')}
+                        {passwordStrength.score === 3 && t('auth.strengthGood')}
+                        {passwordStrength.score === 4 && t('auth.strengthStrong')}
+                        {passwordStrength.score === 5 && t('auth.strengthVeryStrong')}
                       </span>
                     </div>
                     {passwordStrength.feedback.length > 0 && (
                       <div className="strength-feedback">
-                        {lang === 'th' ? 'ต้องมี: ' : 'Required: '}
+                        {t('auth.passwordRequirements')}
                         {passwordStrength.feedback.join(', ')}
                       </div>
                     )}
@@ -429,7 +389,7 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
 
               {/* Confirm Password */}
               <div className="form-group">
-                <label htmlFor="confirmPassword" className="form-label">{text[lang].confirmPassword}</label>
+                <label htmlFor="confirmPassword" className="form-label">{t('auth.confirmPassword')}</label>
                 <div className="password-input-wrapper">
                   <input
                     type={showConfirmPassword ? "text" : "password"}
@@ -437,7 +397,7 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                     name="confirmPassword"
                     value={formData.confirmPassword}
                     onChange={handleChange}
-                    placeholder={text[lang].confirmPassword}
+                    placeholder={t('auth.confirmPassword')}
                     className={`form-input has-toggle ${errors.confirmPassword ? 'error' : ''}`}
                     disabled={isSubmitting}
                   />
@@ -471,20 +431,26 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ flexShrink: 0 }}>
                       <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" fill="currentColor"/>
                     </svg>
-                    {lang === 'th' ? 'สมัครสมาชิกสำเร็จ!' : 'Registration Successful!'}
+                    {t('auth.registerSuccess')}
                   </span>
                 ) : isSubmitting ? (
-                  lang === 'th' ? 'กำลังสมัคร...' : 'Registering...'
+                  t('auth.registering')
                 ) : (
-                  text[lang].signUp
+                  t('auth.register')
                 )}
               </button>
 
+              {isSuccess && successMessage && (
+                <p className="register-verification-message" role="alert">
+                  {successMessage}
+                </p>
+              )}
+
               {/* Link to Login */}
               <div className="login-link">
-                <span>{text[lang].alreadyHaveAccount} </span>
+                <span>{t('auth.hasAccount')} </span>
                 <button type="button" onClick={onNavigateToLogin} className="link-button">
-                  {text[lang].signIn}
+                  {t('auth.login')}
                 </button>
               </div>
             </form>

@@ -69,8 +69,11 @@ function getAirlineName(code) {
 
 function getAircraftName(code) {
   if (!code) return '';
-  const names = { '738': 'Boeing 737-800', '320': 'Airbus A320', '321': 'Airbus A321', '333': 'Airbus A330-300', '77W': 'Boeing 777-300ER', '789': 'Boeing 787-9' };
-  return names[code.toUpperCase()] || `เครื่องบิน ${code}`;
+  const names = {
+    '738': 'Boeing 737-800', '739': 'Boeing 737-900', '73H': 'Boeing 737-800', '73J': 'Boeing 737 MAX 8',
+    '320': 'Airbus A320', '321': 'Airbus A321', '333': 'Airbus A330-300', '77W': 'Boeing 777-300ER', '789': 'Boeing 787-9'
+  };
+  return names[String(code).toUpperCase()] || `เครื่องบิน ${code}`;
 }
 
 function getFlightType(segments) {

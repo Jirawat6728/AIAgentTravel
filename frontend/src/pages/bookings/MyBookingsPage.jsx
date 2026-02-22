@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import './MyBookingsPage.css';
 import AppHeader from '../../components/common/AppHeader';
 import { useTheme } from '../../context/ThemeContext';
+import { useLanguage } from '../../context/LanguageContext';
+import { useFontSize } from '../../context/FontSizeContext';
 import PaymentPopup from '../../components/bookings/PaymentPopup';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
@@ -59,16 +61,16 @@ function formatCurrency(amount, currency = 'THB') {
 
 function getStatusBadge(status) {
   const badges = {
-    pending_payment: { text: 'รอชำระเงิน', class: 'status-pending' },
-    confirmed: { text: 'จองสำเร็จ', class: 'status-confirmed' },
-    paid: { text: 'ชำระเงินแล้ว', class: 'status-paid' },
-    cancelled: { text: 'ยกเลิก', class: 'status-cancelled' },
-    payment_failed: { text: 'ชำระเงินล้มเหลว', class: 'status-failed' },
+    pending_payment: { textKey: 'bookings.statusPending', class: 'status-pending' },
+    confirmed: { textKey: 'bookings.statusConfirmed', class: 'status-confirmed' },
+    paid: { textKey: 'bookings.statusPaid', class: 'status-paid' },
+    cancelled: { textKey: 'bookings.statusCancelled', class: 'status-cancelled' },
+    payment_failed: { textKey: 'bookings.statusFailed', class: 'status-failed' },
   };
   return badges[status] || { text: status, class: 'status-unknown' };
 }
 
-export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notificationCount = 0, notifications = [], onNavigateToProfile = null, onNavigateToSettings = null, onNavigateToHome = null, onNavigateToAI = null, onNavigateToPayment = null, onMarkNotificationAsRead = null }) {
+export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notificationCount = 0, notifications = [], onNavigateToProfile = null, onNavigateToSettings = null, onNavigateToHome = null, onNavigateToAI = null, onNavigateToPayment = null, onMarkNotificationAsRead = null, isActive = true }) {
   const [bookings, setBookings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -76,10 +78,12 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
   const [activeTab, setActiveTab] = useState('bookings'); // Default to 'bookings'
   const [paymentModal, setPaymentModal] = useState(null); // { bookingId, booking, paymentUrl }
   const [editModal, setEditModal] = useState(null); // { bookingId, booking, formData }
+  const [refundModal, setRefundModal] = useState(null); // { bookingId, booking, eligibility: { refundable_items, total_refundable_amount, can_full_refund, message }, loading }
 
+  // โหลดรายการเมื่อ user เปลี่ยน หรือเมื่อเปิดแท็บ My Bookings (หลังจองจาก Agent)
   useEffect(() => {
     loadBookings();
-  }, [user?.id]); // Reload when user changes
+  }, [user?.id, user?.user_id, isActive]); // Reload when user changes or when page becomes active
 
   useEffect(() => {
     document.body.classList.add('page-bookings');
@@ -97,21 +101,30 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
     
     window.addEventListener('storage', handleStorageChange);
     
-    // ✅ Also listen for custom events (same window)
+    // ✅ Also listen for custom events (same window) — รอสั้นๆ ให้ backend commit + invalidate cache ก่อนโหลดใหม่
     const handleBookingCreated = () => {
       console.log('[MyBookings] Booking created event received, refreshing...');
-      loadBookings();
+      setTimeout(() => loadBookings(), 600);
     };
     
     window.addEventListener('bookingCreated', handleBookingCreated);
     
+    // ✅ โหลดใหม่เมื่อผู้ใช้กลับมาเปิดแท็บ (เผื่อ event ข้ามหรือจองจากอีกแท็บ)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && isActive) loadBookings();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    
     return () => {
       window.removeEventListener('storage', handleStorageChange);
       window.removeEventListener('bookingCreated', handleBookingCreated);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, []);
+  }, [isActive]);
 
   const theme = useTheme();
+  const { t } = useLanguage();
+  const fontSize = useFontSize();
 
   const loadBookings = async () => {
     setLoading(true);
@@ -174,6 +187,85 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
       setError(errorMessage);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRefundClick = async (bookingId) => {
+    const booking = bookings.find((b) => b._id === bookingId);
+    if (!booking) return;
+    setRefundModal({
+      bookingId,
+      booking,
+      eligibility: null,
+      loading: true,
+    });
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (user?.id) headers['X-User-ID'] = user.id;
+      const res = await fetch(
+        `${API_BASE_URL}/api/booking/refund-eligibility?booking_id=${encodeURIComponent(bookingId)}`,
+        { headers, credentials: 'include' }
+      );
+      const data = await res.json();
+      if (data?.ok) {
+        setRefundModal((prev) => ({
+          ...prev,
+          eligibility: {
+            refundable_items: data.refundable_items || [],
+            total_refundable_amount: data.total_refundable_amount ?? 0,
+            can_full_refund: data.can_full_refund,
+            message: data.message,
+          },
+          loading: false,
+        }));
+      } else {
+        setRefundModal((prev) => ({
+          ...prev,
+          eligibility: { refundable_items: [], total_refundable_amount: 0, can_full_refund: false, message: data.detail || 'ไม่สามารถโหลดข้อมูลได้' },
+          loading: false,
+        }));
+      }
+    } catch (err) {
+      setRefundModal((prev) => ({
+        ...prev,
+        eligibility: { refundable_items: [], total_refundable_amount: 0, can_full_refund: false, message: err.message || 'เกิดข้อผิดพลาด' },
+        loading: false,
+      }));
+    }
+  };
+
+  const handleRefundConfirm = async (refundType = 'full') => {
+    if (!refundModal?.bookingId) return;
+    const bid = refundModal.bookingId;
+    setProcessing((p) => ({ ...p, [bid]: 'refunding' }));
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (user?.id) headers['X-User-ID'] = user.id;
+      const body = { booking_id: bid, refund_type: refundType };
+      if (refundType === 'partial') {
+        const refundableTypes = (refundModal.eligibility?.refundable_items || [])
+          .filter((i) => i.refundable)
+          .map((i) => i.type);
+        if (refundableTypes.length) body.items = refundableTypes;
+      }
+      const res = await fetch(`${API_BASE_URL}/api/booking/refund`, {
+        method: 'POST',
+        headers,
+        credentials: 'include',
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (data?.ok) {
+        setRefundModal(null);
+        await loadBookings();
+        alert(data.message || 'ดำเนินการคืนเงินเรียบร้อยแล้ว');
+      } else {
+        alert(data.detail || data.message || 'เกิดข้อผิดพลาดในการคืนเงิน');
+      }
+    } catch (err) {
+      alert(err.message || 'เกิดข้อผิดพลาดในการคืนเงิน');
+    } finally {
+      setProcessing((p) => ({ ...p, [bid]: null }));
     }
   };
 
@@ -457,17 +549,17 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
       />
 
       {/* Content */}
-      <div className="my-bookings-content" data-theme={theme}>
+      <div className="my-bookings-content" data-theme={theme} data-font-size={fontSize}>
 
         {loading ? (
-          <div className="my-bookings-loading">⏳ กำลังโหลดข้อมูล...</div>
+          <div className="my-bookings-loading">{t('bookings.loading')}</div>
         ) : error ? (
           <div className="my-bookings-error">❌ {error}</div>
         ) : bookings.length === 0 ? (
           <div className="my-bookings-empty">
             <div className="empty-icon">📭</div>
-            <div className="empty-text">ยังไม่มีการจอง</div>
-            <div className="empty-subtext">เมื่อคุณจองทริป การจองจะแสดงที่นี่</div>
+            <div className="empty-text">{t('bookings.noBookings')}</div>
+            <div className="empty-subtext">{t('bookings.noBookingsDesc')}</div>
           </div>
         ) : (
           <div className="bookings-list">
@@ -602,7 +694,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                       </span>
                     ) : null}
                     <span className={`status-badge ${statusBadge.class}`}>
-                      {statusBadge.text}
+                      {statusBadge.textKey ? t(statusBadge.textKey) : statusBadge.text}
                     </span>
                   </div>
                   <div className="booking-date">
@@ -929,21 +1021,21 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                         onClick={() => handlePayment(booking._id)}
                         disabled={processing[booking._id] === 'paying'}
                       >
-                        {processing[booking._id] === 'paying' ? 'กำลังดำเนินการ...' : '💳 จ่ายเงิน'}
+                        {processing[booking._id] === 'paying' ? t('bookings.processing') : t('bookings.pay')}
                       </button>
                       <button
                         className="btn-edit"
                         onClick={() => handleEdit(booking._id)}
                         disabled={processing[booking._id] === 'updating'}
                       >
-                        {processing[booking._id] === 'updating' ? 'กำลังดำเนินการ...' : '✏️ แก้ไข'}
+                        {processing[booking._id] === 'updating' ? t('bookings.processing') : t('bookings.edit')}
                       </button>
                       <button
                         className="btn-cancel"
                         onClick={() => handleCancel(booking._id)}
                         disabled={processing[booking._id] === 'cancelling'}
                       >
-                        {processing[booking._id] === 'cancelling' ? 'กำลังดำเนินการ...' : '❌ ยกเลิกการจอง'}
+                        {processing[booking._id] === 'cancelling' ? t('bookings.processing') : t('bookings.cancelBooking')}
                       </button>
                     </>
                   )}
@@ -953,12 +1045,21 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                       onClick={() => handleCancel(booking._id)}
                       disabled={processing[booking._id] === 'cancelling'}
                     >
-                      {processing[booking._id] === 'cancelling' ? 'กำลังดำเนินการ...' : '❌ ยกเลิกการจอง'}
+                      {processing[booking._id] === 'cancelling' ? t('bookings.processing') : t('bookings.cancelBooking')}
+                    </button>
+                  )}
+                  {booking.status === 'paid' && (
+                    <button
+                      className="btn-refund"
+                      onClick={() => handleRefundClick(booking._id)}
+                      disabled={processing[booking._id] === 'refunding'}
+                    >
+                      {processing[booking._id] === 'refunding' ? t('bookings.processing') : t('bookings.refund')}
                     </button>
                   )}
                   {booking.status === 'cancelled' && (
                     <div className="booking-cancelled-note">
-                      การจองนี้ถูกยกเลิกแล้ว
+                      {t('bookings.cancelled')}
                     </div>
                   )}
                 </div>
@@ -1077,6 +1178,71 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                   ยกเลิก
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Refund Modal */}
+      {refundModal && (
+        <div className="payment-modal-overlay" onClick={() => !refundModal.loading && setRefundModal(null)}>
+          <div className="payment-modal refund-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="payment-modal-header">
+              <h2>↩️ คืนเงินรายการจอง</h2>
+              <button className="payment-modal-close" onClick={() => !refundModal.loading && setRefundModal(null)}>✕</button>
+            </div>
+            <div className="payment-modal-body">
+              {refundModal.loading ? (
+                <p style={{ textAlign: 'center', padding: 24 }}>กำลังตรวจสอบเงื่อนไขการคืนเงิน...</p>
+              ) : refundModal.eligibility ? (
+                <>
+                  <p className="refund-message" style={{ marginBottom: 16, color: '#374151' }}>{refundModal.eligibility.message}</p>
+                  {refundModal.eligibility.refundable_items?.length > 0 && (
+                    <ul className="refund-items-list" style={{ listStyle: 'none', padding: 0, margin: '0 0 16px 0' }}>
+                      {refundModal.eligibility.refundable_items.map((item, idx) => (
+                        <li key={idx} style={{ padding: '8px 0', borderBottom: '1px solid #e5e7eb', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                          <span>{item.label}</span>
+                          <span style={{ fontWeight: 600 }}>{formatCurrency(item.amount, item.currency)}</span>
+                          <span style={{ fontSize: 12, color: item.refundable ? '#059669' : '#6b7280' }}>
+                            {item.refundable ? '✅ คืนได้' : (item.reason || '❌ คืนไม่ได้')}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {refundModal.eligibility.total_refundable_amount > 0 && (
+                    <p style={{ fontWeight: 700, fontSize: 16, marginBottom: 16 }}>
+                      ยอดที่คืนได้รวม: {formatCurrency(refundModal.eligibility.total_refundable_amount, refundModal.booking?.currency || 'THB')}
+                    </p>
+                  )}
+                  <div className="refund-modal-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 16 }}>
+                    {refundModal.eligibility.can_full_refund && refundModal.eligibility.total_refundable_amount > 0 && (
+                      <button
+                        className="btn-refund-confirm-full"
+                        onClick={() => handleRefundConfirm('full')}
+                        disabled={processing[refundModal.bookingId] === 'refunding'}
+                      >
+                        {processing[refundModal.bookingId] === 'refunding' ? 'กำลังดำเนินการ...' : 'คืนเงินทั้งหมด'}
+                      </button>
+                    )}
+                    {refundModal.eligibility.total_refundable_amount > 0 && !refundModal.eligibility.can_full_refund && (
+                      <button
+                        className="btn-refund-confirm-partial"
+                        onClick={() => handleRefundConfirm('partial')}
+                        disabled={processing[refundModal.bookingId] === 'refunding'}
+                      >
+                        {processing[refundModal.bookingId] === 'refunding' ? 'กำลังดำเนินการ...' : 'คืนเงินเฉพาะส่วนที่อนุญาต'}
+                      </button>
+                    )}
+                    <button type="button" className="btn-cancel-edit" onClick={() => setRefundModal(null)}>
+                      ปิด
+                    </button>
+                  </div>
+                  {refundModal.eligibility.total_refundable_amount === 0 && (
+                    <p style={{ color: '#6b7280', marginTop: 8 }}>ไม่สามารถคืนเงินได้ตามเงื่อนไขสายการบิน/โรงแรม</p>
+                  )}
+                </>
+              ) : null}
             </div>
           </div>
         </div>

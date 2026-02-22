@@ -2,6 +2,17 @@ import React from 'react';
 import './PlanChoiceCard.css';
 import './TripSummaryUI.css';
 
+/** อัตราแปลงเป็นบาท (อ้างอิง) สำหรับแสดงผลเป็น ฿ เมื่อ API ส่งมาเป็น JPY/USD เป็นต้น */
+const RATE_TO_THB = { JPY: 0.25, USD: 35, EUR: 38, GBP: 44, SGD: 26, KRW: 0.026, CNY: 4.9, HKD: 4.5 };
+function toThb(amount, sourceCurrency) {
+  if (amount == null || Number.isNaN(Number(amount))) return null;
+  const c = (sourceCurrency || 'THB').toUpperCase();
+  if (c === 'THB') return Number(amount);
+  const rate = RATE_TO_THB[c];
+  if (rate == null) return Number(amount);
+  return Math.round(Number(amount) * rate);
+}
+
 function money(currency, n) {
   if (n == null || Number.isNaN(Number(n))) return null;
   const c = currency || 'THB';
@@ -15,6 +26,12 @@ function money(currency, n) {
   } catch {
     return `${c} ${Number(n).toLocaleString('th-TH')}`;
   }
+}
+
+/** แสดงราคาเป็นบาท (THB) เสมอ — แปลงจาก JPY/USD ฯลฯ ถ้าจำเป็น */
+function moneyThb(amount, sourceCurrency) {
+  const thb = toThb(amount, sourceCurrency);
+  return thb != null ? money('THB', thb) : null;
 }
 
 function safeText(v) {
@@ -219,6 +236,25 @@ function formatThaiDateTime(isoDateTime) {
   }
 }
 
+/** แยก segments เป็นขาไป/ขากลับ เมื่อ API ส่งมาแค่ segments ไม่มี outbound/inbound */
+function splitFlightSegmentsToOutboundInbound(segments, travelSlots) {
+  if (!Array.isArray(segments) || segments.length === 0) return { outbound: [], inbound: [] };
+  if (segments.length === 1) return { outbound: segments, inbound: [] };
+  const origin = (travelSlots?.origin_city || travelSlots?.origin || segments[0]?.from || '').toString().trim().toUpperCase();
+  // แยกตามจุดกลับถึงต้นทางได้เฉพาะเมื่อมี origin ชัดเจน (ถ้า origin ว่างจะไม่ใช้ logic นี้)
+  if (origin) {
+    const originArrivalIndex = segments.findIndex((seg, idx) => idx > 0 && (seg.to || '').toString().trim().toUpperCase() === origin);
+    if (originArrivalIndex > 0) {
+      return {
+        outbound: segments.slice(0, originArrivalIndex),
+        inbound: segments.slice(originArrivalIndex),
+      };
+    }
+  }
+  const mid = Math.ceil(segments.length / 2);
+  return { outbound: segments.slice(0, mid), inbound: segments.slice(mid) };
+}
+
 export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidation, workflowValidation }) {
   if (!plan) return null;
   
@@ -255,7 +291,7 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
               return sum > 0 ? sum : undefined;
             })();
 
-  const totalText = money(currency, total) || safeText(plan?.total_price_text || plan?.summary?.total_price_text);
+  const totalText = moneyThb(total, currency) || money(currency, total) || safeText(plan?.total_price_text || plan?.summary?.total_price_text);
 
   const origin = travelSlots?.origin_city || travelSlots?.origin || travelSlots?.origin_iata || '';
   const dest = travelSlots?.destination_city || travelSlots?.destination || travelSlots?.destination_iata || '';
@@ -276,16 +312,20 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
   }
   
   const pax = [
-    travelSlots?.adults != null ? `ผู้ใหญ่ ${travelSlots.adults}` : null,
-    travelSlots?.children != null ? `เด็ก ${travelSlots.children}` : null,
-    travelSlots?.infants != null ? `ทารก ${travelSlots.infants}` : null,
-  ].filter(Boolean).join(' • ');
+    travelSlots?.adults != null && Number(travelSlots.adults) > 0 ? `${travelSlots.adults} ผู้ใหญ่` : null,
+    travelSlots?.children != null && Number(travelSlots.children) > 0 ? `${travelSlots.children} เด็ก` : null,
+  ].filter(Boolean).join(', ');
 
   // ✅ Extract flight details
   const flight = plan?.flight || {};
   const flightSegments = flight?.segments || [];
   const firstSegment = flightSegments[0];
   const lastSegment = flightSegments[flightSegments.length - 1];
+  // ✅ ถ้าไม่มี outbound/inbound แยกจาก API ให้แยกจาก segments เพื่อแสดงขาไป/ขากลับ
+  const hasOutboundInbound = flight?.outbound?.length > 0 || flight?.inbound?.length > 0;
+  const split = hasOutboundInbound ? null : splitFlightSegmentsToOutboundInbound(flightSegments, travelSlots);
+  const outboundSegments = hasOutboundInbound ? (flight.outbound || []) : (split?.outbound || []);
+  const inboundSegments = hasOutboundInbound ? (flight.inbound || []) : (split?.inbound || []);
   
   // ✅ Extract hotel details
   const hotel = plan?.hotel || {};
@@ -335,13 +375,13 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
           <div className="plan-card-section-title">✈️ เที่ยวบิน</div>
           <div className="plan-card-section-body">
             {/* ✅ แสดงขาไป (Outbound) - แสดง logo ทุก segment เมื่อต่อเครื่อง */}
-            {flight.outbound && flight.outbound.length > 0 && (
-              <div style={{ marginBottom: flight.inbound && flight.inbound.length > 0 ? '16px' : '0' }}>
+            {outboundSegments.length > 0 && (
+              <div style={{ marginBottom: inboundSegments.length > 0 ? '16px' : '0' }}>
                 <div style={{ fontWeight: 600, marginBottom: '8px', color: '#2563eb', display: 'flex', alignItems: 'center', gap: '8px' }}>
                   🛫 ขาไป
                 </div>
-                {flight.outbound.map((seg, idx) => {
-                  const isLast = idx === flight.outbound.length - 1;
+                {outboundSegments.map((seg, idx) => {
+                  const isLast = idx === outboundSegments.length - 1;
                   return (
                     <div key={idx} style={{ marginBottom: isLast ? '0' : '12px', paddingLeft: '8px', borderLeft: '3px solid #3b82f6' }}>
                       {seg.carrier && (
@@ -365,13 +405,13 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
             )}
             
             {/* ✅ แสดงขากลับ (Inbound) - แสดง logo ทุก segment เมื่อต่อเครื่อง */}
-            {flight.inbound && flight.inbound.length > 0 && (
+            {inboundSegments.length > 0 && (
               <div>
                 <div style={{ fontWeight: 600, marginBottom: '8px', color: '#2563eb', display: 'flex', alignItems: 'center', gap: '8px' }}>
                   🛬 ขากลับ
                 </div>
-                {flight.inbound.map((seg, idx) => {
-                  const isLast = idx === flight.inbound.length - 1;
+                {inboundSegments.map((seg, idx) => {
+                  const isLast = idx === inboundSegments.length - 1;
                   return (
                     <div key={idx} style={{ marginBottom: isLast ? '0' : '12px', paddingLeft: '8px', borderLeft: '3px solid #10b981' }}>
                       {seg.carrier && (
@@ -394,8 +434,8 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
               </div>
             )}
             
-            {/* ✅ Fallback: แสดงแบบเดิมถ้าไม่มี outbound/inbound แยก */}
-            {(!flight.outbound || flight.outbound.length === 0) && (!flight.inbound || flight.inbound.length === 0) && firstSegment && (
+            {/* ✅ Fallback: แสดงแบบเดิมถ้ามีแค่ segment เดียวหรือแยกขาไป/ขากลับไม่ได้ */}
+            {outboundSegments.length === 0 && inboundSegments.length === 0 && firstSegment && (
               <>
                 {firstSegment.carrier && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px', flexWrap: 'wrap' }}>
@@ -414,7 +454,7 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
             )}
             
             {/* ✅ ราคารวม */}
-            {flight.currency && (flight.total_price != null || flight.price_total != null) && kv('ราคาไฟท์บิน', money(flight.currency, flight.total_price ?? flight.price_total))}
+            {flight.currency && (flight.total_price != null || flight.price_total != null) && kv('ราคาไฟท์บิน', moneyThb(flight.total_price ?? flight.price_total, flight.currency))}
           </div>
         </div>
       )}
@@ -462,7 +502,7 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
                     {grouped.nights > 0 && kv('จำนวนคืน', `${grouped.nights} คืน`)}
                     {grouped.boardType && kv('ประเภทอาหาร', grouped.boardType)}
                     {grouped.address && kv('ที่อยู่', grouped.address)}
-                    {grouped.price_total > 0 && kv('ราคา', money(grouped.currency, grouped.price_total))}
+                    {grouped.price_total > 0 && kv('ราคา', moneyThb(grouped.price_total, grouped.currency))}
                   </div>
                 ));
               })()
@@ -472,8 +512,8 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
                 {hotel.nights != null && kv('จำนวนคืน', `${hotel.nights} คืน`)}
                 {hotel.boardType && kv('ประเภทอาหาร', hotel.boardType)}
                 {hotel.address && kv('ที่อยู่', hotel.address)}
-                {hotel.price_total && kv('ราคา', money(hotel.currency || currency, hotel.price_total))}
-                {hotel.price && !hotel.price_total && kv('ราคา', money(hotel.currency || currency, hotel.price))}
+                {hotel.price_total && kv('ราคา', moneyThb(hotel.price_total, hotel.currency || currency))}
+                {hotel.price && !hotel.price_total && kv('ราคา', moneyThb(hotel.price, hotel.currency || currency))}
               </>
             )}
           </div>
@@ -491,7 +531,7 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
                   {seg.type && kv(`ประเภท (${idx + 1})`, seg.type)}
                   {seg.route && kv('เส้นทาง', seg.route)}
                   {seg.duration && kv('ระยะเวลา', seg.duration)}
-                  {seg.price && kv('ราคา', money(seg.currency || currency, seg.price))}
+                  {seg.price && kv('ราคา', moneyThb(seg.price, seg.currency || currency))}
                 </div>
               ))
             ) : (
@@ -499,7 +539,7 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
                 {transport.type && kv('ประเภท', transport.type)}
                 {transport.route && kv('เส้นทาง', transport.route)}
                 {transport.duration && kv('ระยะเวลา', transport.duration)}
-                {(transport.price != null || transport.price_amount != null) && kv('ราคา', money(transport.currency || currency, transport.price ?? transport.price_amount))}
+                {(transport.price != null || transport.price_amount != null) && kv('ราคา', moneyThb(transport.price ?? transport.price_amount, transport.currency || currency))}
               </>
             )}
           </div>
@@ -511,10 +551,10 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
         <div className="plan-card-section">
           <div className="plan-card-section-title">💰 รายละเอียดราคา</div>
           <div className="plan-card-section-body">
-            {plan.price_breakdown.flight && kv('ไฟท์บิน', money(currency, plan.price_breakdown.flight))}
-            {plan.price_breakdown.hotel && kv('ที่พัก', money(currency, plan.price_breakdown.hotel))}
-            {plan.price_breakdown.transport && kv('การเดินทาง', money(currency, plan.price_breakdown.transport))}
-            {plan.price_breakdown.car && kv('รถเช่า', money(currency, plan.price_breakdown.car))}
+            {plan.price_breakdown.flight && kv('ไฟท์บิน', moneyThb(plan.price_breakdown.flight, currency))}
+            {plan.price_breakdown.hotel && kv('ที่พัก', moneyThb(plan.price_breakdown.hotel, currency))}
+            {plan.price_breakdown.transport && kv('การเดินทาง', moneyThb(plan.price_breakdown.transport, currency))}
+            {plan.price_breakdown.car && kv('รถเช่า', moneyThb(plan.price_breakdown.car, currency))}
           </div>
         </div>
       )}
@@ -522,7 +562,7 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
       {/* Total Price */}
       <div className="plan-card-footer">
         <div className="plan-card-price">{totalText || '—'}</div>
-        <div className="summary-note">ราคาอ้างอิงจาก Amadeus Search (production)</div>
+        <div className="summary-note">ราคาอ้างอิงจาก Amadeus Search (production){currency !== 'THB' ? ' · แสดงเป็นบาท (อัตราอ้างอิง)' : ''}</div>
       </div>
 
       {/* ✅ Cache Validation Status */}
@@ -740,16 +780,21 @@ export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBook
       <div className="plan-card-header">
         <div className="plan-card-title">
           <span className="plan-card-label">✅ ยืนยันจอง</span>
-          <span className="plan-card-tag">
-            {needsPayment ? 'รอชำระเงิน' : isConfirmed ? 'จองสำเร็จ' : 'Sandbox'}
-          </span>
+          {(needsPayment || isConfirmed) && (
+            <span className="plan-card-tag">
+              {needsPayment ? 'รอชำระเงิน' : 'จองสำเร็จ'}
+            </span>
+          )}
         </div>
       </div>
 
       {isBooking ? (
         <div className="plan-card-section">
           <div className="plan-card-section-body plan-card-small">
-            <div>⏳ กำลังดำเนินการ...</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span className="plan-card-spinner" />
+              <span>กำลังดำเนินการ...</span>
+            </div>
             <div style={{ marginTop: '8px', opacity: 0.8 }}>
               {needsPayment ? 'กำลังสร้างการจอง...' : 'กำลังชำระเงินและจอง...'}
             </div>
@@ -769,7 +814,7 @@ export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBook
               <div style={{ marginTop: '12px', padding: '12px', background: '#f0f9ff', borderRadius: '8px' }}>
                 <div style={{ fontWeight: 600, marginBottom: '8px' }}>💰 ราคารวม</div>
                 <div style={{ fontSize: '20px', fontWeight: 700, color: '#1e40af' }}>
-                  {new Intl.NumberFormat('th-TH', { style: 'currency', currency: bookingResult.currency || 'THB', minimumFractionDigits: 0 }).format(bookingResult.total_price)}
+                  {moneyThb(bookingResult.total_price, bookingResult.currency) || new Intl.NumberFormat('th-TH', { style: 'currency', currency: 'THB', minimumFractionDigits: 0 }).format(bookingResult.total_price)}
                 </div>
               </div>
             )}
@@ -815,7 +860,7 @@ export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBook
             </div>
           </div>
 
-          {/* ✅ Agent Mode: Hide confirm button - booking happens automatically */}
+          {/* ✅ Agent Mode: ซ่อนปุ่มยืนยัน (ระบบจองให้อัตโนมัติ) — ไม่แสดงข้อความ Agent Mode ตรงนี้ ให้แชทแจ้งว่าจองแล้ว */}
           {!isAutoBooked && !isAutoBookingInProgress && (
             <div className="plan-card-footer summary-footer">
               <button
@@ -825,35 +870,6 @@ export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBook
               >
                 ✅ ยืนยันการจอง
               </button>
-            </div>
-          )}
-          
-          {/* ✅ Agent Mode: Show auto-booking status when in progress */}
-          {isAutoBookingInProgress && (
-            <div className="plan-card-section">
-              <div className="plan-card-section-body plan-card-small">
-                <div style={{ color: '#10b981', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span className="plan-card-spinner" style={{ display: 'inline-block', width: '16px', height: '16px', border: '2px solid #10b981', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }}></span>
-                  🤖 Agent Mode: กำลังเลือกตัวเลือกและจองให้อัตโนมัติ...
-                </div>
-                <div style={{ marginTop: '8px', opacity: 0.8, fontSize: '0.875rem' }}>
-                  ไม่ต้องกดยืนยัน - ระบบจะจองให้อัตโนมัติ
-                </div>
-              </div>
-            </div>
-          )}
-          
-          {/* ✅ Agent Mode: Show auto-booked success message */}
-          {isAutoBooked && bookingResult && (
-            <div className="plan-card-section">
-              <div className="plan-card-section-body plan-card-small">
-                <div style={{ color: '#10b981', fontWeight: 600 }}>
-                  ✅ Agent Mode: จองสำเร็จแล้ว!
-                </div>
-                <div style={{ marginTop: '8px', opacity: 0.8, fontSize: '0.875rem' }}>
-                  กรุณาชำระเงินเพื่อยืนยันการจอง
-                </div>
-              </div>
             </div>
           )}
         </>
@@ -898,6 +914,11 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
   const flightSegments = flight.segments || [];
   const hotelSegments = hotel.segments || [];
   const transportSegments = transport.segments || [];
+  // ✅ ถ้าไม่มี outbound/inbound แยกจาก API ให้แยกจาก segments เพื่อแสดงขาไป/ขากลับ
+  const hasOutboundInboundFinal = flight.outbound?.length > 0 || flight.inbound?.length > 0;
+  const splitFinal = hasOutboundInboundFinal ? null : splitFlightSegmentsToOutboundInbound(flightSegments, travelSlots);
+  const outboundSegmentsFinal = hasOutboundInboundFinal ? (flight.outbound || []) : (splitFinal?.outbound || []);
+  const inboundSegmentsFinal = hasOutboundInboundFinal ? (flight.inbound || []) : (splitFinal?.inbound || []);
 
   // Format dates
   const startDate = formatThaiDate(travelSlots?.start_date);
@@ -915,30 +936,17 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
         </div>
       </div>
 
-      {/* Trip Overview */}
-      <div className="plan-card-section">
-        <div className="plan-card-section-title">🎯 ข้อมูลทริป</div>
-        <div className="plan-card-section-body">
-          {travelSlots?.origin && travelSlots?.destination && kv('เส้นทาง', `${travelSlots.origin} → ${travelSlots.destination}`)}
-          {startDate && kv('วันเดินทาง', startDate)}
-          {returnDate && kv('วันกลับ', returnDate)}
-          {nights > 0 && kv('จำนวนคืน', `${nights} คืน`)}
-          {adults > 0 && kv('ผู้ใหญ่', `${adults} คน`)}
-          {children > 0 && kv('เด็ก', `${children} คน`)}
-        </div>
-      </div>
-
       {/* Flight Details */}
-      {(flightSegments.length > 0 || (flight.outbound && flight.outbound.length > 0) || (flight.inbound && flight.inbound.length > 0)) && (
+      {(flightSegments.length > 0 || outboundSegmentsFinal.length > 0 || inboundSegmentsFinal.length > 0) && (
         <div className="plan-card-section">
           <div className="plan-card-section-title">✈️ เที่ยวบิน</div>
           <div className="plan-card-section-body">
             {/* ✅ แสดงขาไป (Outbound) */}
-            {flight.outbound && flight.outbound.length > 0 && (
-              <div style={{ marginBottom: flight.inbound && flight.inbound.length > 0 ? '20px' : '0', paddingBottom: flight.inbound && flight.inbound.length > 0 ? '16px' : '0', borderBottom: flight.inbound && flight.inbound.length > 0 ? '1px solid #e5e7eb' : 'none' }}>
+            {outboundSegmentsFinal.length > 0 && (
+              <div style={{ marginBottom: inboundSegmentsFinal.length > 0 ? '20px' : '0', paddingBottom: inboundSegmentsFinal.length > 0 ? '16px' : '0', borderBottom: inboundSegmentsFinal.length > 0 ? '1px solid #e5e7eb' : 'none' }}>
                 <div style={{ fontWeight: 600, marginBottom: '12px', color: '#2563eb', fontSize: '15px' }}>🛫 ขาไป</div>
-                {flight.outbound.map((seg, idx) => {
-                  const isLast = idx === flight.outbound.length - 1;
+                {outboundSegmentsFinal.map((seg, idx) => {
+                  const isLast = idx === outboundSegmentsFinal.length - 1;
                   return (
                     <div key={idx} style={{ marginBottom: isLast ? '0' : '12px', paddingLeft: '8px', borderLeft: '3px solid #3b82f6' }}>
                       {seg.carrier && (
@@ -962,11 +970,11 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
             )}
             
             {/* ✅ แสดงขากลับ (Inbound) */}
-            {flight.inbound && flight.inbound.length > 0 && (
+            {inboundSegmentsFinal.length > 0 && (
               <div>
                 <div style={{ fontWeight: 600, marginBottom: '12px', color: '#2563eb', fontSize: '15px' }}>🛬 ขากลับ</div>
-                {flight.inbound.map((seg, idx) => {
-                  const isLast = idx === flight.inbound.length - 1;
+                {inboundSegmentsFinal.map((seg, idx) => {
+                  const isLast = idx === inboundSegmentsFinal.length - 1;
                   return (
                     <div key={idx} style={{ marginBottom: isLast ? '0' : '12px', paddingLeft: '8px', borderLeft: '3px solid #10b981' }}>
                       {seg.carrier && (
@@ -989,8 +997,8 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
               </div>
             )}
             
-            {/* ✅ Fallback: แสดงแบบเดิมถ้าไม่มี outbound/inbound แยก */}
-            {(!flight.outbound || flight.outbound.length === 0) && (!flight.inbound || flight.inbound.length === 0) && flightSegments.length > 0 && (
+            {/* ✅ Fallback: แสดงแบบเดิมถ้าแยกขาไป/ขากลับไม่ได้ */}
+            {outboundSegmentsFinal.length === 0 && inboundSegmentsFinal.length === 0 && flightSegments.length > 0 && (
               <>
                 {flightSegments.map((seg, idx) => (
                   <div key={idx} style={{ marginBottom: idx < flightSegments.length - 1 ? '12px' : '0' }}>
@@ -1013,7 +1021,7 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
             )}
             
             {/* ✅ ราคารวม */}
-            {flight.total_price && kv('ราคา', money(currency, flight.total_price))}
+            {flight.total_price && kv('ราคา', moneyThb(flight.total_price, currency))}
           </div>
         </div>
       )}
@@ -1031,7 +1039,7 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
                   {seg.nights && kv('จำนวนคืน', `${seg.nights} คืน`)}
                   {seg.boardType && kv('ประเภทอาหาร', seg.boardType)}
                   {seg.address && kv('ที่อยู่', seg.address)}
-                  {seg.price && kv('ราคา', money(seg.currency || currency, seg.price))}
+                  {seg.price && kv('ราคา', moneyThb(seg.price, seg.currency || currency))}
                 </div>
               ))
             ) : (
@@ -1041,7 +1049,7 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
                 {hotel.nights && kv('จำนวนคืน', `${hotel.nights} คืน`)}
                 {hotel.boardType && kv('ประเภทอาหาร', hotel.boardType)}
                 {hotel.address && kv('ที่อยู่', hotel.address)}
-                {(hotel.total_price != null || hotel.price_total != null) && kv('ราคา', money(currency, hotel.total_price ?? hotel.price_total))}
+                {(hotel.total_price != null || hotel.price_total != null) && kv('ราคา', moneyThb(hotel.total_price ?? hotel.price_total, currency))}
               </>
             )}
           </div>
@@ -1059,7 +1067,7 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
                   {seg.type && kv(`ประเภท (${idx + 1})`, seg.type)}
                   {seg.route && kv('เส้นทาง', seg.route)}
                   {seg.duration && kv('ระยะเวลา', seg.duration)}
-                  {seg.price && kv('ราคา', money(seg.currency || currency, seg.price))}
+                  {seg.price && kv('ราคา', moneyThb(seg.price, seg.currency || currency))}
                 </div>
               ))
             ) : (
@@ -1067,7 +1075,7 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
                 {transport.type && kv('ประเภท', transport.type)}
                 {transport.route && kv('เส้นทาง', transport.route)}
                 {transport.duration && kv('ระยะเวลา', transport.duration)}
-                {(transport.price != null || transport.price_amount != null) && kv('ราคา', money(currency, transport.price ?? transport.price_amount))}
+                {(transport.price != null || transport.price_amount != null) && kv('ราคา', moneyThb(transport.price ?? transport.price_amount, currency))}
               </>
             )}
           </div>
@@ -1079,10 +1087,10 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
         <div className="plan-card-section">
           <div className="plan-card-section-title">💰 รายละเอียดราคา</div>
           <div className="plan-card-section-body">
-            {plan.price_breakdown.flight && kv('ไฟท์บิน', money(currency, plan.price_breakdown.flight))}
-            {plan.price_breakdown.hotel && kv('ที่พัก', money(currency, plan.price_breakdown.hotel))}
-            {plan.price_breakdown.transport && kv('การเดินทาง', money(currency, plan.price_breakdown.transport))}
-            {plan.price_breakdown.car && kv('รถเช่า', money(currency, plan.price_breakdown.car))}
+            {plan.price_breakdown.flight && kv('ไฟท์บิน', moneyThb(plan.price_breakdown.flight, currency))}
+            {plan.price_breakdown.hotel && kv('ที่พัก', moneyThb(plan.price_breakdown.hotel, currency))}
+            {plan.price_breakdown.transport && kv('การเดินทาง', moneyThb(plan.price_breakdown.transport, currency))}
+            {plan.price_breakdown.car && kv('รถเช่า', moneyThb(plan.price_breakdown.car, currency))}
           </div>
         </div>
       )}
@@ -1104,9 +1112,9 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
       <div className="plan-card-footer">
         <div className="plan-card-price-final">
           <div className="plan-card-price-label">ราคารวมทั้งหมด</div>
-          <div className="plan-card-price-value">{money(currency, totalPrice)}</div>
+          <div className="plan-card-price-value">{moneyThb(totalPrice, currency)}</div>
         </div>
-        <div className="summary-note">ราคาอ้างอิงจาก Amadeus Search (production)</div>
+        <div className="summary-note">ราคาอ้างอิงจาก Amadeus Search (production){currency !== 'THB' ? ' · แสดงเป็นบาท (อัตราอ้างอิง)' : ''}</div>
       </div>
 
       {/* ✅ Cache Validation Status - ขั้นสุดท้ายก่อนจอง */}

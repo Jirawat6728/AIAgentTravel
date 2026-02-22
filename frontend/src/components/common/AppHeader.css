@@ -9,15 +9,15 @@
   z-index: 100;
 }
 
-/* Mobile: โลโก้แบบแถบน้ำเงิน + เครื่องบิน + AI Travel Agent ตามภาพอ้างอิง */
+/* Mobile: โลโก้แบบแถบน้ำเงิน + เครื่องบิน + เมนู */
 @media (max-width: 768px) {
   .app-header {
-    padding: clamp(0.5rem, 1.5vw, 0.75rem) clamp(0.75rem, 2vw, 1rem);
+    padding: clamp(0.5rem, 1.5vw, 0.75rem) clamp(0.75rem, 2.5vw, 1rem);
   }
   
   .app-header-content {
     padding: 0 0.5rem;
-    gap: 0.25rem;
+    gap: clamp(0.35rem, 1.5vw, 0.5rem);
   }
   
   .app-logo-section {
@@ -327,20 +327,28 @@
 
 @media (max-width: 768px) {
   .app-user-section {
-    gap: clamp(0.25rem, 1vw, 0.5rem);
+    gap: clamp(0.5rem, 2.5vw, 0.75rem);
     flex-shrink: 0;
   }
   
-  /* ปรับทุกปุ่มให้เท่ากันบน mobile */
+  /* ปุ่มและ avatar บน mobile — ขนาดพอดีสำหรับสัมผัส */
   .app-btn-notification,
-  .app-btn-bookings-mobile,
   .app-user-avatar,
   .app-btn-logout {
-    width: clamp(2rem, 5vw, 2.25rem);
-    height: clamp(2rem, 5vw, 2.25rem);
-    min-width: clamp(2rem, 5vw, 2.25rem);
-    min-height: clamp(2rem, 5vw, 2.25rem);
+    width: clamp(2.25rem, 6vw, 2.5rem);
+    height: clamp(2.25rem, 6vw, 2.5rem);
+    min-width: clamp(2.25rem, 6vw, 2.5rem);
+    min-height: clamp(2.25rem, 6vw, 2.5rem);
     flex-shrink: 0;
+  }
+  
+  .app-user-info.app-user-clickable {
+    padding: 0.35rem 0.25rem 0.35rem 0.35rem;
+    border-radius: 50%;
+  }
+  
+  .app-user-dropdown-icon {
+    display: none;
   }
   
   .app-btn-logout {
@@ -413,55 +421,16 @@
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
-/* ✅ Mobile: My Bookings Button */
-.app-btn-bookings-mobile {
-  display: none; /* Hidden on desktop */
-}
-
-@media (max-width: 767px) {
-  .app-btn-bookings-mobile {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: clamp(1.75rem, 4.5vw, 2rem);
-    height: clamp(1.75rem, 4.5vw, 2rem);
-    background: rgba(255, 255, 255, 0.15);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 50%;
-    color: white;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    padding: 0;
-    flex-shrink: 0;
-  }
-  
-  .app-btn-bookings-mobile:hover {
-    background: rgba(255, 255, 255, 0.25);
-    border-color: rgba(255, 255, 255, 0.3);
-    transform: translateY(-1px);
-  }
-  
-  .app-btn-bookings-mobile.active {
-    background: rgba(255, 255, 255, 0.3);
-    border-color: rgba(255, 255, 255, 0.4);
-  }
-  
-  .app-bookings-icon-mobile {
-    width: clamp(0.875rem, 2.5vw, 1rem);
-    height: clamp(0.875rem, 2.5vw, 1rem);
-  }
-}
-
 @media (max-width: 768px) {
   .app-btn-notification {
-    width: clamp(1.75rem, 4.5vw, 2rem);
-    height: clamp(1.75rem, 4.5vw, 2rem);
+    width: clamp(2.25rem, 6vw, 2.5rem);
+    height: clamp(2.25rem, 6vw, 2.5rem);
     flex-shrink: 0;
   }
   
   .app-notification-icon {
-    width: clamp(0.875rem, 2.5vw, 1rem);
-    height: clamp(0.875rem, 2.5vw, 1rem);
+    width: clamp(1rem, 2.75vw, 1.125rem);
+    height: clamp(1rem, 2.75vw, 1.125rem);
   }
   
   .app-notification-badge {
@@ -824,8 +793,19 @@
   cursor: pointer;
   transition: all 0.2s ease;
   font-family: inherit;
-  white-space: nowrap; /* ✅ Prevent text wrapping */
+  white-space: nowrap;
   min-width: fit-content;
+}
+
+@media (max-width: 768px) {
+  .app-mobile-menu-button {
+    padding: 0.5rem 0.65rem;
+    gap: 0.4rem;
+  }
+  
+  .app-mobile-menu-text {
+    font-size: 0.8125rem;
+  }
 }
 
 .app-mobile-menu-button:hover {

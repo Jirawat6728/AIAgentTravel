@@ -258,3 +258,39 @@ async def mark_all_notifications_read(request: Request):
     except Exception as e:
         logger.error(f"Failed to mark all notifications as read: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to mark all notifications as read: {str(e)}")
+
+
+@router.post("/clear-all")
+async def clear_all_notifications(request: Request):
+    """
+    ลบการแจ้งเตือนทั้งหมดออกเฉพาะของ user ปัจจุบัน (ตาม X-User-ID หรือ session)
+    """
+    try:
+        user_id = extract_user_id_from_request(request)
+        
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        
+        storage = MongoStorage()
+        await storage.connect()
+        
+        if storage.db is None:
+            raise HTTPException(status_code=500, detail="Database connection unavailable")
+        
+        notifications_collection = storage.db.get_collection("notifications")
+        
+        result = await notifications_collection.delete_many({"user_id": user_id})
+        
+        logger.info(f"Cleared all notifications for user: {user_id}, deleted: {result.deleted_count}")
+        
+        return {
+            "ok": True,
+            "message": f"ลบการแจ้งเตือนทั้งหมดแล้ว ({result.deleted_count} รายการ)",
+            "deleted_count": result.deleted_count
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to clear notifications: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="ไม่สามารถล้างการแจ้งเตือนได้")

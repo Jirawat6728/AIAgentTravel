@@ -2,24 +2,57 @@ import React, { createContext, useContext, useMemo, useState, useEffect } from '
 
 const ThemeContext = createContext({ theme: 'light' });
 
+// กลางวัน 06:00–18:00 = light, นอกนั้น = dark
+function isTimeLight() {
+  const hour = new Date().getHours();
+  return hour >= 6 && hour < 18;
+}
+
 export function ThemeProvider({ user, children }) {
-  const [systemDark, setSystemDark] = useState(() =>
-    typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)')?.matches
+  const [timeDark, setTimeDark] = useState(() => !isTimeLight());
+
+  const [localPref, setLocalPref] = useState(() =>
+    typeof window !== 'undefined' ? (localStorage.getItem('app_theme') ?? 'light') : 'light'
   );
 
+  // อัปเดตทุกนาที เพื่อให้เปลี่ยนธีมตรงเวลา
   useEffect(() => {
-    const mq = window.matchMedia?.('(prefers-color-scheme: dark)');
-    if (!mq) return;
-    const handler = (e) => setSystemDark(e.matches);
-    mq.addEventListener('change', handler);
-    return () => mq.removeEventListener('change', handler);
+    const tick = () => setTimeDark(!isTimeLight());
+    tick();
+    const id = setInterval(tick, 60 * 1000);
+    return () => clearInterval(id);
   }, []);
 
-  const pref = user?.preferences?.theme ?? localStorage.getItem('app_theme') ?? 'light';
+  useEffect(() => {
+    const handleStorage = (e) => {
+      if (e.key === 'app_theme') {
+        setLocalPref(e.newValue ?? 'light');
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
+
+  useEffect(() => {
+    const handleThemeUpdate = (e) => {
+      setLocalPref(e.detail ?? localStorage.getItem('app_theme') ?? 'light');
+    };
+    window.addEventListener('app-theme-change', handleThemeUpdate);
+    return () => window.removeEventListener('app-theme-change', handleThemeUpdate);
+  }, []);
+
+  useEffect(() => {
+    if (user?.preferences?.theme) {
+      setLocalPref(user.preferences.theme);
+      localStorage.setItem('app_theme', user.preferences.theme);
+    }
+  }, [user?.preferences?.theme]);
+
+  const pref = localPref;
   const theme = useMemo(() => {
-    if (pref === 'auto') return systemDark ? 'dark' : 'light';
+    if (pref === 'auto') return timeDark ? 'dark' : 'light';
     return pref === 'dark' ? 'dark' : 'light';
-  }, [pref, systemDark]);
+  }, [pref, timeDark]);
 
   const value = useMemo(() => ({ theme }), [theme]);
 

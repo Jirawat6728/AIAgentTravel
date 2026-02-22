@@ -375,7 +375,8 @@ class DataAggregator:
                             m_part = d.split('H')[1] if 'H' in d else d.replace('PT', '')
                             m = int(m_part.replace('M', '')) if 'M' in m_part else 0
                             return h * 60 + m
-                        except: return 999999
+                        except Exception:
+                            return 999999
                     
                     fastest = min(results, key=lambda x: parse_dur(x.duration))
                     if "เร็วที่สุด" not in fastest.tags:
@@ -1040,9 +1041,9 @@ class DataAggregator:
             d1 = datetime.strptime(check_in_date, "%Y-%m-%d")
             d2 = datetime.strptime(check_out_date, "%Y-%m-%d")
             nights = (d2 - d1).days or 1
-        except:
+        except Exception:
             pass
-        
+
         pricing_obj = HotelPricing(
             total_amount=total,
             base_amount=base,

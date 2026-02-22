@@ -13,6 +13,7 @@ from typing import Optional, List, Any, Dict
 from app.models import UserSession, TripPlan
 from app.models.trip_plan import SegmentStatus
 from app.engine.agent import TravelAgent
+from app.core.constants import FALLBACK_RESPONSE_EMPTY
 from app.services.llm import LLMServiceWithMCP
 from app.services.llm import IntentBasedLLM
 from app.services.title import generate_chat_title
@@ -47,6 +48,25 @@ def _write_debug_log(data: dict):
     except Exception as e:
         logger.debug(f"Failed to write debug log: {e}")
         pass  # Silently ignore debug log errors
+
+async def _is_admin_user(user_id: str, storage) -> bool:
+    """ตรวจสอบว่า user_id เป็น admin หรือไม่ (เช็กจาก DB เท่านั้น ไม่ hardcode)"""
+    if not user_id or user_id == "anonymous":
+        return False
+    try:
+        if hasattr(storage, 'mongo') and storage.mongo and hasattr(storage.mongo, 'db') and storage.mongo.db:
+            user_data = await storage.mongo.db["users"].find_one({"user_id": user_id})
+        elif hasattr(storage, 'db') and storage.db:
+            user_data = await storage.db["users"].find_one({"user_id": user_id})
+        elif hasattr(storage, 'users_collection') and storage.users_collection:
+            user_data = await storage.users_collection.find_one({"user_id": user_id})
+        else:
+            return False
+        return bool(user_data and user_data.get("is_admin"))
+    except Exception as e:
+        logger.warning(f"Failed to check admin status for user {user_id}: {e}")
+        return False
+
 
 # Initialize TTS service
 _tts_service = None
@@ -172,17 +192,23 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
                     else:
                         leg_label = direction_label
 
+                    dep = seg.get("departure") or {}
+                    arr = seg.get("arrival") or {}
+                    at_dep = dep.get("at") or ""
+                    at_arr = arr.get("at") or ""
+                    depart_time = at_dep.split("T")[-1][:5] if isinstance(at_dep, str) and "T" in at_dep else (at_dep[:5] if isinstance(at_dep, str) and len(at_dep) >= 5 else "")
+                    arrive_time = at_arr.split("T")[-1][:5] if isinstance(at_arr, str) and "T" in at_arr else (at_arr[:5] if isinstance(at_arr, str) and len(at_arr) >= 5 else "")
                     mapped_seg = {
-                        "from": seg.get("departure", {}).get("iataCode"),
-                        "to": seg.get("arrival", {}).get("iataCode"),
-                        "depart_time": seg.get("departure", {}).get("at").split("T")[-1][:5] if "T" in seg.get("departure", {}).get("at", "") else "",
-                        "arrive_time": seg.get("arrival", {}).get("at").split("T")[-1][:5] if "T" in seg.get("arrival", {}).get("at", "") else "",
-                        "depart_at": seg.get("departure", {}).get("at"),
-                        "arrive_at": seg.get("arrival", {}).get("at"),
+                        "from": dep.get("iataCode"),
+                        "to": arr.get("iataCode"),
+                        "depart_time": depart_time,
+                        "arrive_time": arrive_time,
+                        "depart_at": at_dep if at_dep else None,
+                        "arrive_at": at_arr if at_arr else None,
                         "duration": seg.get("duration"),
                         "carrier": seg.get("carrierCode"),
                         "flight_number": seg.get("number"),
-                        "aircraft_code": seg.get("aircraft", {}).get("code"),
+                        "aircraft_code": (seg.get("aircraft") or {}).get("code"),
                         "direction": leg_label
                     }
                     mapped_segments.append(mapped_seg)
@@ -459,6 +485,37 @@ async def _get_user_visa_profile(storage, user_id: str) -> Dict[str, Any]:
         return {}
 
 
+async def _load_user_agent_preferences(storage, user_id: str) -> dict:
+    """Load all AI Agent preferences for a user from MongoDB. Returns defaults if not found."""
+    defaults = {
+        "agentPersonality": "friendly",
+        "responseStyle": "balanced",
+        "detailLevel": "medium",
+        "chatLanguage": "th",
+        "reinforcementLearning": True,
+    }
+    try:
+        users_collection = None
+        if hasattr(storage, 'db') and storage.db:
+            users_collection = storage.db["users"]
+        elif hasattr(storage, 'users_collection') and storage.users_collection:
+            users_collection = storage.users_collection
+        if users_collection is not None:
+            user_data = await users_collection.find_one({"user_id": user_id})
+            if user_data and user_data.get("preferences"):
+                prefs = user_data["preferences"]
+                return {
+                    "agentPersonality": prefs.get("agentPersonality", defaults["agentPersonality"]),
+                    "responseStyle": prefs.get("responseStyle", defaults["responseStyle"]),
+                    "detailLevel": prefs.get("detailLevel", defaults["detailLevel"]),
+                    "chatLanguage": prefs.get("chatLanguage", defaults["chatLanguage"]),
+                    "reinforcementLearning": prefs.get("reinforcementLearning", defaults["reinforcementLearning"]),
+                }
+    except Exception as e:
+        logger.warning(f"Failed to load agent preferences for user {user_id}: {e}")
+    return defaults
+
+
 async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = False, mode: str = "normal"):
     """Helper to extract metadata for frontend from session using Slot & Segment logic
     
@@ -511,10 +568,11 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
     }
     
     # ✅ Extract selected options and format for SlotCards
-    # Flight: Extract from confirmed segments with selected_option (both outbound and inbound)
+    # Flight: Extract from segments with selected_option (CONFIRMED หรือ Agent Mode ที่มี selected_option)
+    agent_mode = (mode == "agent")
+    confirmed_outbound = [s for s in plan.travel.flights.outbound if s.selected_option and (s.status == SegmentStatus.CONFIRMED or agent_mode)]
+    confirmed_inbound = [s for s in plan.travel.flights.inbound if s.selected_option and (s.status == SegmentStatus.CONFIRMED or agent_mode)]
     flight_data = None
-    confirmed_outbound = [s for s in plan.travel.flights.outbound if s.status == SegmentStatus.CONFIRMED and s.selected_option]
-    confirmed_inbound = [s for s in plan.travel.flights.inbound if s.status == SegmentStatus.CONFIRMED and s.selected_option]
     
     outbound_segments = []
     inbound_segments = []
@@ -586,9 +644,9 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
             "num_stops": max(0, len(outbound_segments) - 1) if outbound_segments else 0
         }
     
-    # Hotel: Extract from confirmed segments with selected_option
+    # Hotel: Extract from segments with selected_option (CONFIRMED หรือ Agent Mode)
     hotel_data = None
-    confirmed_hotel_segments = [s for s in all_accommodations if s.status == SegmentStatus.CONFIRMED and s.selected_option]
+    confirmed_hotel_segments = [s for s in all_accommodations if s.selected_option and (s.status == SegmentStatus.CONFIRMED or agent_mode)]
     if confirmed_hotel_segments:
         # Get first confirmed hotel segment
         first_hotel_seg = confirmed_hotel_segments[0]
@@ -611,10 +669,9 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
                       datetime.fromisoformat(first_hotel_seg.requirements["check_in"].replace("Z", "+00:00"))).days or None
         }
     
-    # Transport: Extract from confirmed segments with selected_option
-    # ✅ Enhanced: Include all transport details (price, distance, provider, vehicle type, etc.)
+    # Transport: Extract from segments with selected_option (CONFIRMED หรือ Agent Mode)
     transport_data = None
-    confirmed_transport_segments = [s for s in all_ground if s.status == SegmentStatus.CONFIRMED and s.selected_option]
+    confirmed_transport_segments = [s for s in all_ground if s.selected_option and (s.status == SegmentStatus.CONFIRMED or agent_mode)]
     if confirmed_transport_segments:
         first_transport_seg = confirmed_transport_segments[0]
         selected_transport = first_transport_seg.selected_option
@@ -786,14 +843,18 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
     is_fully_complete = has_any_segments and plan.is_complete() # ทุกอย่างเสร็จ 100%
     
     # Check Core Segments (Flights + Hotels) - ถือว่า "พร้อมแสดง Summary" แล้ว
+    agent_mode_active = (mode == "agent")
     has_confirmed_flights = any(seg.status == SegmentStatus.CONFIRMED for seg in all_flights)
     has_confirmed_hotels = any(seg.status == SegmentStatus.CONFIRMED for seg in all_accommodations)
-    has_core_segments_ready = has_confirmed_flights or has_confirmed_hotels
-    
-    agent_mode_active = (mode == "agent")
+    has_selected_flights = any(getattr(s, "selected_option", None) for s in all_flights)
+    has_selected_hotels = any(getattr(s, "selected_option", None) for s in all_accommodations)
+    has_core_segments_ready = (
+        has_confirmed_flights or has_confirmed_hotels
+        or (agent_mode_active and (has_selected_flights or has_selected_hotels))
+    )
     # แสดง Summary ได้เมื่อ:
     # - Normal Mode: ทั้งหมดเสร็จ หรือ มี Core Segments พร้อมแล้ว (ผู้ใช้เลือกแล้ว)
-    # - Agent Mode: ทั้งหมดเสร็จ หรือ มี Core Segments พร้อมแล้ว หรือ Agent เลือกแล้ว
+    # - Agent Mode: ทั้งหมดเสร็จ หรือ มี Core Segments พร้อมแล้ว หรือ Agent เลือกแล้ว (มี selected_option)
     should_show_summary = is_fully_complete or has_core_segments_ready
     
     # ✅ Build current_plan with formatted data for TripSummaryCard
@@ -837,22 +898,25 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
         if not plan.travel.flights.inbound or len(plan.travel.flights.inbound) == 0:
             trip_type = "one_way"
     
-    # ✅ Workflow state (Redis) + อัปเดต step = summary เมื่อพร้อมสรุป
+    # ✅ Workflow state (Redis) + schema สำหรับ frontend (current_step, is_complete, completeness_issues)
     workflow_validation = None
     workflow_step = "planning"
     if session:
         try:
             from app.services.workflow_state import get_workflow_state_service, WorkflowStep as WfStep
             wf = get_workflow_state_service()
-            workflow_validation = await wf.get_workflow_state(session.session_id)
-            if workflow_validation:
-                workflow_step = workflow_validation.get("step", "planning")
             if should_show_summary:
                 await wf.set_workflow_state(session.session_id, WfStep.SUMMARY)
-                workflow_step = WfStep.SUMMARY
-                workflow_validation = workflow_validation or {}
+            workflow_validation = await wf.get_workflow_validation(
+                session.session_id,
+                trip_plan=plan,
+            )
+            workflow_step = workflow_validation.get("current_step") or workflow_validation.get("step", "planning")
+            if should_show_summary:
                 workflow_validation["step"] = WfStep.SUMMARY
+                workflow_validation["current_step"] = WfStep.SUMMARY
                 workflow_validation["is_complete"] = True
+                workflow_validation["completeness_issues"] = []
         except Exception as wf_err:
             logger.warning(f"Workflow state: {wf_err}")
     
@@ -1005,24 +1069,17 @@ async def chat_stream(
             try:
                 llm_with_mcp = LLMServiceWithMCP()
                 
-                # ✅ Get user preferences for agent personality
-                agent_personality = "friendly"  # Default
-                try:
-                    if hasattr(storage, 'db') and storage.db:
-                        users_collection = storage.db["users"]
-                        user_data = await users_collection.find_one({"user_id": user_id})
-                        if user_data and user_data.get("preferences"):
-                            preferences = user_data.get("preferences", {})
-                            agent_personality = preferences.get("agentPersonality", "friendly")
-                    elif hasattr(storage, 'users_collection') and storage.users_collection:
-                        user_data = await storage.users_collection.find_one({"user_id": user_id})
-                        if user_data and user_data.get("preferences"):
-                            preferences = user_data.get("preferences", {})
-                            agent_personality = preferences.get("agentPersonality", "friendly")
-                except Exception as pref_error:
-                    logger.warning(f"Failed to load user preferences for personality: {pref_error}")
-                
-                agent = TravelAgent(storage, llm_service=llm_with_mcp, agent_personality=agent_personality)
+                # ✅ Get user preferences for agent (personality, style, language, RL)
+                _prefs = await _load_user_agent_preferences(storage, user_id)
+                agent = TravelAgent(
+                    storage,
+                    llm_service=llm_with_mcp,
+                    agent_personality=_prefs["agentPersonality"],
+                    response_style=_prefs["responseStyle"],
+                    detail_level=_prefs["detailLevel"],
+                    chat_language=_prefs["chatLanguage"],
+                    reinforcement_learning=_prefs["reinforcementLearning"],
+                )
                 
                 # #region agent log (Hypothesis: No Response)
                 _write_debug_log({
@@ -1109,15 +1166,15 @@ async def chat_stream(
             heartbeat_interval = 2.0  # 2 seconds
             
             # 2. Bridge status updates from queue to SSE until task is done
-            max_wait_time = 90.0  # Maximum time to wait for task
+            _stream_timeout = float(settings.chat_timeout_agent if mode == "agent" else settings.chat_timeout_normal)
             start_time = asyncio.get_event_loop().time()
             
             while not task.done() or not status_queue.empty():
                 try:
                     # Check timeout
                     elapsed = asyncio.get_event_loop().time() - start_time
-                    if elapsed > max_wait_time:
-                        logger.warning(f"Task timeout exceeded ({elapsed:.1f}s) for session {session_id}")
+                    if elapsed > _stream_timeout:
+                        logger.warning(f"Task timeout exceeded ({elapsed:.1f}s > {_stream_timeout}s) for session {session_id}")
                         task.cancel()
                         break
                     
@@ -1125,6 +1182,22 @@ async def chat_stream(
                     try:
                         status_data = await asyncio.wait_for(status_queue.get(), timeout=0.1)
                         yield f"data: {json.dumps(status_data, ensure_ascii=False)}\n\n"
+                        # ✅ Agent Mode: เมื่อได้ step agent_show_summary ให้ส่ง summary_ready พร้อม current_plan เพื่อให้ frontend แสดง Trip Summary ก่อนจอง
+                        if status_data.get("step") == "agent_show_summary":
+                            try:
+                                updated_session = await storage.get_session(session_id)
+                                if updated_session:
+                                    metadata = await get_agent_metadata(updated_session, is_admin=False, mode=mode)
+                                    summary_event = {
+                                        "status": "summary_ready",
+                                        "current_plan": metadata.get("current_plan"),
+                                        "travel_slots": metadata.get("travel_slots"),
+                                        "workflow_validation": metadata.get("workflow_validation"),
+                                        "agent_state": metadata.get("agent_state"),
+                                    }
+                                    yield f"data: {json.dumps(summary_event, ensure_ascii=False)}\n\n"
+                            except Exception as summary_err:
+                                logger.warning(f"Agent show summary: failed to build summary_ready event: {summary_err}")
                     except asyncio.TimeoutError:
                         # ✅ HEARTBEAT: Send ping every 2 seconds while waiting
                         current_time = asyncio.get_event_loop().time()
@@ -1151,9 +1224,11 @@ async def chat_stream(
             
             # 3. Get the final response from agent (task is already done)
             response_text = None
+            auto_booked = False
             try:
-                # ✅ Add overall timeout for the agent execution: 90 seconds (1.5-minute completion target)
-                logger.info(f"Waiting for agent task to complete: session={session_id}")
+                # ✅ Timeout อ่านจาก settings เพื่อให้ตรงกับ middleware (ไม่ถูกตัดก่อน)
+                timeout_seconds = float(settings.chat_timeout_agent if mode == "agent" else settings.chat_timeout_normal)
+                logger.info(f"Waiting for agent task to complete: session={session_id}, timeout={timeout_seconds}s")
                 
                 # #region agent log (Hypothesis: No Response)
                 _write_debug_log({
@@ -1168,7 +1243,13 @@ async def chat_stream(
                 })
                 # #endregion
                 
-                response_text = await asyncio.wait_for(task, timeout=90.0)  # ✅ Changed from 60s to 90s for 1.5-minute completion
+                result = await asyncio.wait_for(task, timeout=timeout_seconds)  # ✅ str or (str, {"auto_booked": True})
+                if isinstance(result, tuple):
+                    response_text, agent_extra = result
+                    auto_booked = agent_extra.get("auto_booked", False)
+                else:
+                    response_text = result
+                    auto_booked = False
                 
                 # ✅ CRITICAL: Log detailed response info
                 if response_text is None:
@@ -1196,8 +1277,11 @@ async def chat_stream(
                 
                 # ✅ CRITICAL: Check if response_text is None or empty
                 if not response_text or not response_text.strip():
-                    logger.error(f"Agent returned empty response for session {session_id}")
-                    response_text = "ขออภัยค่ะ ระบบไม่สามารถสร้างคำตอบได้ในขณะนี้ กรุณาลองใหม่อีกครั้งนะคะ"
+                    logger.error(
+                        "Agent returned empty response, using fallback",
+                        extra={"session_id": session_id, "fallback_reason": "stream_agent_empty"},
+                    )
+                    response_text = FALLBACK_RESPONSE_EMPTY
                 else:
                     logger.info(f"Agent response received: {response_text[:100]}...")
             except asyncio.TimeoutError:
@@ -1217,6 +1301,8 @@ async def chat_stream(
                         response_text = "ขออภัยค่ะ ระบบไม่สามารถเชื่อมต่อกับ AI service ได้ กรุณาตรวจสอบ GEMINI_API_KEY ในไฟล์ .env"
                     elif "timeout" in error_str or "timed out" in error_str:
                         response_text = "ระบบใช้เวลาประมวลผลนานเกินไป กรุณาลองใหม่อีกครั้ง"
+                    elif "connection aborted" in error_str or "remotedisconnected" in error_str or "remote end closed" in error_str:
+                        response_text = "การเชื่อมต่อหลุดระหว่างประมวลผล (อาจใช้เวลานาน) กรุณากดรีเฟรชแล้วลองจองอีกครั้ง หรือส่งข้อความใหม่ค่ะ"
                     else:
                         response_text = f"ขออภัยค่ะ เกิดข้อผิดพลาดในการประมวลผล: {str(task_exception)[:100]}"
                 else:
@@ -1231,26 +1317,7 @@ async def chat_stream(
             updated_session = await storage.get_session(session_id)
             
             # ✅ Check if user is admin (for Test Mode)
-            is_admin_user = False
-            if user_id and user_id != "anonymous":
-                # Check if user_id is admin_user_id (hardcoded for admin@example.com)
-                if user_id == "admin_user_id":
-                    is_admin_user = True
-                else:
-                    # Check from database
-                    try:
-                        # HybridStorage doesn't have connect() method - access db directly if available
-                        if hasattr(storage, 'db') and storage.db:
-                            users_collection = storage.db["users"]
-                            user_data = await users_collection.find_one({"user_id": user_id})
-                            if user_data and user_data.get("is_admin"):
-                                is_admin_user = True
-                        elif hasattr(storage, 'users_collection') and storage.users_collection:
-                            user_data = await storage.users_collection.find_one({"user_id": user_id})
-                            if user_data and user_data.get("is_admin"):
-                                is_admin_user = True
-                    except Exception as e:
-                        logger.warning(f"Failed to check admin status for user {user_id}: {e}")
+            is_admin_user = await _is_admin_user(user_id, storage)
             
             # ✅ CRITICAL: Save session after agent run to persist trip_plan with all plan choices, selected options, and raw data
             if updated_session:
@@ -1292,8 +1359,11 @@ async def chat_stream(
             # 5. Send completion data
             # ✅ CRITICAL: Ensure response_text is never None or empty
             if not response_text or not response_text.strip():
-                logger.error(f"Response text is empty for session {session_id}, using fallback")
-                response_text = "ขออภัยค่ะ ระบบไม่สามารถสร้างคำตอบได้ในขณะนี้ กรุณาลองใหม่อีกครั้งนะคะ"
+                logger.error(
+                    "Response text empty before send, using fallback",
+                    extra={"session_id": session_id, "fallback_reason": "stream_final_empty"},
+                )
+                response_text = FALLBACK_RESPONSE_EMPTY
             
             final_data = {
                 "response": response_text,
@@ -1301,6 +1371,21 @@ async def chat_stream(
                 "trip_title": updated_session.title if updated_session else None,
                 **metadata
             }
+            if mode == "agent":
+                final_data["auto_booked"] = auto_booked
+                if auto_booked:
+                    final_data["agent_booking_success_message"] = (
+                        "✅ จองอัตโนมัติสำเร็จ! กรุณาชำระเงินที่ My Bookings เพื่อยืนยันการจอง"
+                    )
+            
+            # #region agent debug log (H3)
+            try:
+                _debug_path = r"c:\Users\Juins\Desktop\DEMO\AITravelAgent\.cursor\debug.log"
+                with open(_debug_path, "a", encoding="utf-8") as _df:
+                    _df.write(json.dumps({"id": f"log_{int(datetime.utcnow().timestamp()*1000)}_final_data", "timestamp": int(datetime.utcnow().timestamp()*1000), "location": "chat.py:stream", "message": "Completion final_data built", "data": {"mode": mode, "has_current_plan": bool(metadata.get("current_plan")), "auto_booked": auto_booked if mode == "agent" else None}, "runId": "run1", "hypothesisId": "H3"}, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # #endregion
             
             # ✅ CRITICAL: Log before sending to ensure we have response
             logger.info(f"Sending completion event: session={session_id}, response_length={len(response_text)}, has_metadata={bool(metadata)}")
@@ -1340,7 +1425,7 @@ async def chat_stream(
                 # Try to send minimal response
                 try:
                     yield f"data: {json.dumps({'status': 'completed', 'data': {'response': response_text}}, ensure_ascii=False)}\n\n"
-                except:
+                except Exception:
                     logger.error(f"Failed to send minimal response for session {session_id}")
             
             # ✅ CRITICAL: Save session to database to persist trip_plan with all plan choices and raw data
@@ -1404,7 +1489,7 @@ async def chat_stream(
                 # Last resort - send minimal error
                 try:
                     yield f"data: {json.dumps({'status': 'error', 'message': 'Chat service error'}, ensure_ascii=False)}\n\n"
-                except:
+                except Exception:
                     pass  # Connection may be closed
         finally:
             clear_logging_context()
@@ -1453,25 +1538,18 @@ async def chat(
         storage = HybridStorage()
         llm_with_mcp = LLMServiceWithMCP()
         
-        # ✅ Get user preferences for agent personality
-        agent_personality = "friendly"  # Default
-        try:
-            if hasattr(storage, 'db') and storage.db:
-                users_collection = storage.db["users"]
-                user_data = await users_collection.find_one({"user_id": user_id})
-                if user_data and user_data.get("preferences"):
-                    preferences = user_data.get("preferences", {})
-                    agent_personality = preferences.get("agentPersonality", "friendly")
-            elif hasattr(storage, 'users_collection') and storage.users_collection:
-                user_data = await storage.users_collection.find_one({"user_id": user_id})
-                if user_data and user_data.get("preferences"):
-                    preferences = user_data.get("preferences", {})
-                    agent_personality = preferences.get("agentPersonality", "friendly")
-        except Exception as pref_error:
-            logger.warning(f"Failed to load user preferences for personality: {pref_error}")
-        
-        agent = TravelAgent(storage, llm_service=llm_with_mcp, agent_personality=agent_personality)
-        
+        # ✅ Get user preferences for agent (personality, style, language, RL)
+        _prefs = await _load_user_agent_preferences(storage, user_id)
+        agent = TravelAgent(
+            storage,
+            llm_service=llm_with_mcp,
+            agent_personality=_prefs["agentPersonality"],
+            response_style=_prefs["responseStyle"],
+            detail_level=_prefs["detailLevel"],
+            chat_language=_prefs["chatLanguage"],
+            reinforcement_learning=_prefs["reinforcementLearning"],
+        )
+
         # ✅ SECURITY: CRITICAL - Validate session_id format matches user_id BEFORE loading session
         from app.core.security import validate_session_user_id
         validate_session_user_id(session_id, user_id)
@@ -1521,26 +1599,7 @@ async def chat(
         # #endregion
         
         # ✅ Check if user is admin (for Test Mode)
-        is_admin_user = False
-        if user_id and user_id != "anonymous":
-            # Check if user_id is admin_user_id (hardcoded for admin@example.com)
-            if user_id == "admin_user_id":
-                is_admin_user = True
-            else:
-                # Check from database
-                try:
-                    # HybridStorage doesn't have connect() method - access db directly if available
-                    if hasattr(storage, 'db') and storage.db:
-                        users_collection = storage.db["users"]
-                        user_data = await users_collection.find_one({"user_id": user_id})
-                        if user_data and user_data.get("is_admin"):
-                            is_admin_user = True
-                    elif hasattr(storage, 'users_collection') and storage.users_collection:
-                        user_data = await storage.users_collection.find_one({"user_id": user_id})
-                        if user_data and user_data.get("is_admin"):
-                            is_admin_user = True
-                except Exception as e:
-                    logger.warning(f"Failed to check admin status for user {user_id}: {e}")
+        is_admin_user = await _is_admin_user(user_id, storage)
         
         # Extract metadata for frontend
         metadata = await get_agent_metadata(updated_session, is_admin=is_admin_user, mode=mode)
@@ -1639,10 +1698,10 @@ async def get_history(
     """
     Get chat history for a chat/trip
     Supports both chat_id (primary) and trip_id (backward compatibility)
-    Also tries multiple user_id formats for guest/anonymous users
+    Uses same user_id as /sessions and /stream (X-User-ID or cookie) for consistency.
     """
-    session_user_id = fastapi_request.cookies.get(settings.session_cookie_name)
-    user_id = session_user_id or "guest"
+    from app.core.security import extract_user_id_from_request
+    user_id = extract_user_id_from_request(fastapi_request) or "guest"
     
     # ✅ ใช้ client_trip_id เป็น chat_id (frontend ส่ง chatId มา)
     # ✅ รองรับ X-Trip-ID header สำหรับ backward compatibility
@@ -1834,25 +1893,18 @@ async def select_choice(request: dict, fastapi_request: Request):
         
         llm_with_mcp = LLMServiceWithMCP()
         
-        # ✅ Get user preferences for agent personality
-        agent_personality = "friendly"  # Default
-        try:
-            if hasattr(storage, 'db') and storage.db:
-                users_collection = storage.db["users"]
-                user_data = await users_collection.find_one({"user_id": user_id})
-                if user_data and user_data.get("preferences"):
-                    preferences = user_data.get("preferences", {})
-                    agent_personality = preferences.get("agentPersonality", "friendly")
-            elif hasattr(storage, 'users_collection') and storage.users_collection:
-                user_data = await storage.users_collection.find_one({"user_id": user_id})
-                if user_data and user_data.get("preferences"):
-                    preferences = user_data.get("preferences", {})
-                    agent_personality = preferences.get("agentPersonality", "friendly")
-        except Exception as pref_error:
-            logger.warning(f"Failed to load user preferences for personality: {pref_error}")
-        
-        agent = TravelAgent(storage, llm_service=llm_with_mcp, agent_personality=agent_personality)
-        
+        # ✅ Get user preferences for agent (personality, style, language, RL)
+        _prefs = await _load_user_agent_preferences(storage, user_id)
+        agent = TravelAgent(
+            storage,
+            llm_service=llm_with_mcp,
+            agent_personality=_prefs["agentPersonality"],
+            response_style=_prefs["responseStyle"],
+            detail_level=_prefs["detailLevel"],
+            chat_language=_prefs["chatLanguage"],
+            reinforcement_learning=_prefs["reinforcementLearning"],
+        )
+
         # ✅ สร้างข้อความที่รวมข้อมูล choice ทั้งหมดเพื่อให้ AI รู้ว่าผู้ใช้เลือกข้อมูลอะไร
         if choice_data:
             # สรุปข้อมูล choice เพื่อให้ AI เข้าใจ
@@ -2170,20 +2222,77 @@ async def live_audio_conversation(websocket: WebSocket):
                 "type": "error",
                 "message": f"Connection error: {str(e)}"
             })
-        except:
+        except Exception:
             pass
     finally:
         # Cleanup
         if session:
             try:
                 await live_service.close_session(session)
-            except:
+            except Exception:
                 pass
         try:
             await websocket.close()
-        except:
+        except Exception:
             pass
         logger.info("Live audio WebSocket connection closed")
+
+
+@router.delete("/sessions/{chat_id}")
+async def delete_chat_session(chat_id: str, fastapi_request: Request):
+    """
+    Delete a chat session and its conversation history permanently.
+    Removes both the session document and conversation messages from MongoDB.
+    ✅ SECURITY: Only allows deletion for authenticated user's own session.
+    """
+    from app.core.security import extract_user_id_from_request
+    user_id = extract_user_id_from_request(fastapi_request)
+
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    session_id = f"{user_id}::{chat_id}"
+    logger.info(f"Deleting chat session: session_id={session_id}, user_id={user_id}")
+
+    try:
+        from app.storage.connection_manager import ConnectionManager
+        conn_mgr = ConnectionManager.get_instance()
+        db = conn_mgr.get_database()
+
+        sessions_collection = db["sessions"]
+        conversations_collection = db["conversations"]
+
+        # ✅ SECURITY: Verify session belongs to this user before deleting
+        session_doc = await sessions_collection.find_one({"session_id": session_id})
+        if session_doc:
+            session_user_id = session_doc.get("user_id") or (session_id.split("::")[0] if "::" in session_id else None)
+            if session_user_id and session_user_id != user_id:
+                logger.error(f"🚨 SECURITY: Unauthorized delete attempt: user {user_id} tried to delete session owned by {session_user_id}")
+                raise HTTPException(status_code=403, detail="You do not have permission to delete this session")
+
+        # Delete session document
+        session_result = await sessions_collection.delete_one({"session_id": session_id, "user_id": user_id})
+
+        # Delete conversation/messages document
+        conv_result = await conversations_collection.delete_one({"session_id": session_id, "user_id": user_id})
+
+        # Also clear from Redis cache if available
+        try:
+            storage = HybridStorage()
+            if hasattr(storage, 'redis') and storage.redis:
+                await storage.redis.delete(f"session:{session_id}")
+                await storage.redis.delete(f"history:{session_id}")
+        except Exception as cache_err:
+            logger.debug(f"Failed to clear Redis cache for deleted session: {cache_err}")
+
+        logger.info(f"Deleted session {session_id}: sessions={session_result.deleted_count}, conversations={conv_result.deleted_count}")
+        return {"ok": True, "session_id": session_id, "deleted_sessions": session_result.deleted_count, "deleted_conversations": conv_result.deleted_count}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Delete session error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/reset")
@@ -2252,3 +2361,89 @@ async def run_title_generator(session_id: str, user_input: str, bot_response: st
         # Don't raise - background task failures shouldn't affect user experience
     finally:
         clear_logging_context()
+
+
+class AutoDeleteRequest(BaseModel):
+    older_than_days: int = Field(default=30, ge=1, le=365)
+
+
+@router.post("/auto-delete-old")
+async def auto_delete_old_conversations(request: AutoDeleteRequest, fastapi_request: Request):
+    """
+    Delete all sessions and conversations older than N days for the authenticated user.
+    Respects user privacy preference: autoDeleteConversations + autoDeleteDays.
+    """
+    from app.core.security import extract_user_id_from_request
+    user_id = extract_user_id_from_request(fastapi_request)
+
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    days = request.older_than_days
+    logger.info(f"Auto-delete conversations older than {days} days for user: {user_id}")
+
+    try:
+        from app.storage.connection_manager import ConnectionManager
+        from datetime import timedelta
+        conn_mgr = ConnectionManager.get_instance()
+        db = conn_mgr.get_database()
+
+        sessions_collection = db["sessions"]
+        conversations_collection = db["conversations"]
+
+        cutoff_dt = datetime.utcnow() - timedelta(days=days)
+        cutoff_iso = cutoff_dt.isoformat()
+
+        # Find sessions older than cutoff for this user
+        old_sessions = await sessions_collection.find(
+            {
+                "user_id": user_id,
+                "last_updated": {"$lt": cutoff_iso}
+            },
+            {"session_id": 1}
+        ).to_list(length=500)
+
+        old_session_ids = [s["session_id"] for s in old_sessions if s.get("session_id")]
+
+        if not old_session_ids:
+            return {"ok": True, "deleted_sessions": 0, "deleted_conversations": 0, "message": "No old conversations to delete"}
+
+        # Delete sessions
+        s_result = await sessions_collection.delete_many({
+            "user_id": user_id,
+            "session_id": {"$in": old_session_ids}
+        })
+
+        # Delete conversation documents
+        c_result = await conversations_collection.delete_many({
+            "user_id": user_id,
+            "session_id": {"$in": old_session_ids}
+        })
+
+        # Clear Redis cache for deleted sessions
+        try:
+            storage = HybridStorage()
+            if hasattr(storage, 'redis') and storage.redis:
+                for sid in old_session_ids:
+                    await storage.redis.delete(f"session:{sid}")
+                    await storage.redis.delete(f"history:{sid}")
+        except Exception as cache_err:
+            logger.debug(f"Failed to clear Redis cache during auto-delete: {cache_err}")
+
+        logger.info(
+            f"Auto-deleted {s_result.deleted_count} sessions and {c_result.deleted_count} conversations "
+            f"older than {days} days for user: {user_id}"
+        )
+
+        return {
+            "ok": True,
+            "deleted_sessions": s_result.deleted_count,
+            "deleted_conversations": c_result.deleted_count,
+            "message": f"Deleted {s_result.deleted_count} old conversation(s)"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Auto-delete conversations error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Auto-delete failed: {str(e)}")
