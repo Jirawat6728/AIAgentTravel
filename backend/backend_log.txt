@@ -1,0 +1,10 @@
+INFO:     Will watch for changes in these directories: ['c:\\Users\\Juins\\Desktop\\DEMO\\AITravelAgent\\backend']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [21556] using WatchFiles
+ERROR:    Error loading ASGI app. Could not import module "app.main".
+WARNING:  WatchFiles detected changes in 'app\services\email_service.py'. Reloading...
+ERROR:    Error loading ASGI app. Could not import module "app.main".
+WARNING:  WatchFiles detected changes in 'app\services\email_service.py'. Reloading...
+ERROR:    Error loading ASGI app. Could not import module "app.main".
+WARNING:  WatchFiles detected changes in 'app\api\auth.py'. Reloading...
+ERROR:    Error loading ASGI app. Could not import module "app.main".

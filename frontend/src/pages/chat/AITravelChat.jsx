@@ -175,6 +175,9 @@ function createNewTrip(title = 'ทริปใหม่', userName = "คุณ
 export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt = '', onNavigateToBookings, onNavigateToFlights, onNavigateToHotels, onNavigateToCarRentals, notificationCount = 0, notifications = [], onNavigateToProfile = null, onNavigateToSettings = null, onNavigateToHome = null, onRefreshNotifications = null, onMarkNotificationAsRead = null }) {
   // ✅ Use user.user_id (from backend) or user.id (fallback) - backend uses user_id
   const userId = user?.user_id || user?.id || 'demo_user';
+
+  // Loading state สำหรับการโหลด sessions จาก backend
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
   
   // ✅ SECURITY: Fetch sessions from backend on mount (filtered by user_id)
   useEffect(() => {
@@ -184,6 +187,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     }
     
     const fetchSessions = async () => {
+      setIsLoadingSessions(true);
       try {
         const headers = {
           'Content-Type': 'application/json'
@@ -288,6 +292,8 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
         }
       } catch (error) {
         console.error('❌ Error fetching sessions from backend:', error);
+      } finally {
+        setIsLoadingSessions(false);
       }
     };
     
@@ -1159,62 +1165,55 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     }
   };
 
-  // ===== Auto-sync conversations =====
-  // ✅ Auto-refresh conversations every 30 seconds + on page visibility change
+  // ===== Sync conversations on enter + flush to MongoDB on leave =====
+  // ✅ Sync once on mount (when user enters chat), flush session to MongoDB on unmount/leave
   useEffect(() => {
-    if (!user?.id) {
-      return; // Don't sync if user is not logged in
-    }
+    if (!user?.id) return;
 
-    // ✅ Initial sync on mount (immediate sync after page load/refresh)
+    const currentUserId = user?.id || userId;
+
+    // ✅ Sync history once when entering chat
     const initialSync = setTimeout(() => {
       if (!isRefreshingRef.current) {
-        console.log('🔄 Initial sync after page load/refresh...');
         handleRefreshHistory();
       }
-    }, 500); // Wait 500ms after mount to avoid conflicts
+    }, 500);
 
-    // ✅ Set up interval for auto-sync (every 30 seconds)
-    const syncInterval = setInterval(() => {
-      if (!isRefreshingRef.current) {
-        console.log('🔄 Auto-syncing conversations...');
-        handleRefreshHistory();
-      } else {
-        console.log('⏳ Sync already in progress, skipping auto-sync');
-      }
-    }, 30000); // 30 seconds
-
-    // ✅ Sync when page becomes visible (user returns to tab/window)
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible' && !isRefreshingRef.current) {
-        console.log('🔄 Page became visible, syncing conversations...');
-        handleRefreshHistory();
-      }
-    };
-
-    // ✅ Sync when page is about to reload (beforeunload)
-    const handleBeforeUnload = () => {
-      // Save current state before reload
+    // ✅ Flush session to MongoDB when user leaves the page (tab close / navigate away)
+    const flushSessionToMongo = () => {
+      if (!currentUserId) return;
+      // Use fetch with keepalive:true — works on page unload and supports custom headers
+      const url = `${API_BASE_URL}/api/chat/flush-session`;
+      try {
+        fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-User-ID': currentUserId,
+          },
+          body: JSON.stringify({ session_id: null }), // flush all user sessions
+          keepalive: true,
+          credentials: 'include',
+        }).catch(() => {});
+      } catch (e) { /* ignore */ }
+      // Save last active trip for restore
       if (activeTripId) {
         try {
           sessionStorage.setItem('ai_travel_last_active_trip', activeTripId);
-        } catch (e) {
-          console.warn('Failed to save active trip before reload:', e);
-        }
+        } catch (e) { /* ignore */ }
       }
     };
 
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('beforeunload', flushSessionToMongo);
 
     return () => {
       clearTimeout(initialSync);
-      clearInterval(syncInterval);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('beforeunload', flushSessionToMongo);
+      // Also flush when component unmounts (user navigates away within SPA)
+      flushSessionToMongo();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]); // Re-run only when user changes (not when refresh state changes)
+  }, [user?.id]);
 
   // ===== Create/Delete trip =====
   const handleNewTrip = () => {
@@ -1440,7 +1439,11 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
   const handleEditMessage = (messageId, messageText) => {
     setEditingMessageId(messageId);
     setInputText(messageText);
-    inputRef.current?.focus();
+    // scroll ลงมาที่ input และ focus
+    setTimeout(() => {
+      inputRef.current?.focus();
+      inputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }, 50);
   };
 
   // ===== Refresh bot message =====
@@ -2261,9 +2264,9 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
   };
 
   // ✅ เริ่มโหมด Live Voice Conversation (ใช้ Gemini Live API)
+  // ส่ง PCM 16-bit 16kHz mono ตรงๆ ผ่าน WebSocket binary frame
   const startLiveVoiceMode = async () => {
     try {
-      // ตรวจสอบว่าเบราว์เซอร์รองรับ MediaRecorder และ WebSocket
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         alert('เบราว์เซอร์ของคุณไม่รองรับการบันทึกเสียง กรุณาใช้ Chrome หรือ Edge');
         return;
@@ -2273,135 +2276,159 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       setIsRecording(true);
       isVoiceModeRef.current = true;
 
-      // ✅ สร้าง AudioContext สำหรับ real-time audio processing
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      audioContextRef.current = new AudioContext({ sampleRate: 16000 });
+      // ── AudioContext 16kHz สำหรับ capture + 24kHz สำหรับ playback ──
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const captureCtx = new AudioCtx({ sampleRate: 16000 });
+      audioContextRef.current = captureCtx;
 
-      // ✅ ขออนุญาตใช้ไมโครโฟน
+      // playback context แยกต่างหาก (24kHz ตาม Gemini output)
+      const playbackCtx = new AudioCtx({ sampleRate: 24000 });
+
+      // ── Audio playback queue ──────────────────────────────────────
+      let nextPlayTime = 0;
+      let isAgentSpeaking = false;
+      const isMicMutedRef = { current: false }; // หยุดส่ง mic ขณะ AI พูด
+
+      const scheduleAudioChunk = (pcmBytes) => {
+        const numSamples = pcmBytes.length / 2;
+        const audioBuffer = playbackCtx.createBuffer(1, numSamples, 24000);
+        const channelData = audioBuffer.getChannelData(0);
+        const view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
+        for (let i = 0; i < numSamples; i++) {
+          channelData[i] = view.getInt16(i * 2, true) / 32768.0;
+        }
+        const source = playbackCtx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(playbackCtx.destination);
+
+        const now = playbackCtx.currentTime;
+        const startAt = Math.max(now, nextPlayTime);
+        source.start(startAt);
+        nextPlayTime = startAt + audioBuffer.duration;
+
+        if (!isAgentSpeaking) {
+          isAgentSpeaking = true;
+          isMicMutedRef.current = true;
+          setIsRecording(false);
+        }
+
+        source.onended = () => {
+          // ถ้าไม่มี chunk ใหม่ใน 200ms ถือว่า AI พูดจบ
+          setTimeout(() => {
+            if (playbackCtx.currentTime >= nextPlayTime - 0.05) {
+              isAgentSpeaking = false;
+              isMicMutedRef.current = false;
+              if (isVoiceModeRef.current) setIsRecording(true);
+            }
+          }, 200);
+        };
+      };
+
+      // ── ขออนุญาตใช้ไมโครโฟน ──────────────────────────────────────
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          channelCount: 1, // Mono
-          sampleRate: 16000, // 16kHz for Gemini Live API
+          channelCount: 1,
+          sampleRate: 16000,
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
+          autoGainControl: true,
         }
       });
 
-      // ✅ สร้าง MediaRecorder สำหรับ capture audio
-      const options = {
-        mimeType: 'audio/webm;codecs=opus',
-        audioBitsPerSecond: 16000
-      };
-      
-      let mediaRecorder;
-      try {
-        mediaRecorder = new MediaRecorder(stream, options);
-      } catch (e) {
-        // Fallback to default
-        mediaRecorder = new MediaRecorder(stream);
-      }
-      
-      mediaRecorderRef.current = mediaRecorder;
+      // ── ScriptProcessorNode: capture PCM float32 → Int16 → binary ─
+      const sourceNode = captureCtx.createMediaStreamSource(stream);
+      const bufferSize = 4096;
+      // eslint-disable-next-line no-undef
+      const scriptNode = captureCtx.createScriptProcessor(bufferSize, 1, 1);
+      sourceNode.connect(scriptNode);
+      scriptNode.connect(captureCtx.destination);
 
-      // ✅ เชื่อมต่อ WebSocket กับ Live Audio API
+      mediaRecorderRef.current = { stream, scriptNode, sourceNode }; // เก็บไว้สำหรับ cleanup
+
+      // ── เชื่อมต่อ WebSocket ───────────────────────────────────────
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      // Extract host and port from API_BASE_URL
       const apiUrl = new URL(API_BASE_URL);
       const wsUrl = `${wsProtocol}//${apiUrl.host}/api/chat/live-audio?user_id=${encodeURIComponent(userId || 'anonymous')}&chat_id=${encodeURIComponent(activeTripId || 'default')}`;
-      
       const ws = new WebSocket(wsUrl);
+      ws.binaryType = 'arraybuffer';
       liveAudioWebSocketRef.current = ws;
+
+      // ── ส่ง PCM binary เมื่อ WebSocket พร้อม ─────────────────────
+      scriptNode.onaudioprocess = (e) => {
+        if (!isVoiceModeRef.current) return;
+        if (isMicMutedRef.current) return; // หยุดส่งขณะ AI พูด
+        if (ws.readyState !== WebSocket.OPEN) return;
+
+        const float32 = e.inputBuffer.getChannelData(0);
+        const int16 = new Int16Array(float32.length);
+        for (let i = 0; i < float32.length; i++) {
+          const s = Math.max(-1, Math.min(1, float32[i]));
+          int16[i] = s < 0 ? s * 32768 : s * 32767;
+        }
+        ws.send(int16.buffer); // ส่งเป็น binary frame (PCM 16-bit LE 16kHz)
+      };
+
+      // ── รับข้อมูลจาก backend ─────────────────────────────────────
+      let transcriptBuffer = '';
 
       ws.onopen = () => {
         console.log('✅ Live Audio WebSocket connected');
-        setIsRecording(true);
-        
-        // เริ่มบันทึกเสียง
-        mediaRecorder.start(100); // Send chunks every 100ms
-        
-        // ส่ง audio chunks ไปยัง WebSocket
-        mediaRecorder.ondataavailable = async (event) => {
-          if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-            try {
-              // Convert WebM to PCM (simplified - in production, use proper audio processing)
-              const arrayBuffer = await event.data.arrayBuffer();
-              
-              // Send as base64 encoded audio
-              const base64Audio = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-              ws.send(JSON.stringify({
-                type: 'audio',
-                data: base64Audio,
-                format: 'webm'
-              }));
-            } catch (e) {
-              console.error('Error sending audio chunk:', e);
-            }
-          }
-        };
       };
 
       ws.onmessage = async (event) => {
         try {
+          // binary frame = PCM audio จาก Gemini
+          if (event.data instanceof ArrayBuffer) {
+            scheduleAudioChunk(new Uint8Array(event.data));
+            return;
+          }
+
           const message = JSON.parse(event.data);
-          
+
           if (message.type === 'connected') {
-            console.log('✅ Live Audio session connected:', message.message);
+            console.log('✅ Live session ready:', message.message);
+
           } else if (message.type === 'audio') {
-            // ✅ รับ audio จาก Gemini Live API และเล่น
-            try {
-              const audioData = atob(message.data);
-              const audioArray = new Uint8Array(audioData.length);
-              for (let i = 0; i < audioData.length; i++) {
-                audioArray[i] = audioData.charCodeAt(i);
-              }
-              
-              // ✅ Gemini Live API ส่ง PCM audio (16-bit, 24kHz, little-endian, mono)
-              // Convert PCM bytes to AudioBuffer
-              const sampleRate = 24000; // Gemini Live API output sample rate
-              const numChannels = 1; // Mono
-              const length = audioArray.length / 2; // 16-bit = 2 bytes per sample
-              
-              const audioBuffer = audioContextRef.current.createBuffer(numChannels, length, sampleRate);
-              const channelData = audioBuffer.getChannelData(0);
-              
-              // Convert 16-bit PCM to float32 (-1.0 to 1.0)
-              for (let i = 0; i < length; i++) {
-                const sample = (audioArray[i * 2] | (audioArray[i * 2 + 1] << 8));
-                // Handle signed 16-bit
-                const signedSample = sample > 32767 ? sample - 65536 : sample;
-                channelData[i] = signedSample / 32768.0;
-              }
-              
-              // Play audio
-              const source = audioContextRef.current.createBufferSource();
-              source.buffer = audioBuffer;
-              source.connect(audioContextRef.current.destination);
-              source.start();
-              
-              // Update UI
-              setIsRecording(false); // Agent กำลังพูด
-              
-              // Resume listening after audio ends
-              source.onended = () => {
-                if (isVoiceModeRef.current && mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
-                  setIsRecording(true);
-                  try {
-                    mediaRecorderRef.current.start(100);
-                  } catch (e) {
-                    console.log('MediaRecorder already running');
-                  }
-                }
-              };
-            } catch (e) {
-              console.error('Error playing audio:', e);
-            }
-            
+            // base64 PCM fallback
+            const raw = atob(message.data);
+            const bytes = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+            scheduleAudioChunk(bytes);
+
           } else if (message.type === 'text') {
-            // ✅ รับ text transcript จาก Gemini
-            console.log('Agent said:', message.data);
-            // สามารถแสดง text ใน UI ได้ถ้าต้องการ
-            
+            // สะสม transcript แล้วแสดงใน chat bubble
+            transcriptBuffer += message.data;
+
+          } else if (message.type === 'turn_complete') {
+            // AI พูดจบ 1 ประโยค → เพิ่มข้อความใน chat
+            if (transcriptBuffer.trim()) {
+              const botMsg = {
+                id: `voice_bot_${Date.now()}`,
+                type: 'bot',
+                text: transcriptBuffer.trim(),
+                timestamp: nowISO(),
+              };
+              const targetId = activeChat?.chatId || activeChat?.tripId;
+              if (targetId) {
+                setTrips(prev => {
+                  const idx = prev.findIndex(t => (t.chatId || t.tripId) === targetId);
+                  if (idx === -1) return prev;
+                  const updated = [...prev];
+                  updated[idx] = { ...updated[idx], messages: [...(updated[idx].messages || []), botMsg] };
+                  return updated;
+                });
+              }
+              transcriptBuffer = '';
+            }
+
+          } else if (message.type === 'interruption') {
+            // ผู้ใช้ขัดจังหวะ → หยุดเสียง AI ทันที
+            nextPlayTime = 0;
+            isAgentSpeaking = false;
+            isMicMutedRef.current = false;
+            setIsRecording(true);
+            transcriptBuffer = '';
+
           } else if (message.type === 'error') {
             console.error('Live Audio error:', message.message);
             alert(`เกิดข้อผิดพลาด: ${message.message}`);
@@ -2414,13 +2441,12 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error);
-        alert('เกิดข้อผิดพลาดในการเชื่อมต่อ กรุณาลองใหม่อีกครั้ง');
         stopLiveVoiceMode();
       };
 
       ws.onclose = () => {
         console.log('Live Audio WebSocket closed');
-        stopLiveVoiceMode();
+        if (isVoiceModeRef.current) stopLiveVoiceMode();
       };
 
     } catch (error) {
@@ -2437,18 +2463,23 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       setIsVoiceMode(false);
       setIsRecording(false);
     }
-    
-    // ✅ ปิด MediaRecorder
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+
+    // ✅ ปิด ScriptProcessor + MediaStream (แทน MediaRecorder เดิม)
+    if (mediaRecorderRef.current) {
       try {
-        mediaRecorderRef.current.stop();
-        mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+        const { stream, scriptNode, sourceNode } = mediaRecorderRef.current;
+        if (scriptNode) {
+          scriptNode.onaudioprocess = null;
+          scriptNode.disconnect();
+        }
+        if (sourceNode) sourceNode.disconnect();
+        if (stream) stream.getTracks().forEach(track => track.stop());
       } catch (e) {
-        console.error('Error stopping MediaRecorder:', e);
+        console.error('Error stopping audio nodes:', e);
       }
       mediaRecorderRef.current = null;
     }
-    
+
     // ✅ ปิด AudioContext
     if (audioContextRef.current) {
       audioContextRef.current.close().catch(e => console.error('Error closing AudioContext:', e));
@@ -3646,7 +3677,17 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
           {isSidebarOpen && (
             <>
               <div className="trip-list">
-                {sortedTrips.map((t, idx) => {
+                {isLoadingSessions && (
+                  <div className="trip-list-loading">
+                    {[1, 2, 3].map(i => (
+                      <div key={i} className="trip-item-skeleton">
+                        <div className="skeleton-title" />
+                        <div className="skeleton-sub" />
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {!isLoadingSessions && sortedTrips.map((t, idx) => {
                   // ✅ ตรวจสอบว่าเป็น active chat (ใช้ chatId)
                   const isActive = (t.chatId || t.tripId) === (activeChat?.chatId || activeChat?.tripId || activeTripId);
                   const isEditing = editingTripId === t.tripId;
@@ -4067,12 +4108,16 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                                 return false;
                               }
                               
-                              // Flatten all segments from the new structure
-                              const flights = p.travel?.flights ? 
-                                [...(p.travel.flights.outbound || []), ...(p.travel.flights.inbound || [])] : 
-                                (Array.isArray(p.flights) ? p.flights : []); // Fallback for old structure
+                              // ✅ Flatten all segments — รองรับทั้ง structure เก่าและใหม่
+                              const flights = p.travel?.flights
+                                ? [...(p.travel.flights.outbound || []), ...(p.travel.flights.inbound || [])]
+                                : p.flight?.segments?.length > 0
+                                  ? p.flight.segments
+                                  : p.flight?.outbound?.length > 0 || p.flight?.inbound?.length > 0
+                                    ? [...(p.flight.outbound || []), ...(p.flight.inbound || [])]
+                                    : Array.isArray(p.flights) ? p.flights : [];
                                 
-                              const accommodations = p.accommodation?.segments || p.accommodations || [];
+                              const accommodations = p.accommodation?.segments || p.hotel?.segments || p.accommodations || [];
                               const ground = p.travel?.ground_transport || p.ground_transport || [];
                               
                               // ✅ Debug: log structure (only in debug mode)
@@ -4088,14 +4133,19 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                               
                               // ✅ ตรวจสอบ Core Segments (Flight OR Hotel)
                               // รองรับทั้ง status เป็น string ('confirmed') และ enum value
-                              const hasConfirmedFlights = flights.some(seg => {
-                                const status = seg.status || seg?.selected_option?.status;
-                                return status === 'confirmed' || status === 'CONFIRMED';
-                              });
-                              const hasConfirmedHotels = accommodations.some(seg => {
-                                const status = seg.status || seg?.selected_option?.status;
-                                return status === 'confirmed' || status === 'CONFIRMED';
-                              });
+                              // และรองรับกรณีที่ไม่มี status แต่มีข้อมูลจริง (เช่น plan จาก agent)
+                              const isSegmentReady = (seg) => {
+                                const status = seg?.status || seg?.selected_option?.status;
+                                if (status) return status === 'confirmed' || status === 'CONFIRMED' || status === 'selected' || status === 'SELECTED';
+                                // ถ้าไม่มี status แต่มีข้อมูล segment จริง ถือว่า ready
+                                return !!(seg?.from || seg?.carrier || seg?.hotelName || seg?.hotelId || seg?.selected_option);
+                              };
+                              const hasConfirmedFlights = flights.length > 0 && flights.some(isSegmentReady);
+                              const hasConfirmedHotels = accommodations.length > 0 && accommodations.some(isSegmentReady);
+                              
+                              // ✅ ถ้า plan มี flight/hotel data โดยตรง (flat structure) ให้ถือว่า ready
+                              const hasFlatFlight = !!(p.flight?.segments?.length > 0 || p.flight?.outbound?.length > 0 || p.flight?.carrier);
+                              const hasFlatHotel = !!(p.hotel?.segments?.length > 0 || p.hotel?.hotelName || p.accommodation?.segments?.length > 0);
                               
                               // ✅ Only log in debug mode
                               if (process.env.NODE_ENV === 'development') {
@@ -4104,20 +4154,24 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                               
                               // ถ้ามี Flight หรือ Hotel confirmed แล้ว → พร้อมแสดง Summary
                               // Transfer เป็น Optional (ไม่จำเป็นต้อง confirmed)
-                              return hasConfirmedFlights || hasConfirmedHotels;
+                              return hasConfirmedFlights || hasConfirmedHotels || hasFlatFlight || hasFlatHotel;
                             };
 
                             const isCoreReady = checkCoreSegmentsReady(plan);
                             
-                            // ✅ แสดง TripSummaryCard เมื่อ: เป็น bot, มี plan, Core segments พร้อม, workflow ถึง summary (backend ส่ง "summary" ไม่ใช่ "trip_summary")
+                            // ✅ แสดง TripSummaryCard เมื่อ: เป็น bot, มี plan, Core segments พร้อม, workflow ถึง summary
                             const workflowValidation = message.workflowValidation || message.agentState?.workflow_validation || {};
                             const currentWorkflowStep = workflowValidation.current_step || message.agentState?.step || "planning";
                             const isWorkflowComplete = workflowValidation.is_complete || false;
+                            const isAgentModeMsg = chatMode === 'agent';
                             const canShowSummary = currentWorkflowStep === "trip_summary" ||
-                                                  currentWorkflowStep === "summary" ||  // ✅ backend ส่ง "summary"
-                                                  (currentWorkflowStep === "confirmed" && isWorkflowComplete) ||
-                                                  (currentWorkflowStep === "booking" && isWorkflowComplete) ||
-                                                  (isCoreReady && isWorkflowComplete);
+                                                  currentWorkflowStep === "summary" ||
+                                                  currentWorkflowStep === "completed" ||
+                                                  currentWorkflowStep === "confirmed" ||
+                                                  currentWorkflowStep === "booking" ||
+                                                  (isCoreReady && isWorkflowComplete) ||
+                                                  // ✅ Agent mode: แสดงเมื่อ core ready แม้ workflow step ไม่ตรง
+                                                  (isAgentModeMsg && isCoreReady);
                             
                             const shouldShow = message.type === 'bot' &&
                                    hasPlan &&
@@ -4591,35 +4645,62 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
 
           {/* Input Area */}
           <div className="input-area">
-            <div className="input-wrapper">
+            {/* ✅ Edit mode banner — แสดงเมื่อกำลังแก้ไขข้อความ */}
+            {editingMessageId && (
+              <div className="edit-mode-banner">
+                <span className="edit-mode-banner-icon">✏️</span>
+                <span className="edit-mode-banner-text">กำลังแก้ไขข้อความ — แก้ไขแล้วกด Send หรือ Enter</span>
+                <button
+                  className="edit-mode-cancel-btn"
+                  onClick={() => {
+                    setEditingMessageId(null);
+                    setInputText('');
+                  }}
+                  title="ยกเลิกการแก้ไข"
+                >
+                  ✕ ยกเลิก
+                </button>
+              </div>
+            )}
+            <div className={`input-wrapper${editingMessageId ? ' input-wrapper-editing' : ''}`}>
               <textarea
                 ref={inputRef}
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 onKeyPress={handleKeyPress}
-                placeholder={t('chat.inputPlaceholder')}
+                placeholder={editingMessageId ? 'แก้ไขข้อความแล้วกด Enter หรือ Send...' : t('chat.inputPlaceholder')}
                 rows="1"
-                className="input-field"
+                className={`input-field${editingMessageId ? ' input-field-editing' : ''}`}
               />
               <button
                 onClick={handleVoiceInput}
-                className={`btn-mic ${isVoiceMode ? 'btn-mic-conversation' : ''}`}
+                className={`btn-mic ${isVoiceMode ? 'btn-mic-active' : ''}`}
                 title={isVoiceMode ? 'กดเพื่อหยุดการสนทนาด้วยเสียง' : 'กดเพื่อเริ่มสนทนากับ Agent ด้วยเสียง'}
               >
                 {isVoiceMode ? (
+                  /* กำลังใช้งาน → แสดง stop square สีแดง */
                   <svg className="mic-icon" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/>
+                    <rect x="5" y="5" width="14" height="14" rx="2"/>
                   </svg>
                 ) : (
+                  /* ปกติ → แสดงไมค์ */
                   <svg className="mic-icon" fill="currentColor" viewBox="0 0 24 24">
                     <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
                     <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
                   </svg>
                 )}
               </button>
-              <button onClick={handleSend} disabled={!inputText.trim()} className="btn-send">
-                Send
-              </button>
+              {isTyping ? (
+                <button onClick={handleStop} className="btn-send btn-send-stop" title="หยุดการทำงาน">
+                  <svg fill="currentColor" viewBox="0 0 24 24" width="18" height="18">
+                    <rect x="4" y="4" width="16" height="16" rx="2"/>
+                  </svg>
+                </button>
+              ) : (
+                <button onClick={handleSend} disabled={!inputText.trim()} className="btn-send">
+                  Send
+                </button>
+              )}
             </div>
 
             {isVoiceMode && (

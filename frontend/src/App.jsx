@@ -1,13 +1,9 @@
-import React, { useEffect, useState, useCallback, useRef, Suspense, lazy } from "react";
+import React, { useEffect, useState, useCallback, useRef, Suspense, lazy, useMemo } from "react";
 import LoginPage from "./pages/auth/LoginPage.jsx";
 import RegisterPage from "./pages/auth/RegisterPage.jsx";
 import ResetPasswordPage from "./pages/auth/ResetPasswordPage.jsx";
-import VerifyEmailPage from "./pages/auth/VerifyEmailPage.jsx";
-import VerifyEmailSentPage from "./pages/auth/VerifyEmailSentPage.jsx";
 import VerifyEmailChangePage from "./pages/auth/VerifyEmailChangePage.jsx";
 import HomePage from "./pages/home/HomePage.jsx";
-
-// ✅ Lazy load หน้าแชท (เอเย่นต์) เพื่อไม่ให้กดแท็บแล้วค้าง — แสดง "กำลังโหลด" แทน
 const AITravelChat = lazy(() => import("./pages/chat/AITravelChat.jsx"));
 import UserProfileEditPage from "./pages/profile/UserProfileEditPage.jsx";
 import SettingsPage from "./pages/settings/SettingsPage.jsx";
@@ -27,7 +23,7 @@ import Swal from "sweetalert2";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
-const FIREBASE_ENABLED = import.meta.env.VITE_FIREBASE_ENABLED === "true";
+const FIREBASE_ENABLED = true; // ใช้ Firebase Email Verification เสมอ
 
 // URL path mapping
 const VIEW_PATHS = {
@@ -35,8 +31,6 @@ const VIEW_PATHS = {
   'login': '/login',
   'register': '/register',
   'reset-password': '/reset-password',
-  'verify-email': '/verify-email',
-  'verify-email-sent': '/verify-email-sent',
   'verify-email-change': '/verify-email-change',
   'chat': '/chat',
   'profile': '/profile',
@@ -59,8 +53,6 @@ function getViewFromPath() {
   if (path.startsWith('/payment') || path.includes('/payment')) {
     return 'payment';
   }
-  if (path === '/verify-email') return 'verify-email';
-  if (path === '/verify-email-sent') return 'verify-email-sent';
   if (path === '/verify-email-change') return 'verify-email-change';
   if (path === '/explore') return 'chat';
   return PATH_VIEWS[path] || 'home';
@@ -79,7 +71,14 @@ function App() {
       return pathView;
     }
     const savedView = localStorage.getItem("app_view");
-    return savedView || "home";
+    if (!savedView) return "home";
+    // Protected views require login — if not logged in, show home to avoid blank screen
+    const protectedViews = ['chat', 'profile', 'bookings', 'payment', 'flights', 'hotels', 'car-rentals', 'settings'];
+    const savedIsLoggedIn = localStorage.getItem("is_logged_in") === "true";
+    if (protectedViews.includes(savedView) && !savedIsLoggedIn) {
+      return "home";
+    }
+    return savedView;
   };
 
   const [view, setView] = useState(getInitialView); // 'home' | 'login' | 'register' | 'chat' | 'profile' | 'bookings' | 'profile'
@@ -88,7 +87,6 @@ function App() {
   const [notificationCount, setNotificationCount] = useState(0);
   const [notifications, setNotifications] = useState([]);
   const [pendingPrompt, setPendingPrompt] = useState("");
-  const [pendingVerifyEmail, setPendingVerifyEmail] = useState(""); // Email shown on verify-email-sent page
   const [isAuthChecking, setIsAuthChecking] = useState(true); // Loading state for auth check
   const [loadingData, setLoadingData] = useState(loadingAnimation); // Lottie animation data
 
@@ -146,25 +144,21 @@ function App() {
       if (data.ok && Array.isArray(data.notifications)) {
         setNotificationCount(data.unread_count || 0);
         
-        // ✅ Map notifications to frontend format
-        const notificationsList = data.notifications.map((notif) => {
-          return {
-            id: notif.id,
-            type: notif.type === 'booking_created' ? 'task' : 'info',
-            title: notif.title || 'แจ้งเตือน',
-            message: notif.message || '',
-            time: formatNotificationDate(notif.created_at),
-            isRead: notif.read || false,
-            bookingId: notif.booking_id,
-            metadata: notif.metadata || {}
-          };
-        });
+        // ✅ Map notifications to frontend format — เก็บ created_at ไว้คำนวณ time แบบ live
+        const notificationsList = data.notifications.map((notif) => ({
+          id: notif.id,
+          type: notif.type || 'info',
+          title: notif.title || 'แจ้งเตือน',
+          message: notif.message || '',
+          created_at: notif.created_at || new Date().toISOString(),
+          isRead: notif.read === true,
+          bookingId: notif.booking_id,
+          metadata: notif.metadata || {}
+        }));
         
         setNotifications(notificationsList);
-      } else {
-        setNotificationCount(0);
-        setNotifications([]);
       }
+      // ถ้า !data.ok ไม่ reset เป็น [] เพื่อไม่ให้ notification หายเมื่อ API error ชั่วคราว
     } catch (error) {
       console.error("Failed to fetch notifications:", error);
       setNotificationCount(0);
@@ -199,37 +193,99 @@ function App() {
     }
   }, [user]);
 
-  // ล้างทั้งหมด = ลบการแจ้งเตือนทั้งหมดของ user นั้น แล้ว refetch
+  // ล้างทั้งหมด = mark-all-read (ไม่ลบ เพื่อให้ยังดูประวัติได้)
   const handleMarkAllNotificationsAsRead = useCallback(async () => {
     try {
       const headers = { 'Content-Type': 'application/json' };
       const uid = user?.user_id || user?.id;
       if (uid) headers['X-User-ID'] = uid;
-      await fetch(`${API_BASE_URL}/api/notification/clear-all`, {
+      await fetch(`${API_BASE_URL}/api/notification/mark-all-read`, {
         method: 'POST',
         headers,
         credentials: 'include',
       });
-      setNotifications([]);
+      // อัปเดต local state ทันที — mark ทุกอันเป็น read แต่ไม่ลบ
+      setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
       setNotificationCount(0);
-      await fetchNotificationCount();
     } catch (error) {
-      console.error("Failed to clear all notifications:", error);
+      console.error("Failed to mark all notifications as read:", error);
     }
-  }, [user, fetchNotificationCount]);
+  }, [user]);
 
-  // Fetch notifications on mount and when user/view changes
+  // ── Real-time notifications via SSE ──────────────────────────────────────
+  // โหลดครั้งแรกด้วย fetchNotificationCount แล้ว subscribe SSE สำหรับ push ทันที
   useEffect(() => {
-    if (isLoggedIn) {
-      fetchNotificationCount();
-      // Optional: Polling every minute
-      const interval = setInterval(fetchNotificationCount, 60000);
-      return () => clearInterval(interval);
-    } else {
+    if (!isLoggedIn || !user) {
       setNotificationCount(0);
       setNotifications([]);
+      return;
     }
-  }, [isLoggedIn, user, fetchNotificationCount, view]);
+
+    // โหลดรายการ notification ครั้งแรก
+    fetchNotificationCount();
+
+    // สร้าง SSE connection
+    const userIdToSend = user?.user_id || user?.id;
+    const headers = userIdToSend ? `&user_id=${encodeURIComponent(userIdToSend)}` : '';
+    const sseUrl = `${API_BASE_URL}/api/notification/stream?_uid=${encodeURIComponent(userIdToSend || '')}`;
+
+    let es;
+    let reconnectTimer;
+    let retryDelay = 2000;
+
+    const connect = () => {
+      es = new EventSource(sseUrl, { withCredentials: true });
+
+      es.onopen = () => {
+        retryDelay = 2000; // reset backoff
+      };
+
+      es.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'new_notification') {
+            const notif = msg.notification;
+            // เพิ่ม notification ใหม่เข้า state ทันที
+            const formatted = {
+              id: notif.id || notif._id,
+              type: notif.type || 'info',
+              title: notif.title || 'แจ้งเตือน',
+              message: notif.message || '',
+              created_at: notif.created_at || new Date().toISOString(),
+              isRead: false,
+              bookingId: notif.booking_id,
+              metadata: notif.metadata || {}
+            };
+            setNotifications(prev => [formatted, ...prev]);
+            setNotificationCount(prev => prev + 1);
+          }
+          // heartbeat และ connected ไม่ต้องทำอะไร
+        } catch (e) {
+          console.error('SSE parse error:', e);
+        }
+      };
+
+      es.onerror = () => {
+        es.close();
+        // reconnect with exponential backoff (max 30s)
+        reconnectTimer = setTimeout(() => {
+          retryDelay = Math.min(retryDelay * 2, 30000);
+          connect();
+        }, retryDelay);
+      };
+    };
+
+    connect();
+
+    // fallback poll ทุก 5 นาที (กรณี SSE หลุด)
+    const fallbackInterval = setInterval(fetchNotificationCount, 300000);
+
+    return () => {
+      if (es) es.close();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      clearInterval(fallbackInterval);
+    };
+  }, [isLoggedIn, user?.id]);
 
   // Navigate without changing browser URL (path stays the same on all pages)
   const navigateToView = useCallback((newView, replace = false) => {
@@ -241,8 +297,9 @@ function App() {
   }, []);
 
   // Keep browser URL always at / (no path change on any page)
+  // ยกเว้น verify-email-change — ต้องเก็บ query string (?token=) ไว้ให้ component อ่านได้
   useEffect(() => {
-    if (window.history.replaceState && window.location.pathname !== '/') {
+    if (window.history.replaceState && window.location.pathname !== '/' && view !== 'verify-email-change') {
       window.history.replaceState({ view }, '', '/');
     }
   }, [view]);
@@ -320,8 +377,10 @@ function App() {
             console.warn("Failed to check trips user_id:", e);
           }
         }
+        // ✅ Normalize: ใช้ user_id เป็น id หลักเสมอ
+        const normalizedUserData = { ...userData, id: userData.user_id || userData.id };
         setIsLoggedIn(true);
-        setUser(userData);
+        setUser(normalizedUserData);
       } catch (e) {
         console.error("Failed to parse saved user data:", e);
         localStorage.removeItem("is_logged_in");
@@ -348,11 +407,13 @@ function App() {
           checkAndClearIfUserChanged(newUserId);
         }
         
+        // ✅ Normalize: ใช้ user_id เป็น id หลักเสมอ (ป้องกัน MongoDB _id หลุดมาเป็น id)
+        const normalizedUser = { ...data.user, id: data.user.user_id || data.user.id };
         setIsLoggedIn(true);
-        setUser(data.user);
+        setUser(normalizedUser);
         // Save to localStorage with timestamp for persistent login
         localStorage.setItem("is_logged_in", "true");
-        localStorage.setItem("user_data", JSON.stringify(data.user));
+        localStorage.setItem("user_data", JSON.stringify(normalizedUser));
         localStorage.setItem("session_timestamp", Date.now().toString());
         // Don't auto-redirect to profile page
         // Let users navigate freely - they can complete their profile when they want
@@ -365,9 +426,10 @@ function App() {
         localStorage.removeItem("user_data");
         localStorage.removeItem("session_timestamp");
         // If on protected view but not logged in, redirect to home
-        // Allow 'register' and 'login' views to stay when not logged in
+        // Allow public views to stay when not logged in
         const currentView = getViewFromPath();
-        if (currentView !== 'home' && currentView !== 'login' && currentView !== 'register' && currentView !== 'reset-password') {
+        const publicViews = ['home', 'login', 'register', 'reset-password', 'verify-email-change'];
+        if (!publicViews.includes(currentView)) {
           navigateToView("home");
         }
       }
@@ -381,9 +443,10 @@ function App() {
         localStorage.removeItem("is_logged_in");
         localStorage.removeItem("user_data");
         localStorage.removeItem("session_timestamp");
-        // Allow 'register' and 'login' views to stay when not logged in
+        // Allow public views to stay when not logged in
         const currentView = getViewFromPath();
-        if (currentView !== 'home' && currentView !== 'login' && currentView !== 'register' && currentView !== 'reset-password') {
+        const publicViews = ['home', 'login', 'register', 'reset-password', 'verify-email-change'];
+        if (!publicViews.includes(currentView)) {
           navigateToView("home");
         }
       }
@@ -414,6 +477,135 @@ function App() {
 
   const goHome = () => navigateToView("home");
 
+  // ---- OTP Verification Dialog ----
+  const showOTPDialog = async (email) => {
+    let otpValue = '';
+
+    const buildHTML = (err = '') => `
+      <p style="color:#6366f1;font-weight:600;font-size:14px;margin:0 0 16px;word-break:break-all;">${email}</p>
+      <p style="color:#4b5563;font-size:14px;margin:0 0 16px;line-height:1.6;">
+        เราได้ส่งรหัส OTP 6 หลักไปที่อีเมลของคุณแล้ว<br>
+        <span style="color:#9ca3af;font-size:12px;">ไม่พบอีเมล? ตรวจสอบโฟลเดอร์ Spam</span>
+      </p>
+      <div id="otp-inputs" style="display:flex;gap:8px;justify-content:center;margin:0 0 8px;">
+        ${[0,1,2,3,4,5].map(i => `
+          <input id="otp-${i}" type="text" inputmode="numeric" maxlength="1"
+            style="width:44px;height:52px;text-align:center;font-size:24px;font-weight:700;
+                   border:2px solid ${err ? '#ef4444' : '#a5b4fc'};border-radius:10px;
+                   color:#4f46e5;background:#f5f3ff;outline:none;" />`).join('')}
+      </div>
+      ${err ? `<p style="color:#ef4444;font-size:13px;margin:4px 0 0;">${err}</p>` : ''}
+      <p style="color:#f59e0b;font-size:12px;margin:12px 0 0;">⏰ รหัสหมดอายุใน <strong>10 นาที</strong></p>
+    `;
+
+    const setupInputs = () => {
+      for (let i = 0; i < 6; i++) {
+        const el = document.getElementById(`otp-${i}`);
+        if (!el) continue;
+        el.addEventListener('input', (e) => {
+          e.target.value = e.target.value.replace(/\D/g, '').slice(0, 1);
+          if (e.target.value && i < 5) document.getElementById(`otp-${i+1}`)?.focus();
+          otpValue = Array.from({length:6}, (_,j) => document.getElementById(`otp-${j}`)?.value || '').join('');
+        });
+        el.addEventListener('keydown', (e) => {
+          if (e.key === 'Backspace' && !e.target.value && i > 0) document.getElementById(`otp-${i-1}`)?.focus();
+        });
+        el.addEventListener('paste', (e) => {
+          e.preventDefault();
+          const pasted = (e.clipboardData.getData('text') || '').replace(/\D/g, '').slice(0, 6);
+          pasted.split('').forEach((ch, j) => {
+            const inp = document.getElementById(`otp-${j}`);
+            if (inp) inp.value = ch;
+          });
+          otpValue = pasted.padEnd(6, '').slice(0, 6);
+          document.getElementById(`otp-${Math.min(pasted.length, 5)}`)?.focus();
+        });
+      }
+      document.getElementById('otp-0')?.focus();
+    };
+
+    // loop จนกว่าจะยืนยันสำเร็จหรือ cancel
+    while (true) {
+      otpValue = '';
+      const result = await Swal.fire({
+        title: 'กรอกรหัส OTP 📧',
+        html: buildHTML(),
+        showCancelButton: true,
+        confirmButtonText: 'ยืนยัน',
+        confirmButtonColor: '#6366f1',
+        cancelButtonText: 'ยกเลิก',
+        cancelButtonColor: '#e5e7eb',
+        allowOutsideClick: false,
+        focusConfirm: false,
+        didOpen: setupInputs,
+        preConfirm: () => {
+          otpValue = Array.from({length:6}, (_,i) => document.getElementById(`otp-${i}`)?.value || '').join('');
+          if (otpValue.length < 6 || /\D/.test(otpValue)) {
+            Swal.showValidationMessage('กรุณากรอกรหัส OTP ให้ครบ 6 หลัก');
+            return false;
+          }
+          return otpValue;
+        },
+      });
+
+      if (!result.isConfirmed) {
+        // user กด cancel → ไปหน้า login
+        navigateToView('login');
+        return false;
+      }
+
+      // เรียก API verify
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/auth/verify-email`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, otp: result.value }),
+        });
+        const data = await res.json().catch(() => ({}));
+
+        if (res.ok && data.ok) {
+          await Swal.fire({
+            icon: 'success',
+            title: data.already_verified ? 'อีเมลยืนยันแล้ว ✅' : 'ยืนยันอีเมลสำเร็จ! 🎉',
+            html: `<p style="color:#4b5563;margin:0 0 4px;">อีเมลของคุณได้รับการยืนยันเรียบร้อยแล้ว</p>
+                   <p style="color:#6366f1;font-weight:600;margin:0;">พร้อมใช้งาน AI Travel Agent แล้ว!</p>`,
+            confirmButtonText: 'เข้าสู่ระบบ',
+            confirmButtonColor: '#6366f1',
+            allowOutsideClick: false,
+          });
+          navigateToView('login');
+          return true;
+        } else {
+          const errMsg = typeof data.detail === 'string' ? data.detail : 'รหัส OTP ไม่ถูกต้อง';
+          // แสดง error แล้ว loop ใหม่
+          await Swal.fire({
+            icon: 'error',
+            title: 'OTP ไม่ถูกต้อง',
+            html: `<p style="color:#4b5563;margin:0 0 4px;">${errMsg}</p>
+                   <p style="color:#9ca3af;font-size:12px;margin:0;">กรุณาตรวจสอบอีเมลและกรอกรหัสใหม่</p>`,
+            confirmButtonText: 'ลองใหม่',
+            confirmButtonColor: '#6366f1',
+            showDenyButton: true,
+            denyButtonText: 'ขอรหัสใหม่',
+            denyButtonColor: '#e5e7eb',
+          });
+          if (result.isDenied) {
+            // ขอ OTP ใหม่
+            await fetch(`${API_BASE_URL}/api/auth/send-verification-email`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ email }),
+              credentials: 'include',
+            });
+          }
+          // loop ต่อ
+        }
+      } catch {
+        await Swal.fire({ icon: 'error', title: 'เกิดข้อผิดพลาด', text: 'ไม่สามารถเชื่อมต่อได้ กรุณาลองใหม่', confirmButtonText: 'ตกลง', confirmButtonColor: '#6366f1' });
+      }
+    }
+  };
+
   const handleRegister = async (registerData) => {
     try {
       const passwordHash = await sha256Password(registerData.password);
@@ -428,7 +620,6 @@ function App() {
         body: JSON.stringify(payload)
       });
       
-      // Check if response is ok
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({ detail: `HTTP ${res.status}: ${res.statusText}` }));
         throw new Error(errorData.detail || `Registration failed: ${res.status} ${res.statusText}`);
@@ -436,9 +627,11 @@ function App() {
       
       const data = await res.json();
       if (data.ok) {
-        // Don't set login state automatically - user needs to login after registration
-        // Don't navigate automatically - let RegisterPage handle the success state and navigation
-        // The RegisterPage will show success checkmark and navigate to login after 1.5 seconds
+        // Backend ส่ง OTP ไปทางอีเมลแล้ว — เปิด OTP dialog
+        if (!data.email_verified && data.verification_email_sent) {
+          const emailDisplay = data.email || registerData.email || "";
+          await showOTPDialog(emailDisplay);
+        }
         return data;
       } else {
         throw new Error(data.detail || "Registration failed");
@@ -500,7 +693,16 @@ function App() {
         // ✅ Check if response is ok before parsing JSON
         if (!res.ok) {
           const errorData = await res.json().catch(() => ({ detail: `HTTP ${res.status}: ${res.statusText}` }));
-          throw new Error(errorData.detail || `Login failed: ${res.status} ${res.statusText}`);
+          // อีเมลยังไม่ยืนยัน → ส่ง Firebase verification email แล้วไปหน้า verify-email-sent
+          if (res.status === 403 && errorData?.detail?.code === "EMAIL_NOT_VERIFIED") {
+            const detail = errorData.detail;
+            const emailDisplay = detail.email || email || "";
+            // เปิด OTP dialog ทันที (backend ส่ง OTP ใหม่ให้แล้วพร้อมกับ 403)
+            await showOTPDialog(emailDisplay);
+            return;
+          }
+          const detailMsg = typeof errorData.detail === "object" ? errorData.detail?.message : errorData.detail;
+          throw new Error(detailMsg || `Login failed: ${res.status} ${res.statusText}`);
         }
         
         const data = await res.json();
@@ -1209,21 +1411,6 @@ function App() {
         />
       )}
 
-      {view === "verify-email" && (
-        <VerifyEmailPage
-          onNavigateToHome={() => navigateToView("home")}
-          onNavigateToLogin={() => navigateToView("login")}
-        />
-      )}
-
-      {view === "verify-email-sent" && (
-        <VerifyEmailSentPage
-          email={pendingVerifyEmail}
-          onNavigateToHome={() => navigateToView("home")}
-          onNavigateToSettings={() => navigateToView("settings")}
-        />
-      )}
-
       {view === "verify-email-change" && (
         <VerifyEmailChangePage
           onNavigateToHome={() => navigateToView("home")}
@@ -1292,6 +1479,9 @@ function App() {
           onNavigateToProfile={handleNavigateToProfile}
           onNavigateToSettings={handleNavigateToSettings}
           notificationCount={notificationCount}
+          notifications={notifications}
+          onMarkNotificationAsRead={handleMarkNotificationAsRead}
+          onClearAllNotifications={handleMarkAllNotificationsAsRead}
           onRefreshUser={refreshMe}
         />
       )}
@@ -1387,6 +1577,10 @@ function App() {
           onNavigateToHome={() => navigateToView("home")}
           onNavigateToProfile={handleNavigateToProfile}
           onNavigateToSettings={handleNavigateToSettings}
+          notificationCount={notificationCount}
+          notifications={notifications}
+          onMarkNotificationAsRead={handleMarkNotificationAsRead}
+          onClearAllNotifications={handleMarkAllNotificationsAsRead}
         />
       )}
 
@@ -1403,6 +1597,10 @@ function App() {
           onNavigateToHome={() => navigateToView("home")}
           onNavigateToProfile={handleNavigateToProfile}
           onNavigateToSettings={handleNavigateToSettings}
+          notificationCount={notificationCount}
+          notifications={notifications}
+          onMarkNotificationAsRead={handleMarkNotificationAsRead}
+          onClearAllNotifications={handleMarkAllNotificationsAsRead}
         />
       )}
 
@@ -1419,6 +1617,10 @@ function App() {
           onNavigateToProfile={handleNavigateToProfile}
           onNavigateToSettings={handleNavigateToSettings}
           onNavigateToHome={() => navigateToView("home")}
+          notificationCount={notificationCount}
+          notifications={notifications}
+          onMarkNotificationAsRead={handleMarkNotificationAsRead}
+          onClearAllNotifications={handleMarkAllNotificationsAsRead}
         />
       )}
 
@@ -1434,6 +1636,9 @@ function App() {
           onNavigateToHotels={() => navigateToView("hotels")}
           onNavigateToCarRentals={() => navigateToView("car-rentals")}
           notificationCount={notificationCount}
+          notifications={notifications}
+          onMarkNotificationAsRead={handleMarkNotificationAsRead}
+          onClearAllNotifications={handleMarkAllNotificationsAsRead}
           onSendVerificationEmailSuccess={(email) => {
             const emailDisplay = email || user?.email || "อีเมลของคุณ";
             const html = `

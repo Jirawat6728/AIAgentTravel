@@ -6,6 +6,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
 import os
 import psutil
@@ -129,6 +130,91 @@ def get_admin_dashboard_html() -> str:
                     <pre id="amadeusRaw" class="hidden max-h-96 overflow-auto bg-gray-900 text-green-400 font-mono text-xs p-3 rounded"></pre>
                 </div>
                 <div id="amadeusError" class="hidden mt-4 p-3 bg-red-50 border border-red-200 rounded text-sm text-red-700"></div>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- Notification Simulator                                       -->
+        <!-- ============================================================ -->
+        <div class="bg-white rounded-lg shadow mb-6 border-l-4 border-orange-400">
+            <div class="px-6 py-4 border-b flex justify-between items-center">
+                <div>
+                    <h2 class="text-lg font-bold text-gray-900">🔔 Notification Simulator</h2>
+                    <p class="text-sm text-gray-500 mt-1">จำลองสถานการณ์เพื่อทดสอบระบบแจ้งเตือน — ส่ง notification ไปยัง user จริงในฐานข้อมูล</p>
+                </div>
+                <button onclick="simLoadUsers()" class="px-3 py-1.5 bg-orange-500 text-white rounded text-sm hover:bg-orange-600">โหลด Users</button>
+            </div>
+            <div class="p-6">
+                <!-- Tab bar -->
+                <div class="flex gap-2 mb-5 border-b pb-3">
+                    <button onclick="simTab('single')" id="simTabSingle" class="px-4 py-1.5 rounded-full text-sm font-medium bg-orange-500 text-white">ส่งรายบุคคล</button>
+                    <button onclick="simTab('broadcast')" id="simTabBroadcast" class="px-4 py-1.5 rounded-full text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200">Broadcast ทุก User</button>
+                </div>
+
+                <!-- Single user tab -->
+                <div id="simPanelSingle">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-600 mb-1">เลือก User</label>
+                            <select id="simUserId" onchange="simLoadBookings()" class="w-full border rounded px-3 py-2 text-sm">
+                                <option value="">-- กด "โหลด Users" ก่อน --</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-600 mb-1">เลือก Booking (ไม่บังคับ)</label>
+                            <select id="simBookingId" class="w-full border rounded px-3 py-2 text-sm">
+                                <option value="">-- ไม่ระบุ booking --</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="mb-4">
+                        <label class="block text-xs font-semibold text-gray-600 mb-2">เลือกสถานการณ์</label>
+                        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2" id="simScenarioGrid">
+                            <!-- Scenarios rendered by JS -->
+                        </div>
+                    </div>
+
+                    <!-- Delay minutes (shown only for flight_delayed) -->
+                    <div id="simDelayRow" class="hidden mb-4 flex items-center gap-3">
+                        <label class="text-sm text-gray-600 whitespace-nowrap">ล่าช้า (นาที):</label>
+                        <input type="number" id="simDelayMin" value="60" min="5" max="600" class="border rounded px-3 py-2 text-sm w-28">
+                    </div>
+
+                    <!-- Custom message (shown only for custom) -->
+                    <div id="simCustomRow" class="hidden mb-4 space-y-2">
+                        <input type="text" id="simCustomTitle" placeholder="หัวข้อแจ้งเตือน" class="w-full border rounded px-3 py-2 text-sm">
+                        <textarea id="simCustomMsg" placeholder="ข้อความแจ้งเตือน" rows="2" class="w-full border rounded px-3 py-2 text-sm"></textarea>
+                    </div>
+
+                    <button onclick="simTrigger()" id="btnSimTrigger" class="px-5 py-2 bg-orange-500 text-white rounded-lg text-sm font-semibold hover:bg-orange-600 disabled:opacity-50">
+                        🚀 ส่ง Notification
+                    </button>
+                    <div id="simResult" class="hidden mt-3 p-3 rounded text-sm"></div>
+                </div>
+
+                <!-- Broadcast tab -->
+                <div id="simPanelBroadcast" class="hidden">
+                    <p class="text-sm text-gray-500 mb-4">ส่ง notification เดียวกันไปยัง <strong>ทุก user</strong> ในระบบ (ใช้สำหรับประกาศสำคัญ)</p>
+                    <div class="space-y-3 max-w-lg">
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-600 mb-1">ประเภท</label>
+                            <select id="bcType" class="w-full border rounded px-3 py-2 text-sm">
+                                <option value="trip_alert">⚠️ Trip Alert</option>
+                                <option value="flight_delayed">⏰ Flight Delayed</option>
+                                <option value="flight_cancelled">🚫 Flight Cancelled</option>
+                                <option value="payment_success">✅ Payment Success</option>
+                                <option value="booking_created">🎫 Booking Created</option>
+                            </select>
+                        </div>
+                        <input type="text" id="bcTitle" placeholder="หัวข้อ" class="w-full border rounded px-3 py-2 text-sm">
+                        <textarea id="bcMessage" placeholder="ข้อความ" rows="3" class="w-full border rounded px-3 py-2 text-sm"></textarea>
+                        <button onclick="simBroadcast()" id="btnSimBroadcast" class="px-5 py-2 bg-red-500 text-white rounded-lg text-sm font-semibold hover:bg-red-600">
+                            📢 Broadcast ทุก User
+                        </button>
+                        <div id="bcResult" class="hidden mt-2 p-3 rounded text-sm"></div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -329,6 +415,165 @@ def get_admin_dashboard_html() -> str:
         loadStatus();
         loadSessions();
         loadCurrentUser();
+
+        // ============================================================
+        // Notification Simulator JS
+        // ============================================================
+        const SIM_SCENARIOS = [
+            { id: 'flight_delayed',     label: '⏰ Flight Delay',       color: 'yellow' },
+            { id: 'flight_cancelled',   label: '🚫 Flight Cancelled',   color: 'red'    },
+            { id: 'flight_rescheduled', label: '🔄 Rescheduled',        color: 'blue'   },
+            { id: 'trip_alert',         label: '⚠️ Trip Alert',         color: 'orange' },
+            { id: 'checkin_flight',     label: '✈️ Check-in Flight',    color: 'sky'    },
+            { id: 'checkin_hotel',      label: '🏨 Check-in Hotel',     color: 'teal'   },
+            { id: 'payment_success',    label: '✅ Payment Success',    color: 'green'  },
+            { id: 'payment_failed',     label: '❌ Payment Failed',     color: 'rose'   },
+            { id: 'booking_created',    label: '🎫 Booking Created',    color: 'purple' },
+            { id: 'custom',             label: '✏️ Custom',             color: 'gray'   },
+        ];
+        const COLOR_MAP = {
+            yellow: 'border-yellow-400 bg-yellow-50 text-yellow-800 hover:bg-yellow-100',
+            red:    'border-red-400 bg-red-50 text-red-800 hover:bg-red-100',
+            blue:   'border-blue-400 bg-blue-50 text-blue-800 hover:bg-blue-100',
+            orange: 'border-orange-400 bg-orange-50 text-orange-800 hover:bg-orange-100',
+            sky:    'border-sky-400 bg-sky-50 text-sky-800 hover:bg-sky-100',
+            teal:   'border-teal-400 bg-teal-50 text-teal-800 hover:bg-teal-100',
+            green:  'border-green-400 bg-green-50 text-green-800 hover:bg-green-100',
+            rose:   'border-rose-400 bg-rose-50 text-rose-800 hover:bg-rose-100',
+            purple: 'border-purple-400 bg-purple-50 text-purple-800 hover:bg-purple-100',
+            gray:   'border-gray-400 bg-gray-50 text-gray-800 hover:bg-gray-100',
+        };
+        let simSelectedScenario = '';
+
+        function simRenderScenarios() {
+            const grid = document.getElementById('simScenarioGrid');
+            grid.innerHTML = SIM_SCENARIOS.map(s => {
+                const cls = COLOR_MAP[s.color] || COLOR_MAP.gray;
+                return `<button onclick="simSelectScenario('${s.id}')" id="simBtn_${s.id}"
+                    class="sim-scenario-btn border-2 rounded-lg px-3 py-2 text-xs font-medium cursor-pointer transition-all ${cls}">
+                    ${s.label}
+                </button>`;
+            }).join('');
+        }
+
+        function simSelectScenario(id) {
+            simSelectedScenario = id;
+            document.querySelectorAll('.sim-scenario-btn').forEach(b => b.classList.remove('ring-2','ring-offset-1','ring-gray-700'));
+            const btn = document.getElementById('simBtn_' + id);
+            if (btn) btn.classList.add('ring-2','ring-offset-1','ring-gray-700');
+            document.getElementById('simDelayRow').classList.toggle('hidden', id !== 'flight_delayed');
+            document.getElementById('simCustomRow').classList.toggle('hidden', id !== 'custom');
+        }
+
+        function simTab(tab) {
+            document.getElementById('simPanelSingle').classList.toggle('hidden', tab !== 'single');
+            document.getElementById('simPanelBroadcast').classList.toggle('hidden', tab !== 'broadcast');
+            document.getElementById('simTabSingle').className = tab === 'single'
+                ? 'px-4 py-1.5 rounded-full text-sm font-medium bg-orange-500 text-white'
+                : 'px-4 py-1.5 rounded-full text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200';
+            document.getElementById('simTabBroadcast').className = tab === 'broadcast'
+                ? 'px-4 py-1.5 rounded-full text-sm font-medium bg-orange-500 text-white'
+                : 'px-4 py-1.5 rounded-full text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200';
+        }
+
+        async function simLoadUsers() {
+            const sel = document.getElementById('simUserId');
+            sel.innerHTML = '<option>กำลังโหลด...</option>';
+            try {
+                const r = await fetch(API + '/api/admin/sim/users', opts);
+                const d = await r.json();
+                if (!d.ok || !d.users.length) { sel.innerHTML = '<option>ไม่พบ users</option>'; return; }
+                sel.innerHTML = '<option value="">-- เลือก User --</option>' +
+                    d.users.map(u => `<option value="${u.user_id}">${u.name || u.email} (${u.email})</option>`).join('');
+            } catch (e) {
+                sel.innerHTML = '<option>โหลดไม่สำเร็จ</option>';
+            }
+        }
+
+        async function simLoadBookings() {
+            const uid = document.getElementById('simUserId').value;
+            const sel = document.getElementById('simBookingId');
+            sel.innerHTML = '<option value="">-- ไม่ระบุ booking --</option>';
+            if (!uid) return;
+            try {
+                const r = await fetch(API + '/api/admin/sim/bookings?user_id=' + encodeURIComponent(uid), opts);
+                const d = await r.json();
+                if (!d.ok || !d.bookings.length) return;
+                d.bookings.forEach(b => {
+                    const opt = document.createElement('option');
+                    opt.value = b.booking_id;
+                    opt.textContent = `#${b.booking_id.slice(0,8)} | ${b.route} | ${b.status}`;
+                    sel.appendChild(opt);
+                });
+            } catch (e) {}
+        }
+
+        async function simTrigger() {
+            const userId = document.getElementById('simUserId').value;
+            if (!userId) { simShowResult('simResult', false, 'กรุณาเลือก User ก่อน'); return; }
+            if (!simSelectedScenario) { simShowResult('simResult', false, 'กรุณาเลือกสถานการณ์ก่อน'); return; }
+            const bookingId = document.getElementById('simBookingId').value || null;
+            const delayMin = parseInt(document.getElementById('simDelayMin').value, 10) || 60;
+            const body = {
+                scenario: simSelectedScenario,
+                user_id: userId,
+                booking_id: bookingId,
+                delay_minutes: delayMin,
+            };
+            if (simSelectedScenario === 'custom') {
+                body.custom_title = document.getElementById('simCustomTitle').value.trim();
+                body.custom_message = document.getElementById('simCustomMsg').value.trim();
+                if (!body.custom_title || !body.custom_message) {
+                    simShowResult('simResult', false, 'กรุณากรอกหัวข้อและข้อความสำหรับ Custom'); return;
+                }
+            }
+            const btn = document.getElementById('btnSimTrigger');
+            btn.disabled = true; btn.textContent = 'กำลังส่ง...';
+            try {
+                const r = await fetch(API + '/api/admin/sim/trigger', {
+                    ...opts, method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const d = await r.json();
+                simShowResult('simResult', r.ok && d.ok, d.message || (r.ok ? 'ส่งสำเร็จ' : 'เกิดข้อผิดพลาด'));
+            } catch (e) {
+                simShowResult('simResult', false, 'Error: ' + e.message);
+            }
+            btn.disabled = false; btn.textContent = '🚀 ส่ง Notification';
+        }
+
+        async function simBroadcast() {
+            const title = document.getElementById('bcTitle').value.trim();
+            const message = document.getElementById('bcMessage').value.trim();
+            const type = document.getElementById('bcType').value;
+            if (!title || !message) { simShowResult('bcResult', false, 'กรุณากรอกหัวข้อและข้อความ'); return; }
+            if (!confirm('ยืนยันส่ง broadcast ไปยังทุก user ในระบบ?')) return;
+            const btn = document.getElementById('btnSimBroadcast');
+            btn.disabled = true; btn.textContent = 'กำลังส่ง...';
+            try {
+                const r = await fetch(API + '/api/admin/sim/broadcast', {
+                    ...opts, method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title, message, type })
+                });
+                const d = await r.json();
+                simShowResult('bcResult', r.ok && d.ok, d.message || (r.ok ? 'ส่งสำเร็จ' : 'เกิดข้อผิดพลาด'));
+            } catch (e) {
+                simShowResult('bcResult', false, 'Error: ' + e.message);
+            }
+            btn.disabled = false; btn.textContent = '📢 Broadcast ทุก User';
+        }
+
+        function simShowResult(elId, ok, msg) {
+            const el = document.getElementById(elId);
+            el.className = 'mt-3 p-3 rounded text-sm ' + (ok ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200');
+            el.textContent = (ok ? '✅ ' : '❌ ') + msg;
+            el.classList.remove('hidden');
+            setTimeout(() => el.classList.add('hidden'), 8000);
+        }
+
+        simRenderScenarios();
     </script>
 </body>
 </html>"""
@@ -631,6 +876,241 @@ async def get_recent_sessions(
             status_code=500,
             detail=f"Failed to fetch sessions from MongoDB: {str(e)}"
         )
+
+# =============================================================================
+# Notification Simulator Endpoints (Admin only)
+# =============================================================================
+
+@router.get("/sim/users")
+async def sim_list_users(_auth: bool = Depends(verify_admin_auth)):
+    """ดึงรายชื่อ users ทั้งหมด (สำหรับ simulator เลือก target user)"""
+    try:
+        from app.storage.connection_manager import ConnectionManager
+        db = ConnectionManager.get_instance().get_mongo_database()
+        cursor = db["users"].find({}, {"user_id": 1, "email": 1, "full_name": 1, "first_name": 1, "last_name": 1}).limit(100)
+        users = []
+        async for doc in cursor:
+            doc["_id"] = str(doc["_id"])
+            name = doc.get("full_name") or f"{doc.get('first_name','')} {doc.get('last_name','')}".strip() or doc.get("email","")
+            users.append({"user_id": doc["user_id"], "email": doc.get("email",""), "name": name})
+        return {"ok": True, "users": users}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sim/bookings")
+async def sim_list_bookings(user_id: Optional[str] = None, _auth: bool = Depends(verify_admin_auth)):
+    """ดึงรายการ bookings (กรองด้วย user_id ถ้าระบุ)"""
+    try:
+        from app.storage.connection_manager import ConnectionManager
+        db = ConnectionManager.get_instance().get_mongo_database()
+        query = {"status": {"$in": ["paid", "confirmed", "pending_payment"]}}
+        if user_id:
+            query["user_id"] = user_id
+        cursor = db["bookings"].find(query, {
+            "booking_id": 1, "user_id": 1, "status": 1,
+            "travel_slots": 1, "created_at": 1, "flight_status": 1
+        }).sort("created_at", -1).limit(50)
+        bookings = []
+        async for doc in cursor:
+            slots = doc.get("travel_slots") or {}
+            origin = slots.get("origin_city") or slots.get("origin") or "?"
+            dest = slots.get("destination_city") or slots.get("destination") or "?"
+            bid = doc.get("booking_id") or str(doc["_id"])
+            bookings.append({
+                "booking_id": str(bid),
+                "user_id": doc.get("user_id",""),
+                "status": doc.get("status",""),
+                "route": f"{origin} → {dest}",
+                "flight_status": doc.get("flight_status",""),
+                "created_at": doc.get("created_at",""),
+            })
+        return {"ok": True, "bookings": bookings}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SimScenarioRequest(BaseModel):
+    scenario: str          # "flight_delayed" | "flight_cancelled" | "flight_rescheduled" | "trip_alert" | "checkin_flight" | "checkin_hotel" | "payment_success" | "payment_failed" | "booking_created" | "custom"
+    user_id: str
+    booking_id: Optional[str] = None
+    delay_minutes: Optional[int] = 60
+    custom_title: Optional[str] = None
+    custom_message: Optional[str] = None
+
+
+@router.post("/sim/trigger")
+async def sim_trigger_scenario(body: SimScenarioRequest, _auth: bool = Depends(verify_admin_auth)):
+    """
+    จำลองสถานการณ์และส่ง notification ไปยัง user ที่เลือก
+    Scenarios: flight_delayed, flight_cancelled, flight_rescheduled, trip_alert,
+               checkin_flight, checkin_hotel, payment_success, payment_failed,
+               booking_created, custom
+    """
+    from app.storage.connection_manager import ConnectionManager
+    from app.services.notification_service import create_and_push_notification
+
+    db = ConnectionManager.get_instance().get_mongo_database()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+
+    SCENARIOS = {
+        "flight_delayed": {
+            "type": "flight_delayed",
+            "title": "⏰ เที่ยวบินล่าช้า",
+            "message": lambda b, d: f"เที่ยวบินในการจอง #{(b or '?')[:8]} ล่าช้าประมาณ {d} นาที กรุณาตรวจสอบที่เคาน์เตอร์สายการบิน",
+        },
+        "flight_cancelled": {
+            "type": "flight_cancelled",
+            "title": "🚫 เที่ยวบินถูกยกเลิก",
+            "message": lambda b, d: f"เที่ยวบินในการจอง #{(b or '?')[:8]} ถูกยกเลิกโดยสายการบิน กรุณาติดต่อสายการบินหรือแก้ไขทริปของคุณ",
+        },
+        "flight_rescheduled": {
+            "type": "flight_rescheduled",
+            "title": "🔄 เที่ยวบินเปลี่ยนเวลา",
+            "message": lambda b, d: f"เที่ยวบินในการจอง #{(b or '?')[:8]} มีการเปลี่ยนแปลงเวลา กรุณาตรวจสอบและแก้ไขทริปของคุณ",
+        },
+        "trip_alert": {
+            "type": "trip_alert",
+            "title": "⚠️ ทริปของคุณมีการเปลี่ยนแปลงมาก",
+            "message": lambda b, d: f"ทริปในการจอง #{(b or '?')[:8]} มีการเปลี่ยนแปลงหลายรายการ กรุณาตรวจสอบและแก้ไขทริปเพื่อไม่ให้ทริปล่ม",
+        },
+        "checkin_flight": {
+            "type": "checkin_reminder_flight",
+            "title": "✈️ เตือนเช็คอินเครื่องบิน (24 ชั่วโมง)",
+            "message": lambda b, d: f"เที่ยวบินในการจอง #{(b or '?')[:8]} ออกเดินทางใน 24 ชั่วโมง อย่าลืมเช็คอินออนไลน์!",
+        },
+        "checkin_hotel": {
+            "type": "checkin_reminder_hotel",
+            "title": "🏨 เตือนเช็คอินโรงแรมวันนี้",
+            "message": lambda b, d: f"วันนี้คือวันเช็คอินโรงแรมในการจอง #{(b or '?')[:8]} เตรียมเอกสารและบัตรเครดิตให้พร้อม!",
+        },
+        "payment_success": {
+            "type": "payment_success",
+            "title": "✅ ชำระเงินสำเร็จ",
+            "message": lambda b, d: f"ชำระเงินสำเร็จสำหรับการจอง #{(b or '?')[:8]} ขอบคุณที่ใช้บริการ",
+        },
+        "payment_failed": {
+            "type": "payment_failed",
+            "title": "❌ การชำระเงินล้มเหลว",
+            "message": lambda b, d: f"การชำระเงินสำหรับการจอง #{(b or '?')[:8]} ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง",
+        },
+        "booking_created": {
+            "type": "booking_created",
+            "title": "🎫 จองสำเร็จ",
+            "message": lambda b, d: f"การจอง #{(b or '?')[:8]} ได้รับการสร้างแล้ว กรุณาชำระเงินเพื่อยืนยันการจอง",
+        },
+    }
+
+    bid = body.booking_id or "DEMO00"
+    delay = body.delay_minutes or 60
+
+    if body.scenario == "custom":
+        if not body.custom_title or not body.custom_message:
+            raise HTTPException(status_code=400, detail="custom_title and custom_message required for custom scenario")
+        notif_type = "trip_alert"
+        title = body.custom_title
+        message = body.custom_message
+    elif body.scenario in SCENARIOS:
+        cfg = SCENARIOS[body.scenario]
+        notif_type = cfg["type"]
+        title = cfg["title"]
+        message = cfg["message"](bid, delay)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown scenario: {body.scenario}. Valid: {list(SCENARIOS.keys()) + ['custom']}")
+
+    # อัปเดต flight_status ใน booking ถ้าเป็น flight scenario
+    if body.booking_id and body.scenario in ("flight_delayed", "flight_cancelled", "flight_rescheduled"):
+        try:
+            from bson import ObjectId
+            bookings_col = db.get_collection("bookings")
+            update_fields: Dict[str, Any] = {
+                "flight_status": body.scenario.replace("flight_", ""),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+            if body.scenario == "flight_delayed":
+                update_fields["delay_minutes"] = delay
+            # ลอง find ด้วย booking_id ก่อน
+            booking = await bookings_col.find_one({"booking_id": body.booking_id})
+            if not booking:
+                try:
+                    booking = await bookings_col.find_one({"_id": ObjectId(body.booking_id)})
+                except Exception:
+                    pass
+            if booking:
+                await bookings_col.update_one(
+                    {"_id": booking["_id"]},
+                    {"$set": update_fields}
+                )
+        except Exception as upd_err:
+            logger.warning(f"[SimTrigger] Failed to update booking flight_status: {upd_err}")
+
+    await create_and_push_notification(
+        db=db,
+        user_id=body.user_id,
+        notif_type=notif_type,
+        title=title,
+        message=message,
+        booking_id=body.booking_id or None,
+        metadata={
+            "simulated": True,
+            "scenario": body.scenario,
+            "delay_minutes": delay if body.scenario == "flight_delayed" else None,
+        },
+        check_preferences=False,  # force send เสมอสำหรับ simulation
+    )
+
+    logger.info(f"[Admin Sim] Triggered '{body.scenario}' for user={body.user_id} booking={body.booking_id}")
+    return {"ok": True, "message": f"Scenario '{body.scenario}' triggered for user {body.user_id}"}
+
+
+@router.post("/sim/broadcast")
+async def sim_broadcast(body: dict, _auth: bool = Depends(verify_admin_auth)):
+    """
+    Broadcast notification ไปยัง users ทั้งหมด (หรือกลุ่มที่เลือก)
+    body: { title, message, type, user_ids (optional list) }
+    """
+    from app.storage.connection_manager import ConnectionManager
+    from app.services.notification_service import create_and_push_notification
+
+    title = body.get("title", "").strip()
+    message = body.get("message", "").strip()
+    notif_type = body.get("type", "trip_alert")
+    target_ids = body.get("user_ids") or []
+
+    if not title or not message:
+        raise HTTPException(status_code=400, detail="title and message are required")
+
+    db = ConnectionManager.get_instance().get_mongo_database()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+
+    # ถ้าไม่ระบุ user_ids ให้ดึงทั้งหมด
+    if not target_ids:
+        cursor = db["users"].find({}, {"user_id": 1})
+        async for doc in cursor:
+            uid = doc.get("user_id")
+            if uid:
+                target_ids.append(uid)
+
+    sent = 0
+    for uid in target_ids:
+        try:
+            await create_and_push_notification(
+                db=db,
+                user_id=uid,
+                notif_type=notif_type,
+                title=title,
+                message=message,
+                metadata={"simulated": True, "broadcast": True},
+                check_preferences=False,
+            )
+            sent += 1
+        except Exception as e:
+            logger.warning(f"[SimBroadcast] Failed for user {uid}: {e}")
+
+    return {"ok": True, "sent": sent, "message": f"Broadcast sent to {sent} users"}
+
 
 @router.get("/stream")
 async def admin_stream(request: Request, _auth: bool = Depends(verify_admin_auth)):

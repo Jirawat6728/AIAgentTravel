@@ -97,11 +97,20 @@ class TravelOrchestrator:
         # Google Maps
         self.gmaps = googlemaps.Client(key=settings.google_maps_api_key) if settings.google_maps_api_key else None
         
-        # Auth & Cache
+        # Auth & Cache (search token — production/test)
         self._token: Optional[str] = None
         self._token_expiry: float = 0
+        self._token_lock = asyncio.Lock()  # Prevent concurrent token refresh
+        # Booking token cache (sandbox only — แยกออกจาก search token)
+        self._booking_token: Optional[str] = None
+        self._booking_token_expiry: float = 0
+        self._booking_token_lock = asyncio.Lock()
+        # LRU-style bounded caches (max 500 entries each)
         self._geocoding_cache: Dict[str, Dict[str, Any]] = {}
+        self._geocoding_cache_order: list = []
         self._iata_cache: Dict[str, str] = {}
+        self._iata_cache_order: list = []
+        self._CACHE_MAX = 500
         # เมื่อ Production auth ล้มเหลว (401) ใช้ Test แทนเพื่อให้ค้นหาทำงานได้
         self._search_fallback_to_test: bool = False
         
@@ -145,59 +154,90 @@ class TravelOrchestrator:
         """
         Get or refresh Amadeus OAuth2 token for search operations.
         Uses search API keys; if production returns 401, falls back to test environment so search still works.
+        Protected by asyncio.Lock to prevent concurrent refresh races.
         """
+        # Fast path: check without lock first
         if self._token and time.time() < self._token_expiry:
             return self._token
+        async with self._token_lock:
+            # Re-check inside lock (another coroutine may have refreshed already)
+            if self._token and time.time() < self._token_expiry:
+                return self._token
 
-        base_url = self.amadeus_search_base_url
-        client_id = self.amadeus_search_client_id
-        client_secret = self.amadeus_search_client_secret
-        logger.info("Refreshing Amadeus OAuth2 token for search environment...")
-        try:
-            response = await self.client.post(
-                f"{base_url}/v1/security/oauth2/token",
-                data={
-                    "grant_type": "client_credentials",
-                    "client_id": client_id,
-                    "client_secret": client_secret
-                },
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
-            )
-            response.raise_for_status()
-            data = response.json()
-            self._token = data["access_token"]
-            self._token_expiry = time.time() + data["expires_in"] - 10
-            env_type = "production" if "api.amadeus.com" in base_url and "test." not in base_url else "test"
-            logger.info(f"Amadeus token refreshed successfully for {env_type} environment")
-            return self._token
-        except Exception as e:
-            resp = getattr(e, "response", None)
-            is_401 = resp is not None and getattr(resp, "status_code", None) == 401
-            if not is_401:
-                is_401 = "401" in str(e) or "Unauthorized" in str(e).lower()
-            # ถ้า Production คืน 401 และยังไม่เคย fallback ให้ลองใช้ Test
-            if is_401 and not self._search_fallback_to_test and "api.amadeus.com" in base_url and "test." not in base_url:
-                test_url = "https://test.api.amadeus.com"
-                test_id = settings.amadeus_booking_api_key or client_id
-                test_secret = settings.amadeus_booking_api_secret or client_secret
-                if test_id and test_secret:
-                    logger.warning(
-                        "Amadeus production auth failed (401). Falling back to test environment for search. "
-                        "To use production, set valid AMADEUS_SEARCH_API_KEY and AMADEUS_SEARCH_API_SECRET in .env"
-                    )
-                    self._search_fallback_to_test = True
-                    self.amadeus_search_base_url = test_url
-                    self.amadeus_search_client_id = test_id
-                    self.amadeus_search_client_secret = test_secret
-                    self._token = None
-                    self._token_expiry = 0
+            base_url = self.amadeus_search_base_url
+            client_id = self.amadeus_search_client_id
+            client_secret = self.amadeus_search_client_secret
+            logger.info("Refreshing Amadeus OAuth2 token for search environment...")
+            try:
+                response = await self.client.post(
+                    f"{base_url}/v1/security/oauth2/token",
+                    data={
+                        "grant_type": "client_credentials",
+                        "client_id": client_id,
+                        "client_secret": client_secret
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}
+                )
+                response.raise_for_status()
+                data = response.json()
+                self._token = data["access_token"]
+                self._token_expiry = time.time() + data["expires_in"] - 10
+                env_type = "production" if "api.amadeus.com" in base_url and "test." not in base_url else "test"
+                logger.info(f"Amadeus token refreshed successfully for {env_type} environment")
+                return self._token
+            except Exception as e:
+                resp = getattr(e, "response", None)
+                is_401 = resp is not None and getattr(resp, "status_code", None) == 401
+                if not is_401:
+                    is_401 = "401" in str(e) or "Unauthorized" in str(e).lower()
+                # ถ้า Production คืน 401 และยังไม่เคย fallback ให้ลองใช้ Test
+                if is_401 and not self._search_fallback_to_test and "api.amadeus.com" in base_url and "test." not in base_url:
+                    test_url = "https://test.api.amadeus.com"
+                    test_id = settings.amadeus_booking_api_key or client_id
+                    test_secret = settings.amadeus_booking_api_secret or client_secret
+                    if test_id and test_secret:
+                        logger.warning(
+                            "Amadeus production auth failed (401). Falling back to test environment for search. "
+                            "To use production, set valid AMADEUS_SEARCH_API_KEY and AMADEUS_SEARCH_API_SECRET in .env"
+                        )
+                        self._search_fallback_to_test = True
+                        self.amadeus_search_base_url = test_url
+                        self.amadeus_search_client_id = test_id
+                        self.amadeus_search_client_secret = test_secret
+                        self._token = None
+                        self._token_expiry = 0
+                    # Recursive call must happen outside the lock to avoid deadlock
                     return await self._get_amadeus_token()
-            env_type = "production" if "api.amadeus.com" in base_url and "test." not in base_url else "test"
-            logger.error(f"Failed to authenticate with Amadeus ({env_type}): {e}", exc_info=True)
-            raise AmadeusException(
-                f"Authentication failed with Amadeus API ({env_type}). "
-                "Check AMADEUS_SEARCH_API_KEY and AMADEUS_SEARCH_API_SECRET in .env (production keys from api.amadeus.com)."
-            )
+                env_type = "production" if "api.amadeus.com" in base_url and "test." not in base_url else "test"
+                logger.error(f"Failed to authenticate with Amadeus ({env_type}): {e}", exc_info=True)
+                raise AmadeusException(
+                    f"Authentication failed with Amadeus API ({env_type}). "
+                    "Check AMADEUS_SEARCH_API_KEY and AMADEUS_SEARCH_API_SECRET in .env (production keys from api.amadeus.com)."
+                )
+
+    # -------------------------------------------------------------------------
+    # Bounded LRU Cache helpers
+    # -------------------------------------------------------------------------
+
+    def _geocoding_cache_set(self, key: str, value: Dict[str, Any]) -> None:
+        """Set geocoding cache with LRU eviction when over capacity."""
+        if key in self._geocoding_cache:
+            self._geocoding_cache_order.remove(key)
+        elif len(self._geocoding_cache) >= self._CACHE_MAX:
+            oldest = self._geocoding_cache_order.pop(0)
+            self._geocoding_cache.pop(oldest, None)
+        self._geocoding_cache[key] = value
+        self._geocoding_cache_order.append(key)
+
+    def _iata_cache_set(self, key: str, value: str) -> None:
+        """Set IATA cache with LRU eviction when over capacity."""
+        if key in self._iata_cache:
+            self._iata_cache_order.remove(key)
+        elif len(self._iata_cache) >= self._CACHE_MAX:
+            oldest = self._iata_cache_order.pop(0)
+            self._iata_cache.pop(oldest, None)
+        self._iata_cache[key] = value
+        self._iata_cache_order.append(key)
 
     # -------------------------------------------------------------------------
     # Google Maps Integration (The Enabler)
@@ -246,7 +286,7 @@ class TravelOrchestrator:
                             "city": city,
                             "country_code": country_code,
                         }
-                        self._geocoding_cache[cache_key] = info
+                        self._geocoding_cache_set(cache_key, info)
                         logger.info(f"Found airport coordinates for IATA '{place_name}' via Amadeus: {lat},{lng}")
                         return info
             except Exception as e:
@@ -257,7 +297,7 @@ class TravelOrchestrator:
                 try:
                     airport_query = f"{place_name} airport"
                     logger.info(f"Trying geocoding with airport suffix: '{airport_query}'")
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     results = await loop.run_in_executor(
                         None, lambda: self.gmaps.geocode(airport_query, language=language)
                     )
@@ -275,7 +315,7 @@ class TravelOrchestrator:
                             "city": next((c["long_name"] for c in loc["address_components"] if "locality" in c["types"] or "administrative_area_level_1" in c["types"]), place_name),
                             "country_code": country_code,
                         }
-                        self._geocoding_cache[cache_key] = info
+                        self._geocoding_cache_set(cache_key, info)
                         logger.info(f"Found airport coordinates for IATA '{place_name}' via Google Maps: {info['lat']},{info['lng']}")
                         return info
                 except Exception as e:
@@ -286,7 +326,7 @@ class TravelOrchestrator:
             
         logger.info(f"Geocoding '{place_name}' via Google Maps API...")
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             results = await loop.run_in_executor(
                 None, lambda: self.gmaps.geocode(place_name, language=language)
             )
@@ -312,7 +352,7 @@ class TravelOrchestrator:
                 "country_code": country_code,
             }
             
-            self._geocoding_cache[cache_key] = info
+            self._geocoding_cache_set(cache_key, info)
             return info
         except AgentException:
             raise
@@ -343,7 +383,7 @@ class TravelOrchestrator:
         from app.engine.agent import MAJOR_CITIES
         if text_lower in MAJOR_CITIES:
             code = MAJOR_CITIES[text_lower]
-            self._iata_cache[cache_key] = code
+            self._iata_cache_set(cache_key, code)
             logger.info(f"Resolved '{city_name}' to '{code}' via MAJOR_CITIES map")
             return code
 
@@ -351,7 +391,7 @@ class TravelOrchestrator:
         loc_res = LocationIntelligence.resolve_location(city_name, context="flight")
         if loc_res.get("airport_code"):
             code = loc_res["airport_code"]
-            self._iata_cache[cache_key] = code
+            self._iata_cache_set(cache_key, code)
             logger.info(f"Resolved '{city_name}' to '{code}' via Landmark resolution")
             return code
             
@@ -444,13 +484,13 @@ class TravelOrchestrator:
                 sub = best_item.get("subType")
                 if sub == "CITY" and best_item.get("iataCode"):
                     code = best_item["iataCode"]
-                    self._iata_cache[cache_key] = code
+                    self._iata_cache_set(cache_key, code)
                     return code
                 if sub == "AIRPORT":
                     addr = best_item.get("address") or {}
                     code = addr.get("cityCode") or best_item.get("iataCode")
                     if code:
-                        self._iata_cache[cache_key] = code
+                        self._iata_cache_set(cache_key, code)
                         return code
 
             logger.warning(
@@ -482,13 +522,13 @@ class TravelOrchestrator:
                     addr = (d2["data"][0].get("address") or {})
                     city_code = addr.get("cityCode") or d2["data"][0].get("iataCode")
                     if city_code:
-                        self._iata_cache[cache_key] = city_code
+                        self._iata_cache_set(cache_key, city_code)
                         return city_code
             except Exception as e:
                 logger.warning(f"Airport->City mapping failed for {iata}: {e}")
 
             # If mapping fails, return airport IATA as last resort (better than wrong city)
-            self._iata_cache[cache_key] = iata
+            self._iata_cache_set(cache_key, iata)
             return iata
         except Exception as e:
             logger.error(f"All IATA resolution strategies failed for {city_name}: {e}")
@@ -524,7 +564,7 @@ class TravelOrchestrator:
                 return None # No airport found near coordinates
                 
             iata = data["data"][0]["iataCode"]
-            self._iata_cache[cache_key] = iata
+            self._iata_cache_set(cache_key, iata)
             return iata
         except Exception as e:
             logger.warning(f"Failed to find nearest IATA for {lat},{lng}: {e}")
@@ -1293,14 +1333,13 @@ class TravelOrchestrator:
             logger.error(f"❌ Hotel API error for {location_name or city_code}: {e}", exc_info=True)
             return []
 
-    async def get_activities(self, lat: float, lng: float) -> List[Dict[str, Any]]:
+    async def get_activities(self, lat: float, lng: float, radius: int = 10) -> List[Dict[str, Any]]:
         """Fetch Experiences/Activities"""
         token = await self._get_amadeus_token()
         try:
-            # ✅ Search: ใช้ production environment
             resp = await self.client.get(
                 f"{self.amadeus_search_base_url}/v1/shopping/activities",
-                params={"latitude": lat, "longitude": lng, "radius": 10},
+                params={"latitude": lat, "longitude": lng, "radius": max(1, min(radius, 100))},
                 headers={"Authorization": f"Bearer {token}"}
             )
             return resp.json().get("data", [])
@@ -1319,7 +1358,7 @@ class TravelOrchestrator:
         loc = await self.get_coordinates(location_name, language="en")
         lat, lng = loc["lat"], loc["lng"]
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _nearby():
             return self.gmaps.places_nearby(location=(lat, lng), radius=radius_m, type="lodging")
@@ -1417,10 +1456,9 @@ class TravelOrchestrator:
         
         base_url = self.amadeus_booking_base_url  # Always sandbox
         
-        # Check if token is still valid (with 5 minute buffer)
-        # Note: We should use separate token cache for booking, but for simplicity using same cache
-        if self._token and time.time() < self._token_expiry - 300:
-            return self._token
+        # ใช้ booking token cache แยกต่างหาก (ไม่ปนกับ search token)
+        if self._booking_token and time.time() < self._booking_token_expiry - 300:
+            return self._booking_token
         
         logger.info("Refreshing Amadeus OAuth2 token for booking (sandbox only)...")
         try:
@@ -1437,12 +1475,11 @@ class TravelOrchestrator:
             response.raise_for_status()
             data = response.json()
             
-            self._token = data["access_token"]
-            # Set expiry with a small buffer (10 seconds)
-            self._token_expiry = time.time() + data["expires_in"] - 10
+            self._booking_token = data["access_token"]
+            self._booking_token_expiry = time.time() + data["expires_in"] - 10
             
             logger.info("Amadeus booking token refreshed successfully (sandbox)")
-            return self._token
+            return self._booking_token
         except Exception as e:
             logger.error(f"Failed to authenticate with Amadeus (booking/sandbox): {e}")
             raise AmadeusException("Authentication failed with Amadeus API (booking/sandbox)")

@@ -78,6 +78,16 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
   const [activeTab, setActiveTab] = useState('bookings'); // Default to 'bookings'
   const [paymentModal, setPaymentModal] = useState(null); // { bookingId, booking, paymentUrl }
   const [editModal, setEditModal] = useState(null); // { bookingId, booking, formData }
+  const [editFlightSearch, setEditFlightSearch] = useState({
+    loading: false,
+    outbound: [], inboundResults: [],
+    outboundError: null, inboundError: null,
+    searched: false,
+    activeTab: 'outbound', // 'outbound' | 'inbound'
+    confirmedOutbound: false,
+    confirmedInbound: false,
+    collapsed: false, // ซ่อนรายการหลังยืนยัน
+  });
   const [refundModal, setRefundModal] = useState(null); // { bookingId, booking, eligibility: { refundable_items, total_refundable_amount, can_full_refund, message }, loading }
 
   // โหลดรายการเมื่อ user เปลี่ยน หรือเมื่อเปิดแท็บ My Bookings (หลังจองจาก Agent)
@@ -443,16 +453,11 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
       return;
     }
 
-    // ✅ Navigate to chat page with trip_id and chat_id
     const tripId = booking.trip_id;
-    const chatId = booking.chat_id || tripId;
-    
-    if (!tripId) {
-      alert('ไม่พบข้อมูลทริป กรุณาติดต่อผู้ดูแลระบบ');
-      return;
-    }
+    const chatId = booking.chat_id;
 
-    // ✅ Store booking info for chat to use
+    // ── กรณีที่ 1: booking จาก AI Chat (มี chat_id) → ไปหน้าแชทเพื่อแก้ไขผ่าน AI ──
+    if (chatId && tripId) {
     const editContext = {
       bookingId: bookingId,
       tripId: tripId,
@@ -460,39 +465,155 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
       booking: booking,
       action: 'edit_trip'
     };
-    
-    // Store in localStorage for chat to pick up
     localStorage.setItem('edit_booking_context', JSON.stringify(editContext));
     
-    // ✅ Navigate to chat and send edit message
     if (onNavigateToAI) {
-      // Navigate to chat (message will be auto-sent by AITravelChat)
       onNavigateToAI(tripId, chatId, '');
     } else {
-      // Fallback: navigate using window.location
       window.location.href = `/chat?trip_id=${tripId}&chat_id=${chatId}&edit_booking=${bookingId}`;
     }
+      return;
+    }
+
+    // ── กรณีที่ 2: booking จาก FlightsPage/HotelsPage/CarRentalsPage (ไม่มี chat_id) → เปิด Edit Modal ──
+    const slots = booking.travel_slots || {};
+    const plan = booking.plan || {};
+    const flightOpt = plan?.travel?.flights?.outbound?.[0]?.selected_option || {};
+
+    setEditFlightSearch({ loading: false, outbound: [], inboundResults: [], outboundError: null, inboundError: null, searched: false, activeTab: 'outbound', hasReturn: false, confirmedOutbound: false, confirmedInbound: false, collapsed: false });
+    setEditModal({
+      bookingId: bookingId,
+      booking: booking,
+      source: tripId?.startsWith('flight-') ? 'flight'
+            : tripId?.startsWith('hotel-')  ? 'hotel'
+            : tripId?.startsWith('car-')    ? 'car'
+            : 'direct',
+      formData: {
+        origin_city:        slots.origin_city        || '',
+        destination_city:   slots.destination_city   || '',
+        departure_date:     slots.departure_date      || '',
+        return_date:        slots.return_date         || '',
+        adults:             slots.adults              || 1,
+        children:           slots.children            || 0,
+        total_price:        booking.total_price       || flightOpt.price_amount || 0,
+        currency:           booking.currency          || flightOpt.currency || 'THB',
+        notes:              booking.notes             || '',
+      }
+    });
+  };
+
+  const handleEditFlightSearch = async () => {
+    if (!editModal) return;
+    const fd = editModal.formData;
+    if (!fd.origin_city?.trim() || !fd.destination_city?.trim()) {
+      setEditFlightSearch(prev => ({ ...prev, loading: false, outboundError: 'กรุณากรอกต้นทางและปลายทางก่อนค้นหา', searched: true }));
+      return;
+    }
+    if (!fd.departure_date) {
+      setEditFlightSearch(prev => ({ ...prev, loading: false, outboundError: 'กรุณาเลือกวันเดินทางก่อนค้นหา', searched: true }));
+      return;
+    }
+
+    const hasReturn = !!fd.return_date;
+    setEditFlightSearch({
+      loading: true,
+      outbound: [], inboundResults: [],
+      outboundError: null, inboundError: null,
+      searched: false,
+      activeTab: 'outbound',
+    });
+
+    const searchFlight = async (origin, destination, date) => {
+      const params = new URLSearchParams({ origin, destination, departure_date: date });
+      const res = await fetch(`${API_BASE_URL}/api/mcp/search/flights?${params.toString()}`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        const msg = typeof data.detail === 'string' ? data.detail : (data.detail?.[0]?.msg || 'ค้นหาไม่สำเร็จ');
+        throw new Error(msg);
+      }
+      return data.flights || [];
+    };
+
+    // ค้นหาขาไปและขากลับพร้อมกัน
+    const [outboundResult, inboundResult] = await Promise.allSettled([
+      searchFlight(fd.origin_city.trim(), fd.destination_city.trim(), fd.departure_date),
+      hasReturn
+        ? searchFlight(fd.destination_city.trim(), fd.origin_city.trim(), fd.return_date)
+        : Promise.resolve(null),
+    ]);
+
+    setEditFlightSearch({
+      loading: false,
+      outbound: outboundResult.status === 'fulfilled' ? (outboundResult.value || []) : [],
+      inboundResults: inboundResult.status === 'fulfilled' ? (inboundResult.value || []) : [],
+      outboundError: outboundResult.status === 'rejected' ? outboundResult.reason?.message : null,
+      inboundError: inboundResult.status === 'rejected' ? inboundResult.reason?.message : null,
+      searched: true,
+      activeTab: 'outbound',
+      hasReturn,
+    });
+  };
+
+  const handleSelectEditFlight = (flight, leg) => {
+    // leg: 'outbound' | 'inbound'
+    if (!editModal) return;
+    setEditModal(prev => {
+      const updated = {
+        ...prev,
+        selectedOutbound: leg === 'outbound' ? flight : prev.selectedOutbound,
+        selectedInbound: leg === 'inbound' ? flight : prev.selectedInbound,
+      };
+      // คำนวณราคารวม
+      const outPrice = parseFloat(updated.selectedOutbound?.price?.total) || 0;
+      const inPrice = parseFloat(updated.selectedInbound?.price?.total) || 0;
+      const currency = flight.price?.currency || prev.formData.currency || 'THB';
+      return {
+        ...updated,
+        formData: { ...prev.formData, total_price: outPrice + inPrice, currency },
+      };
+    });
   };
 
   const handleUpdateBooking = async () => {
     if (!editModal) return;
 
-    setProcessing({ ...processing, [editModal.bookingId]: 'updating' });
-    try {
-      const headers = { 'Content-Type': 'application/json' };
-      if (user?.id) {
-        headers['X-User-ID'] = user.id;
-      }
+    const fd = editModal.formData;
 
-      // Build update payload
+    // Validate
+    if (!fd.origin_city?.trim() || !fd.destination_city?.trim()) {
+      alert('กรุณากรอกต้นทางและปลายทาง');
+      return;
+    }
+    if (!fd.departure_date) {
+      alert('กรุณาเลือกวันเดินทาง');
+      return;
+    }
+    if (fd.return_date && fd.return_date < fd.departure_date) {
+      alert('วันกลับต้องไม่ก่อนวันเดินทาง');
+      return;
+    }
+
+    setProcessing(prev => ({ ...prev, [editModal.bookingId]: 'updating' }));
+    try {
+      const userId = user?.user_id || user?.id;
+      const headers = { 'Content-Type': 'application/json' };
+      if (userId) headers['X-User-ID'] = userId;
+
       const updatePayload = {
-        total_price: parseFloat(editModal.formData.total_price),
+        total_price: parseFloat(fd.total_price) || editModal.booking.total_price,
         travel_slots: {
-          origin_city: editModal.formData.origin_city,
-          destination_city: editModal.formData.destination_city,
-          departure_date: editModal.formData.departure_date,
-          return_date: editModal.formData.return_date
-        }
+          origin_city:      fd.origin_city.trim(),
+          destination_city: fd.destination_city.trim(),
+          departure_date:   fd.departure_date,
+          return_date:      fd.return_date || null,
+          adults:           parseInt(fd.adults) || 1,
+          children:         parseInt(fd.children) || 0,
+        },
+        ...(fd.notes ? { notes: fd.notes } : {}),
       };
 
       const res = await fetch(`${API_BASE_URL}/api/booking/update?booking_id=${editModal.bookingId}`, {
@@ -510,16 +631,15 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
       const data = await res.json();
 
       if (data?.ok) {
-        alert(data.message || 'อัปเดตการจองสำเร็จ');
         setEditModal(null);
-        await loadBookings(); // Reload bookings
+        await loadBookings();
       } else {
         throw new Error(data.detail || 'Unknown error');
       }
     } catch (err) {
       alert('เกิดข้อผิดพลาด: ' + (err.message || 'Unknown error'));
     } finally {
-      setProcessing({ ...processing, [editModal.bookingId]: null });
+      setProcessing(prev => ({ ...prev, [editModal.bookingId]: null }));
     }
   };
 
@@ -581,7 +701,15 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
             const flights = travelSlots.flights || [];
             const accommodations = travelSlots.accommodations || [];
             const groundTransport = travelSlots.ground_transport || [];
-            
+
+            // ✅ ตรวจสอบว่ามาจาก FlightSearch (trip_id ขึ้นต้นด้วย "flight-" หรือ source = 'flight_search')
+            const isFromFlightSearch = (booking.trip_id || '').startsWith('flight-') || travelSlots.source === 'flight_search';
+
+            // ✅ airline code สำหรับแสดง logo (จาก travel_slots หรือ plan)
+            const airlineCode = travelSlots.airline_code
+              || plan?.travel?.flights?.outbound?.[0]?.selected_option?.raw_data?.itineraries?.[0]?.segments?.[0]?.carrierCode
+              || '';
+
             // ✅ ดึงข้อมูลเที่ยวบินจาก segments
             let outboundFlight = null;
             let inboundFlight = null;
@@ -659,6 +787,31 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
               }
             }
             
+            // ✅ Fallback: ดึง outboundFlight จาก plan.travel.flights เมื่อ travel_slots.flights ว่าง
+            if (!outboundFlight && plan?.travel?.flights?.outbound?.length > 0) {
+              const planOutbound = plan.travel.flights.outbound[0];
+              const planSel = planOutbound?.selected_option || {};
+              const planRaw = planSel?.raw_data || {};
+              const planItineraries = planRaw?.itineraries || [];
+              if (planItineraries.length > 0) {
+                const outSegs = planItineraries[0]?.segments || [];
+                if (outSegs.length > 0) {
+                  const fSeg = outSegs[0];
+                  const lSeg = outSegs[outSegs.length - 1];
+                  outboundFlight = {
+                    from: fSeg?.departure?.iataCode || travelSlots.departure_iata || travelSlots.origin_city || '',
+                    to: lSeg?.arrival?.iataCode || travelSlots.arrival_iata || travelSlots.destination_city || '',
+                    airline: fSeg?.carrierCode || '',
+                    flightNumber: `${fSeg?.carrierCode || ''}${fSeg?.number || ''}`,
+                    departureTime: fSeg?.departure?.at || '',
+                    arrivalTime: lSeg?.arrival?.at || '',
+                    price: planSel?.price_amount || planSel?.price_total || 0,
+                    currency: planSel?.currency || 'THB'
+                  };
+                }
+              }
+            }
+
             // ✅ ดึงข้อมูลที่พักจาก segments
             let hotelInfo = null;
             if (accommodations.length > 0) {
@@ -679,6 +832,23 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
               <div key={booking._id} className="booking-card">
                 <div className="booking-header">
                   <div className="booking-title">
+                    {/* ✅ Airline logo เมื่อมาจาก FlightSearch */}
+                    {isFromFlightSearch && airlineCode && (
+                      <span className="airline-logo-badge" title={`สายการบิน ${airlineCode}`}>
+                        <img
+                          src={`https://content.airhex.com/content/logos/thumbnails_200_65_${airlineCode}_r.png`}
+                          alt={airlineCode}
+                          className="airline-logo-img"
+                          onError={(e) => {
+                            e.target.style.display = 'none';
+                            e.target.nextSibling.style.display = 'inline-flex';
+                          }}
+                        />
+                        <span className="airline-logo-fallback" style={{ display: 'none' }}>
+                          ✈️ {airlineCode}
+                        </span>
+                      </span>
+                    )}
                     <span>{origin && dest ? `${origin} → ${dest}` : 'ทริป'}</span>
                     {/* ✅ Agent Mode Badge */}
                     {booking.metadata?.mode === 'agent' || booking.metadata?.auto_booked ? (
@@ -725,6 +895,46 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                       {adults} ผู้ใหญ่{children > 0 ? `, ${children} เด็ก` : ''}
                     </span>
                   </div>
+                  {/* ✅ รายชื่อผู้โดยสาร */}
+                  {(() => {
+                    const passengers = booking.passengers || [];
+                    if (passengers.length === 0) return null;
+
+                    // ชื่อไทยจาก user profile (ถ้ากรอกไว้)
+                    const userThaiName = user
+                      ? `${user.first_name_th || ''} ${user.last_name_th || ''}`.trim()
+                      : '';
+                    // ชื่ออังกฤษจาก user profile
+                    const userEnName = user
+                      ? `${user.first_name || ''} ${user.last_name || ''}`.trim()
+                      : '';
+
+                    return (
+                      <div className="booking-passengers">
+                        <div className="passengers-label">👤 รายชื่อผู้โดยสาร</div>
+                        <div className="passengers-list">
+                          {passengers.map((pax, idx) => {
+                            let displayName = pax.name_th || pax.name || '';
+                            if (pax.is_main_booker) {
+                              // ลำดับ: ชื่อไทยจาก profile → ชื่อไทยใน pax → ชื่ออังกฤษจาก profile → ชื่อใน pax
+                              displayName = userThaiName || pax.name_th || userEnName || pax.name || '';
+                            }
+                            return (
+                              <div key={idx} className="passenger-item">
+                                <span className={`passenger-type-badge ${pax.type === 'child' ? 'child' : 'adult'}`}>
+                                  {pax.type === 'child' ? '👶 เด็ก' : '👤 ผู้ใหญ่'}
+                                </span>
+                                <span className="passenger-name">
+                                  {displayName}
+                                  {pax.is_main_booker && <span className="main-booker-tag"> (ผู้จอง)</span>}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {/* ✅ แสดงข้อมูลไฟท์บินขาไป */}
                   {outboundFlight && (
                     <div className="booking-flight-section">
@@ -1085,81 +1295,266 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
       {/* Edit Booking Modal */}
       {editModal && (
         <div className="payment-modal-overlay" onClick={() => setEditModal(null)}>
-          <div className="payment-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="payment-modal edit-booking-modal" onClick={(e) => e.stopPropagation()}>
             <div className="payment-modal-header">
-              <h2>✏️ แก้ไขการจอง</h2>
+              <h2>
+                {editModal.source === 'flight' ? '✈️' : editModal.source === 'hotel' ? '🏨' : editModal.source === 'car' ? '🚗' : '✏️'}
+                {' '}แก้ไขการจอง
+              </h2>
               <button className="payment-modal-close" onClick={() => setEditModal(null)}>✕</button>
             </div>
             
             <div className="payment-modal-body">
               <div className="edit-form">
+                {/* Row: ต้นทาง + ปลายทาง */}
+                <div className="edit-form-row">
                 <div className="form-group">
-                  <label className="form-label">ต้นทาง</label>
+                    <label className="form-label">📍 ต้นทาง <span className="required">*</span></label>
                   <input
                     type="text"
                     className="form-input"
                     value={editModal.formData.origin_city}
-                    onChange={(e) => setEditModal({
-                      ...editModal,
-                      formData: { ...editModal.formData, origin_city: e.target.value }
-                    })}
-                    placeholder="เช่น กรุงเทพ"
+                      onChange={(e) => { setEditModal({ ...editModal, formData: { ...editModal.formData, origin_city: e.target.value }, selectedOutbound: null, selectedInbound: null }); setEditFlightSearch({ loading: false, outbound: [], inboundResults: [], outboundError: null, inboundError: null, searched: false, activeTab: 'outbound', hasReturn: false, confirmedOutbound: false, confirmedInbound: false, collapsed: false }); }}
+                      placeholder="เช่น กรุงเทพ (BKK)"
                   />
                 </div>
-
                 <div className="form-group">
-                  <label className="form-label">ปลายทาง</label>
+                    <label className="form-label">🏁 ปลายทาง <span className="required">*</span></label>
                   <input
                     type="text"
                     className="form-input"
                     value={editModal.formData.destination_city}
-                    onChange={(e) => setEditModal({
-                      ...editModal,
-                      formData: { ...editModal.formData, destination_city: e.target.value }
-                    })}
-                    placeholder="เช่น ภูเก็ต"
-                  />
+                      onChange={(e) => { setEditModal({ ...editModal, formData: { ...editModal.formData, destination_city: e.target.value }, selectedOutbound: null, selectedInbound: null }); setEditFlightSearch({ loading: false, outbound: [], inboundResults: [], outboundError: null, inboundError: null, searched: false, activeTab: 'outbound', hasReturn: false, confirmedOutbound: false, confirmedInbound: false, collapsed: false }); }}
+                      placeholder="เช่น ภูเก็ต (HKT)"
+                    />
+                  </div>
                 </div>
 
+                {/* Row: วันเดินทาง + วันกลับ */}
+                <div className="edit-form-row">
                 <div className="form-group">
-                  <label className="form-label">วันเดินทาง</label>
+                    <label className="form-label">📅 วันเดินทาง <span className="required">*</span></label>
                   <input
                     type="date"
                     className="form-input"
                     value={editModal.formData.departure_date}
-                    onChange={(e) => setEditModal({
-                      ...editModal,
-                      formData: { ...editModal.formData, departure_date: e.target.value }
-                    })}
+                      onChange={(e) => { setEditModal({ ...editModal, formData: { ...editModal.formData, departure_date: e.target.value }, selectedOutbound: null, selectedInbound: null }); setEditFlightSearch({ loading: false, outbound: [], inboundResults: [], outboundError: null, inboundError: null, searched: false, activeTab: 'outbound', hasReturn: false, confirmedOutbound: false, confirmedInbound: false, collapsed: false }); }}
                   />
                 </div>
-
                 <div className="form-group">
-                  <label className="form-label">วันกลับ</label>
+                    <label className="form-label">📅 วันกลับ <span style={{ color: '#9ca3af', fontSize: '0.75rem' }}>(ถ้ามี)</span></label>
                   <input
                     type="date"
                     className="form-input"
                     value={editModal.formData.return_date}
-                    onChange={(e) => setEditModal({
-                      ...editModal,
-                      formData: { ...editModal.formData, return_date: e.target.value }
-                    })}
-                  />
+                      min={editModal.formData.departure_date}
+                      onChange={(e) => setEditModal({ ...editModal, formData: { ...editModal.formData, return_date: e.target.value } })}
+                    />
+                  </div>
                 </div>
 
+                {/* Row: ผู้โดยสาร */}
+                <div className="edit-form-row">
                 <div className="form-group">
-                  <label className="form-label">ราคารวม (บาท)</label>
+                    <label className="form-label">👤 ผู้ใหญ่</label>
                   <input
                     type="number"
                     className="form-input"
-                    value={editModal.formData.total_price}
-                    onChange={(e) => setEditModal({
-                      ...editModal,
-                      formData: { ...editModal.formData, total_price: e.target.value }
-                    })}
-                    placeholder="0"
-                    min="0"
+                      value={editModal.formData.adults}
+                      min="1" max="9"
+                      onChange={(e) => setEditModal({ ...editModal, formData: { ...editModal.formData, adults: e.target.value } })}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">👶 เด็ก</label>
+                    <input
+                      type="number"
+                      className="form-input"
+                      value={editModal.formData.children}
+                      min="0" max="9"
+                      onChange={(e) => setEditModal({ ...editModal, formData: { ...editModal.formData, children: e.target.value } })}
+                    />
+                  </div>
+                </div>
+
+                {/* ค้นหาเที่ยวบินที่รองรับ */}
+                <div className="edit-flight-search-section">
+                  <div className="edit-flight-search-header">
+                    <span className="edit-flight-search-label">
+                      ✈️ ตรวจสอบเที่ยวบินที่รองรับ
+                      {editModal.formData.return_date && <span className="efi-roundtrip-badge">ไป-กลับ</span>}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn-search-flights"
+                      onClick={handleEditFlightSearch}
+                      disabled={editFlightSearch.loading}
+                    >
+                      {editFlightSearch.loading ? '🔍 กำลังค้นหา...' : '🔍 ค้นหาเที่ยวบิน'}
+                    </button>
+                  </div>
+
+                  {editFlightSearch.searched && !editFlightSearch.loading && (() => {
+                    const hasReturn = editFlightSearch.hasReturn;
+                    const collapsed = editFlightSearch.collapsed;
+
+                    // helper: แปลง flight → summary 1 บรรทัด
+                    const flightSummary = (f) => {
+                      if (!f) return null;
+                      const seg = f.itineraries?.[0]?.segments?.[0];
+                      const dep = seg?.departure?.at ? new Date(seg.departure.at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', hour12: false }) : '--:--';
+                      const arr = seg?.arrival?.at ? new Date(seg.arrival.at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', hour12: false }) : '--:--';
+                      return `${seg?.carrierCode} ${seg?.number}  ${dep}→${arr}  ${seg?.departure?.iataCode}→${seg?.arrival?.iataCode}  ฿${parseFloat(f.price?.total || 0).toLocaleString()}`;
+                    };
+
+                    // ── Collapsed view (หลังยืนยัน) ──────────────────────────
+                    if (collapsed) {
+                      return (
+                        <div className="efi-confirmed-summary">
+                          <div className="efi-confirmed-rows">
+                            {editModal.selectedOutbound && (
+                              <div className="efi-confirmed-row">
+                                <span className="efi-confirmed-leg">✈️ ขาไป</span>
+                                <span className="efi-confirmed-detail">{flightSummary(editModal.selectedOutbound)}</span>
+                              </div>
+                            )}
+                            {editModal.selectedInbound && (
+                              <div className="efi-confirmed-row">
+                                <span className="efi-confirmed-leg">🔄 ขากลับ</span>
+                                <span className="efi-confirmed-detail">{flightSummary(editModal.selectedInbound)}</span>
+                              </div>
+                            )}
+                          </div>
+                          <button type="button" className="btn-change-flight"
+                            onClick={() => setEditFlightSearch(prev => ({ ...prev, collapsed: false, confirmedOutbound: false, confirmedInbound: false }))}
+                          >
+                            เปลี่ยน
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    // ── Expanded view (กำลังเลือก) ────────────────────────────
+                    const renderFlightList = (flights, error, leg) => {
+                      if (error) return <div className="edit-flight-error">❌ {error}</div>;
+                      if (leg === 'inbound' && flights === null) return null;
+                      if (!flights || flights.length === 0)
+                        return <div className="edit-flight-no-result">⚠️ ไม่พบเที่ยวบินสำหรับเส้นทางและวันที่นี้</div>;
+                      const selectedFlight = leg === 'outbound' ? editModal.selectedOutbound : editModal.selectedInbound;
+                      const isConfirmed = leg === 'outbound' ? editFlightSearch.confirmedOutbound : editFlightSearch.confirmedInbound;
+                      return (
+                        <div className="edit-flight-results">
+                          <div className="edit-flight-results-title">พบ {flights.length} เที่ยวบิน — เลือกเพื่ออัปเดตราคา</div>
+                          <div className="edit-flight-list">
+                            {flights.slice(0, 5).map((f, idx) => {
+                              const seg = f.itineraries?.[0]?.segments?.[0];
+                              const depTime = seg?.departure?.at ? new Date(seg.departure.at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', hour12: false }) : '--:--';
+                              const arrTime = seg?.arrival?.at ? new Date(seg.arrival.at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', hour12: false }) : '--:--';
+                              const price = parseFloat(f.price?.total) || 0;
+                              const isSelected = selectedFlight === f;
+                              return (
+                                <button key={idx} type="button"
+                                  className={`edit-flight-item${isSelected ? ' selected' : ''}`}
+                                  onClick={() => handleSelectEditFlight(f, leg)}
+                                >
+                                  <span className="efi-code">{seg?.carrierCode} {seg?.number}</span>
+                                  <span className="efi-time">{depTime} → {arrTime}</span>
+                                  <span className="efi-route">{seg?.departure?.iataCode} → {seg?.arrival?.iataCode}</span>
+                                  <span className="efi-price">฿{price.toLocaleString()}</span>
+                                  {isSelected && <span className="efi-check">✓</span>}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {/* ปุ่มตกลง — แสดงเมื่อเลือกแล้ว */}
+                          {selectedFlight && !isConfirmed && (
+                            <button type="button" className="btn-confirm-flight"
+                              onClick={() => {
+                                const newConfirmedOut = leg === 'outbound' ? true : editFlightSearch.confirmedOutbound;
+                                const newConfirmedIn  = leg === 'inbound'  ? true : editFlightSearch.confirmedInbound;
+                                // collapse ถ้า: ขาเดียว หรือ ไป-กลับแต่ทั้งสองขายืนยันแล้ว หรือขากลับไม่มีผล
+                                const shouldCollapse = !hasReturn || (newConfirmedOut && (newConfirmedIn || !editFlightSearch.inboundResults?.length));
+                                setEditFlightSearch(prev => ({
+                                  ...prev,
+                                  confirmedOutbound: newConfirmedOut,
+                                  confirmedInbound: newConfirmedIn,
+                                  collapsed: shouldCollapse,
+                                  // ถ้ายังไม่ collapse และเป็นขาไป ให้สลับไปแท็บขากลับอัตโนมัติ
+                                  activeTab: (!shouldCollapse && leg === 'outbound') ? 'inbound' : prev.activeTab,
+                                }));
+                              }}
+                            >
+                              ✅ ตกลง ยืนยันเที่ยวบินนี้
+                            </button>
+                          )}
+                        </div>
+                      );
+                    };
+
+                    if (!hasReturn) {
+                      return renderFlightList(editFlightSearch.outbound, editFlightSearch.outboundError, 'outbound');
+                    }
+
+                    // ไป-กลับ: แสดง tab
+                    return (
+                      <div>
+                        <div className="efi-tab-bar">
+                          <button type="button"
+                            className={`efi-tab${editFlightSearch.activeTab === 'outbound' ? ' active' : ''}`}
+                            onClick={() => setEditFlightSearch(prev => ({ ...prev, activeTab: 'outbound' }))}
+                          >
+                            ✈️ ขาไป
+                            {editFlightSearch.confirmedOutbound && <span className="efi-tab-check"> ✓</span>}
+                          </button>
+                          <button type="button"
+                            className={`efi-tab${editFlightSearch.activeTab === 'inbound' ? ' active' : ''}`}
+                            onClick={() => setEditFlightSearch(prev => ({ ...prev, activeTab: 'inbound' }))}
+                          >
+                            🔄 ขากลับ
+                            {editFlightSearch.confirmedInbound && <span className="efi-tab-check"> ✓</span>}
+                          </button>
+                        </div>
+                        {editFlightSearch.activeTab === 'outbound'
+                          ? renderFlightList(editFlightSearch.outbound, editFlightSearch.outboundError, 'outbound')
+                          : renderFlightList(editFlightSearch.inboundResults, editFlightSearch.inboundError, 'inbound')
+                        }
+                        {(editModal.selectedOutbound || editModal.selectedInbound) && (
+                          <div className="efi-price-summary">
+                            {editModal.selectedOutbound && (
+                              <span>ขาไป ฿{parseFloat(editModal.selectedOutbound.price?.total || 0).toLocaleString()}</span>
+                            )}
+                            {editModal.selectedOutbound && editModal.selectedInbound && <span className="efi-plus">+</span>}
+                            {editModal.selectedInbound && (
+                              <span>ขากลับ ฿{parseFloat(editModal.selectedInbound.price?.total || 0).toLocaleString()}</span>
+                            )}
+                            <span className="efi-total">
+                              รวม ฿{((parseFloat(editModal.selectedOutbound?.price?.total) || 0) + (parseFloat(editModal.selectedInbound?.price?.total) || 0)).toLocaleString()}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* หมายเหตุ */}
+                <div className="form-group">
+                  <label className="form-label">📝 หมายเหตุ / ความต้องการพิเศษ</label>
+                  <textarea
+                    className="form-input edit-notes-input"
+                    value={editModal.formData.notes}
+                    onChange={(e) => setEditModal({ ...editModal, formData: { ...editModal.formData, notes: e.target.value } })}
+                    placeholder="เช่น ต้องการที่นั่งริมหน้าต่าง, อาหารมังสวิรัติ..."
+                    rows={2}
                   />
+                </div>
+
+                {/* ราคา (read-only info) */}
+                <div className="edit-price-info">
+                  <span className="edit-price-label">💰 {(editModal.selectedOutbound || editModal.selectedInbound) ? 'ราคาเที่ยวบินที่เลือก' : 'ราคาปัจจุบัน'}</span>
+                  <span className="edit-price-value">
+                    {formatCurrency(editModal.formData.total_price, editModal.formData.currency)}
+                  </span>
                 </div>
               </div>
 
@@ -1169,7 +1564,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                   onClick={handleUpdateBooking}
                   disabled={processing[editModal.bookingId] === 'updating'}
                 >
-                  {processing[editModal.bookingId] === 'updating' ? 'กำลังบันทึก...' : '💾 บันทึกการเปลี่ยนแปลง'}
+                  {processing[editModal.bookingId] === 'updating' ? '⏳ กำลังบันทึก...' : '💾 บันทึกการเปลี่ยนแปลง'}
                 </button>
                 <button 
                   className="btn-cancel-edit"

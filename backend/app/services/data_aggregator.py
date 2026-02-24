@@ -66,6 +66,9 @@ class StandardizedItem(BaseModel):
     tags: List[str] = Field(default_factory=list, description="Tags like 'Cheapest', 'Recommended'")
     recommended: bool = Field(default=False, description="True if this is a recommended choice")
 
+    # Ranking
+    weighted_score: float = Field(default=0.0, description="Weighted Sum score (0–1, higher = better)")
+
 # =============================================================================
 # Data Aggregator Service
 # =============================================================================
@@ -344,7 +347,7 @@ class DataAggregator:
                 return []
 
             # -------------------------------------------------------------------------
-            # Unified Sorting, Filtering, and Tagging
+            # Unified Sorting, Filtering, Tagging, and Weighted Sum Scoring
             # -------------------------------------------------------------------------
             if results:
                 # 0. Filter by max_price if provided
@@ -358,43 +361,115 @@ class DataAggregator:
                     except (ValueError, TypeError):
                         logger.warning(f"Invalid max_price format: {kwargs['max_price']}")
 
-                # Sort: Items with price first
-                results.sort(key=lambda x: (not x.is_price_available, x.price_amount))
-                
-                # 1. Tag the cheapest
-                if results[0].is_price_available:
-                    results[0].tags.append("ถูกสุด")
-                    results[0].recommended = True
-                
+                # ── Weighted Sum Scoring ──────────────────────────────────────────
+                # S_i = Σ w_j * f_j(x_ij)  (Min-Max normalized, lower-is-better inverted)
+                # Weights per type:
+                #   flight : price=0.35, duration=0.30, stops=0.20, rating=0.10, review_count=0.05
+                #   hotel  : price=0.30, rating=0.35, review_count=0.20, distance=0.15
+                #   transfer: price=0.40, duration=0.35, rating=0.25
+                #   default: price=0.50, rating=0.30, review_count=0.20
+                # ─────────────────────────────────────────────────────────────────
+                WEIGHTS: dict = {
+                    "flight":   {"price": 0.35, "duration_min": 0.30, "stops": 0.20, "rating": 0.10, "review_count": 0.05},
+                    "hotel":    {"price": 0.30, "rating": 0.35, "review_count": 0.20, "distance": 0.15},
+                    "transfer": {"price": 0.40, "duration_min": 0.35, "rating": 0.25},
+                    "default":  {"price": 0.50, "rating": 0.30, "review_count": 0.20},
+                }
+                # Criteria where lower = better (will be inverted after normalization)
+                INVERSE = {"price", "duration_min", "stops", "distance"}
+
+                def _dur_to_min(d: str) -> float:
+                    """ISO 8601 duration → minutes, e.g. PT2H30M → 150"""
+                    if not d or not d.startswith("PT"):
+                        return 0.0
+                    try:
+                        h = int(d.split('H')[0].replace('PT', '')) if 'H' in d else 0
+                        m_part = d.split('H')[1] if 'H' in d else d.replace('PT', '')
+                        m = int(m_part.replace('M', '')) if 'M' in m_part else 0
+                        return float(h * 60 + m)
+                    except Exception:
+                        return 0.0
+
+                def _extract_raw(item, key: str) -> float:
+                    """Extract a numeric feature from a StandardizedItem."""
+                    if key == "price":
+                        return item.price_amount if item.is_price_available else 0.0
+                    if key == "duration_min":
+                        return _dur_to_min(item.duration or "")
+                    if key == "stops":
+                        return float(getattr(item, "stops", 0) or 0)
+                    if key == "rating":
+                        r = getattr(item, "rating", None) or getattr(item, "stars", None)
+                        return float(r) if r else 0.0
+                    if key == "review_count":
+                        rc = getattr(item, "review_count", None) or getattr(item, "reviews_count", None)
+                        return float(rc) if rc else 0.0
+                    if key == "distance":
+                        d = getattr(item, "distance", None) or getattr(item, "distance_km", None)
+                        return float(d) if d else 0.0
+                    return 0.0
+
+                weights = WEIGHTS.get(request_type, WEIGHTS["default"])
+
+                # Collect raw feature values per criterion
+                raw: dict[str, list[float]] = {k: [] for k in weights}
+                for item in results:
+                    for k in weights:
+                        raw[k].append(_extract_raw(item, k))
+
+                # Min-Max normalize each criterion
+                def _minmax(vals: list[float]) -> list[float]:
+                    lo, hi = min(vals), max(vals)
+                    if hi == lo:
+                        return [0.5] * len(vals)
+                    return [(v - lo) / (hi - lo) for v in vals]
+
+                norm: dict[str, list[float]] = {}
+                for k, vals in raw.items():
+                    n = _minmax(vals)
+                    # Invert lower-is-better criteria
+                    norm[k] = [1.0 - v if k in INVERSE else v for v in n]
+
+                # Compute weighted sum score for each item
+                for idx, item in enumerate(results):
+                    score = sum(weights[k] * norm[k][idx] for k in weights)
+                    item.weighted_score = round(score, 4)
+
+                # Sort by weighted score descending (higher = better)
+                results.sort(key=lambda x: (-(getattr(x, "weighted_score", 0.0)),
+                                             not x.is_price_available,
+                                             x.price_amount))
+
+                # 1. Tag the cheapest (by price, not by score)
+                priced = [x for x in results if x.is_price_available]
+                if priced:
+                    cheapest = min(priced, key=lambda x: x.price_amount)
+                    if "ถูกสุด" not in cheapest.tags:
+                        cheapest.tags.append("ถูกสุด")
+
                 # 2. Special tags for flights
                 if request_type == "flight":
-                    def parse_dur(d):
-                        if not d or not d.startswith("PT"): return 999999
-                        try:
-                            h = int(d.split('H')[0].replace('PT', '')) if 'H' in d else 0
-                            m_part = d.split('H')[1] if 'H' in d else d.replace('PT', '')
-                            m = int(m_part.replace('M', '')) if 'M' in m_part else 0
-                            return h * 60 + m
-                        except Exception:
-                            return 999999
-                    
-                    fastest = min(results, key=lambda x: parse_dur(x.duration))
-                    if "เร็วที่สุด" not in fastest.tags:
-                        fastest.tags.append("เร็วที่สุด")
-                        if not fastest.recommended:
-                            fastest.recommended = True
-                            
-                    # Visa Logic Handling
-                    for item in results:
-                        # Logic 2: Self-Transfer Warning (Checking for 'Self Transfer' flag usually from aggregators like Kiwi, but here we can check carriers)
-                        # Simplified: If multiple carriers in one itinerary, potential self-transfer risk (though Amadeus usually tickets together)
-                        # We'll use segment logic in normalization to flag warnings
-                        pass
-                
-                # 3. Add "แนะนำ" tag to the best overall (for now, same as cheapest or fastest)
+                    dur_vals = [(i, _dur_to_min(x.duration or "")) for i, x in enumerate(results)]
+                    valid_dur = [(i, d) for i, d in dur_vals if d > 0]
+                    if valid_dur:
+                        fastest_idx = min(valid_dur, key=lambda t: t[1])[0]
+                        fastest = results[fastest_idx]
+                        if "เร็วที่สุด" not in fastest.tags:
+                            fastest.tags.append("เร็วที่สุด")
+
+                # 3. Mark top-scored item as recommended
+                if results:
+                    results[0].recommended = True
+
+                # 4. Add "แนะนำ" tag to all recommended items
                 for item in results:
                     if item.recommended and "แนะนำ" not in item.tags:
                         item.tags.append("แนะนำ")
+
+                logger.info(
+                    f"[Ranking] {request_type}: {len(results)} items scored & sorted "
+                    f"(top score={getattr(results[0], 'weighted_score', '?')})"
+                )
 
             return results
         except Exception as e:

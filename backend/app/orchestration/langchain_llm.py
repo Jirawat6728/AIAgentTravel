@@ -65,18 +65,9 @@ class LangChainProductionLLM:
     - intelligence_chain: prompt | llm | parse_json
     """
 
-    MODEL_MAP = {
-        ModelType.FLASH: getattr(settings, "gemini_flash_model", None) or "gemini-2.5-flash",
-        ModelType.PRO: getattr(settings, "gemini_pro_model", None) or "gemini-2.5-pro",
-    }
-    BRAIN_MODEL = {
-        BrainType.CONTROLLER: ModelType.PRO,
-        BrainType.RESPONDER: ModelType.FLASH,
-        BrainType.INTELLIGENCE: ModelType.PRO,
-    }
     BRAIN_TEMPERATURE = {
-        BrainType.CONTROLLER: settings.controller_temperature,
-        BrainType.RESPONDER: settings.responder_temperature,
+        BrainType.CONTROLLER: 0.3,
+        BrainType.RESPONDER: 0.7,
         BrainType.INTELLIGENCE: 0.4,
     }
 
@@ -88,24 +79,34 @@ class LangChainProductionLLM:
         self.api_key = api_key or settings.gemini_api_key
         if not self.api_key or not self.api_key.strip():
             raise LLMException("GEMINI_API_KEY is required for LangChain orchestration")
-        # ChatGoogleGenerativeAI uses api_key (or GOOGLE_API_KEY env)
+
+        # ✅ อ่านค่า model จาก settings ตอน __init__ (ไม่ใช่ class-level) เพื่อให้ได้ค่าจาก .env จริง
+        flash_model = getattr(settings, "gemini_flash_model", None) or "gemini-2.5-flash"
+        pro_model = getattr(settings, "gemini_pro_model", None) or "gemini-2.5-pro"
+
+        # ✅ langchain-google-genai v4+ ไม่รองรับ convert_system_message_to_human แล้ว
+        # ✅ ตั้ง request_timeout ให้สูงพอ (Pro model ใช้เวลานาน)
+        _llm_timeout = int(getattr(settings, "llm_timeout", None) or 120)
+        _llm_kwargs = dict(
+            google_api_key=self.api_key,
+            request_timeout=_llm_timeout,
+            max_retries=2,
+        )
+
         self._llm_controller = ChatGoogleGenerativeAI(
-            api_key=self.api_key,
-            model=self.MODEL_MAP[ModelType.PRO],
+            model=pro_model,
             temperature=self.BRAIN_TEMPERATURE[BrainType.CONTROLLER],
-            convert_system_message_to_human=True,
+            **_llm_kwargs,
         )
         self._llm_responder = ChatGoogleGenerativeAI(
-            api_key=self.api_key,
-            model=self.MODEL_MAP[ModelType.FLASH],
+            model=flash_model,
             temperature=self.BRAIN_TEMPERATURE[BrainType.RESPONDER],
-            convert_system_message_to_human=True,
+            **_llm_kwargs,
         )
         self._llm_intelligence = ChatGoogleGenerativeAI(
-            api_key=self.api_key,
-            model=self.MODEL_MAP[ModelType.PRO],
+            model=pro_model,
             temperature=self.BRAIN_TEMPERATURE[BrainType.INTELLIGENCE],
-            convert_system_message_to_human=True,
+            **_llm_kwargs,
         )
         # LCEL chains
         self._controller_chain = (
@@ -133,8 +134,8 @@ class LangChainProductionLLM:
             | StrOutputParser()
         )
         logger.info(
-            f"LangChainProductionLLM initialized (Controller={self.MODEL_MAP[ModelType.PRO]}, "
-            f"Responder={self.MODEL_MAP[ModelType.FLASH]})"
+            f"LangChainProductionLLM initialized (Controller/Intelligence={pro_model}, "
+            f"Responder={flash_model})"
         )
 
     async def controller_generate(
@@ -160,7 +161,7 @@ class LangChainProductionLLM:
             raise
         except Exception as e:
             logger.error(f"LangChain controller_generate error: {e}", exc_info=True)
-            return {"error": "unexpected_error", "action": "ASK_USER", "payload": {"message": "เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง"}}
+            raise LLMException(f"LangChain controller failed: {e}") from e
 
     async def responder_generate(
         self,
@@ -177,13 +178,13 @@ class LangChainProductionLLM:
                 "prompt": prompt,
             })
             if not result or not str(result).strip():
-                return "ขออภัยค่ะ ฉันไม่สามารถสร้างคำตอบได้ในขณะนี้ กรุณาลองใหม่อีกครั้งนะคะ"
+                raise LLMException("LangChain responder returned empty response")
             return str(result).strip()
         except LLMException:
             raise
         except Exception as e:
             logger.error(f"LangChain responder_generate error: {e}", exc_info=True)
-            return "ขออภัยค่ะ ระบบไม่สามารถสร้างคำตอบได้ในขณะนี้ กรุณาลองใหม่อีกครั้งนะคะ"
+            raise LLMException(f"LangChain responder failed: {e}") from e
 
     async def intelligence_generate(
         self,

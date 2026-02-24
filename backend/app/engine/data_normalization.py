@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 from typing import List, Dict, Any, Optional, Union
-import numpy as np
 
 from app.core.logging import get_logger
 

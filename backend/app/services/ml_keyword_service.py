@@ -188,6 +188,7 @@ class MLKeywordService:
         self._classes: Optional[List[str]] = None
         self._trained = False
         self._dl_trained = False
+        self._dl_lstm_trained = False  # PyTorch LSTM (optional)
 
     def _ensure_trained(self) -> bool:
         if not _sklearn_available:

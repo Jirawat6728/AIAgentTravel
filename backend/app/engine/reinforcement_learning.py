@@ -65,13 +65,12 @@ class RLService:
     MAX_HISTORY = 500    # max reward records per user
 
     def __init__(self):
-        self._db = None
+        pass
 
     def _get_db(self):
-        if self._db is None:
-            from app.storage.connection_manager import ConnectionManager
-            self._db = ConnectionManager.get_instance().get_mongo_database()
-        return self._db
+        # ไม่ cache handle เพื่อป้องกัน stale reference หลัง ConnectionManager reconnect
+        from app.storage.connection_manager import ConnectionManager
+        return ConnectionManager.get_instance().get_mongo_database()
 
     # ------------------------------------------------------------------
     # Option key: fingerprint ที่ระบุ option อย่าง stable
@@ -162,11 +161,13 @@ class RLService:
                     }}
                 )
             else:
+                # New entry: apply same update rule from Q=0 → Q = 0 + α*(r - 0) = α*r
+                initial_q = self.ALPHA * reward
                 await qtable_col.insert_one({
                     "user_id": user_id,
                     "slot_name": slot_name,
                     "option_key": option_key,
-                    "q_value": round(reward * self.ALPHA, 4),
+                    "q_value": round(initial_q, 4),
                     "visit_count": 1,
                     "last_updated": datetime.utcnow().isoformat(),
                     "last_action": action_type,

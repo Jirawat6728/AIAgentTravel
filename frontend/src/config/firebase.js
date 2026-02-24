@@ -1,6 +1,13 @@
 // Firebase Configuration
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, sendEmailVerification } from 'firebase/auth';
+import {
+  getAuth,
+  GoogleAuthProvider,
+  signInWithPopup,
+  sendEmailVerification,
+  createUserWithEmailAndPassword,
+  deleteUser,
+} from 'firebase/auth';
 
 // Firebase configuration from environment variables
 const firebaseConfig = {
@@ -36,4 +43,13 @@ try {
   console.error("❌ Firebase initialization error:", error);
 }
 
-export { app, auth, googleProvider, firebaseConfig, signInWithPopup, sendEmailVerification };
+export {
+  app,
+  auth,
+  googleProvider,
+  firebaseConfig,
+  signInWithPopup,
+  sendEmailVerification,
+  createUserWithEmailAndPassword,
+  deleteUser,
+};

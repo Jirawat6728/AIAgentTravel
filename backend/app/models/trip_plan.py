@@ -63,11 +63,21 @@ class Segment(BaseModel):
     
     @model_validator(mode='after')
     def validate_state(self) -> 'Segment':
-        """Validate segment state consistency"""
+        """Validate and auto-heal segment state consistency (tolerant of legacy data)"""
+        import logging
+        _log = logging.getLogger(__name__)
         if self.status == SegmentStatus.CONFIRMED and self.selected_option is None:
-            raise ValueError("Segment with status 'confirmed' must have selected_option")
+            # Legacy data: CONFIRMED without selected_option → downgrade to SELECTING or PENDING
+            new_status = SegmentStatus.SELECTING if self.options_pool else SegmentStatus.PENDING
+            _log.warning(
+                f"Segment state healed: CONFIRMED→{new_status.value} "
+                f"(selected_option was None, options_pool={len(self.options_pool)})"
+            )
+            self.status = new_status
         if self.status == SegmentStatus.SELECTING and len(self.options_pool) == 0:
-            raise ValueError("Segment with status 'selecting' must have options in options_pool")
+            # Legacy data: SELECTING without options → downgrade to PENDING
+            _log.warning("Segment state healed: SELECTING→PENDING (options_pool was empty)")
+            self.status = SegmentStatus.PENDING
         return self
     
     def is_complete(self) -> bool:
@@ -78,6 +88,8 @@ class Segment(BaseModel):
         """Check if segment needs to be searched"""
         if self.status == SegmentStatus.CONFIRMED:
             return False
+        if self.status == SegmentStatus.SEARCHING:
+            return False  # search already in progress — avoid duplicate
         if len(self.options_pool) > 0:
             return False
         # Check if requirements are complete

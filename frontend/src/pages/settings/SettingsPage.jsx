@@ -70,14 +70,19 @@ export default function SettingsPage({
   onLogout,
   onNavigateToHome,
   onNavigateToProfile,
+  onNavigateToSettings = null,
   onNavigateToBookings,
   onNavigateToAI,
   onNavigateToFlights,
   onNavigateToHotels,
   onNavigateToCarRentals,
   notificationCount = 0,
+  notifications = [],
+  onMarkNotificationAsRead = null,
+  onClearAllNotifications = null,
   onRefreshUser = null,
-  onSendVerificationEmailSuccess = null
+  onSendVerificationEmailSuccess = null,
+  onUpdateEmailSuccess = null,
 }) {
   const theme = useTheme();
   const { t } = useLanguage();
@@ -93,6 +98,9 @@ export default function SettingsPage({
     bookingNotifications: true,
     paymentNotifications: true,
     tripChangeNotifications: true,
+    flightAlertNotifications: true,
+    checkinNotifications: true,
+    accountNotifications: true,
     emailNotifications: true,
     
     // Privacy
@@ -133,8 +141,14 @@ export default function SettingsPage({
     confirmPassword: ''
   });
   const [showChangePassword, setShowChangePassword] = useState(false);
+  const [newPasswordStrength, setNewPasswordStrength] = useState({ score: 0, checks: { length: false, upper: false, lower: false, digit: false, special: false } });
+  const [currentPasswordTouched, setCurrentPasswordTouched] = useState(false);
   const [showUpdateEmail, setShowUpdateEmail] = useState(false);
   const [newEmail, setNewEmail] = useState('');
+  const [emailOtpStep, setEmailOtpStep] = useState(false); // true = แสดง OTP input
+  const [emailOtp, setEmailOtp] = useState('');
+  const [emailOtpError, setEmailOtpError] = useState('');
+  const [emailOtpPending, setEmailOtpPending] = useState(''); // อีเมลที่รอยืนยัน
   // บัตรเครดิต/เดบิต (saved cards)
   const [savedCards, setSavedCards] = useState([]);
   const [primaryCardId, setPrimaryCardId] = useState(null);
@@ -535,18 +549,30 @@ export default function SettingsPage({
     }
   };
 
+  const calcPasswordStrength = (pwd) => {
+    const checks = {
+      length:  pwd.length >= 8,
+      upper:   /[A-Z]/.test(pwd),
+      lower:   /[a-z]/.test(pwd),
+      digit:   /\d/.test(pwd),
+      special: /[!@#$%^&*(),.?":{}|<>]/.test(pwd),
+    };
+    const score = Object.values(checks).filter(Boolean).length;
+    return { score, checks };
+  };
+
   const handleChangePassword = async () => {
+    setCurrentPasswordTouched(true);
     if (!changePasswordData.currentPassword?.trim()) {
-      alert('กรุณากรอกรหัสผ่านปัจจุบัน');
       return;
     }
     if (changePasswordData.newPassword !== changePasswordData.confirmPassword) {
-      alert('รหัสผ่านใหม่ไม่ตรงกัน');
+      Swal.fire({ icon: 'warning', title: 'รหัสผ่านใหม่ไม่ตรงกัน', text: 'กรุณากรอกรหัสผ่านใหม่และยืนยันให้ตรงกัน', confirmButtonText: 'ตกลง', confirmButtonColor: '#6366f1' });
       return;
     }
     const strength = validatePasswordStrength(changePasswordData.newPassword);
     if (!strength.valid) {
-      alert(strength.message);
+      Swal.fire({ icon: 'warning', title: 'รหัสผ่านไม่ปลอดภัย', text: strength.message, confirmButtonText: 'ตกลง', confirmButtonColor: '#6366f1' });
       return;
     }
 
@@ -569,15 +595,23 @@ export default function SettingsPage({
       
       const data = await res.json();
       if (data.ok) {
-        alert('เปลี่ยนรหัสผ่านสำเร็จ');
+        await Swal.fire({
+          icon: 'success',
+          title: 'เปลี่ยนรหัสผ่านสำเร็จ',
+          text: 'รหัสผ่านของคุณถูกอัปเดตเรียบร้อยแล้ว',
+          confirmButtonText: 'ตกลง',
+          confirmButtonColor: '#6366f1',
+        });
         setChangePasswordData({ currentPassword: '', newPassword: '', confirmPassword: '' });
+        setNewPasswordStrength({ score: 0, checks: { length: false, upper: false, lower: false, digit: false, special: false } });
+        setCurrentPasswordTouched(false);
         setShowChangePassword(false);
       } else {
         throw new Error(data.detail || 'Failed to change password');
       }
     } catch (error) {
       console.error('Error changing password:', error);
-      alert(`เกิดข้อผิดพลาด: ${error.message}`);
+      Swal.fire({ icon: 'error', title: 'เกิดข้อผิดพลาด', text: error.message, confirmButtonText: 'ตกลง', confirmButtonColor: '#6366f1' });
     } finally {
       setIsSaving(false);
     }
@@ -585,7 +619,7 @@ export default function SettingsPage({
 
   const handleUpdateEmail = async () => {
     if (!newEmail || !newEmail.includes('@')) {
-      alert('กรุณากรอกอีเมลที่ถูกต้อง');
+      Swal.fire({ icon: 'warning', title: 'อีเมลไม่ถูกต้อง', text: 'กรุณากรอกอีเมลที่ถูกต้อง', confirmButtonText: 'ตกลง', confirmButtonColor: '#6366f1' });
       return;
     }
 
@@ -595,29 +629,63 @@ export default function SettingsPage({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({
-          new_email: newEmail
-        })
+        body: JSON.stringify({ new_email: newEmail })
       });
-      
+
       const data = await res.json();
       if (data.ok) {
-        setNewEmail('');
-        setShowUpdateEmail(false);
-        if (onRefreshUser) {
-          onRefreshUser();
-        }
-        const successMessage = data.message || 'ส่งลิงก์ยืนยันการเปลี่ยนอีเมลแล้ว กรุณากดลิงก์ในอีเมลเพื่อเปลี่ยนอีเมลและยืนยัน';
-        if (onUpdateEmailSuccess) {
-          onUpdateEmailSuccess(data.pending_email || data.email || newEmail);
-        }
-        alert(successMessage);
+        // เปิด OTP step แทน alert
+        setEmailOtpPending(data.pending_email || newEmail);
+        setEmailOtpStep(true);
+        setEmailOtp('');
+        setEmailOtpError('');
       } else {
         throw new Error(data.detail || 'Failed to update email');
       }
     } catch (error) {
       console.error('Error updating email:', error);
-      alert(`เกิดข้อผิดพลาด: ${error.message}`);
+      Swal.fire({ icon: 'error', title: 'เกิดข้อผิดพลาด', text: error.message, confirmButtonText: 'ตกลง', confirmButtonColor: '#6366f1' });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleVerifyEmailOtp = async () => {
+    if (!emailOtp || emailOtp.length !== 6 || !/^\d{6}$/.test(emailOtp)) {
+      setEmailOtpError('กรุณากรอกรหัส OTP 6 หลัก');
+      return;
+    }
+    setIsSaving(true);
+    setEmailOtpError('');
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/auth/verify-email-change-otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ otp: emailOtp })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        // รีเซ็ต state ทั้งหมด
+        setNewEmail('');
+        setEmailOtp('');
+        setEmailOtpStep(false);
+        setEmailOtpPending('');
+        setShowUpdateEmail(false);
+        if (onRefreshUser) onRefreshUser();
+        if (onUpdateEmailSuccess) onUpdateEmailSuccess(data.email || emailOtpPending);
+        await Swal.fire({
+          icon: 'success',
+          title: 'เปลี่ยนอีเมลสำเร็จ',
+          text: `อีเมลของคุณถูกเปลี่ยนเป็น ${data.email || emailOtpPending} และยืนยันแล้ว`,
+          confirmButtonText: 'ตกลง',
+          confirmButtonColor: '#6366f1',
+        });
+      } else {
+        setEmailOtpError(data.detail || 'รหัส OTP ไม่ถูกต้อง');
+      }
+    } catch (error) {
+      setEmailOtpError(`เกิดข้อผิดพลาด: ${error.message}`);
     } finally {
       setIsSaving(false);
     }
@@ -629,25 +697,25 @@ export default function SettingsPage({
       try {
         const { auth, sendEmailVerification } = await import('../../config/firebase.js');
         if (!auth?.currentUser) {
-          alert('กรุณารีเฟรชหรือเข้าสู่ระบบด้วย Firebase อีกครั้ง เพื่อส่งอีเมลยืนยัน');
+          Swal.fire({ icon: 'warning', title: 'กรุณาเข้าสู่ระบบใหม่', text: 'กรุณารีเฟรชหรือเข้าสู่ระบบด้วย Firebase อีกครั้ง เพื่อส่งอีเมลยืนยัน', confirmButtonText: 'ตกลง', confirmButtonColor: '#6366f1' });
           return;
         }
         await sendEmailVerification(auth.currentUser);
         if (onSendVerificationEmailSuccess) {
           onSendVerificationEmailSuccess(auth.currentUser?.email || user?.email);
         } else {
-          alert('ส่งอีเมลยืนยันแล้ว (Firebase) กรุณาตรวจสอบอีเมล เมื่อยืนยันแล้วให้รีเฟรชหรือกลับมาหน้านี้');
+          Swal.fire({ icon: 'success', title: 'ส่งอีเมลยืนยันแล้ว', text: 'กรุณาตรวจสอบอีเมล เมื่อยืนยันแล้วให้รีเฟรชหรือกลับมาหน้านี้', confirmButtonText: 'ตกลง', confirmButtonColor: '#6366f1' });
         }
       } catch (error) {
         console.error('Firebase sendEmailVerification error:', error);
-        alert(`เกิดข้อผิดพลาด: ${error.message || 'ส่งอีเมลยืนยันไม่สำเร็จ'}`);
+        Swal.fire({ icon: 'error', title: 'เกิดข้อผิดพลาด', text: error.message || 'ส่งอีเมลยืนยันไม่สำเร็จ', confirmButtonText: 'ตกลง', confirmButtonColor: '#6366f1' });
       }
       return;
     }
     try {
       const res = await fetch(`${API_BASE_URL}/api/auth/send-verification-email`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...((user?.user_id || user?.id) && { 'X-User-ID': user?.user_id || user?.id }) },
         credentials: 'include'
       });
       
@@ -656,15 +724,19 @@ export default function SettingsPage({
         if (onSendVerificationEmailSuccess) {
           onSendVerificationEmailSuccess(data.email || user?.email);
         } else {
-          alert('ส่งอีเมลยืนยันแล้ว กรุณาตรวจสอบอีเมล');
+          Swal.fire({ icon: 'success', title: 'ส่งอีเมลยืนยันแล้ว', text: 'กรุณาตรวจสอบกล่องจดหมายของคุณ', confirmButtonText: 'ตกลง', confirmButtonColor: '#6366f1' });
         }
       } else {
-        const msg = data.detail || data.message || 'ไม่สามารถส่งอีเมลยืนยันได้';
-        throw new Error(typeof msg === 'string' ? msg : 'Failed to send verification email');
+        const rawMsg = data.detail || data.message || 'ไม่สามารถส่งอีเมลยืนยันได้';
+        const msg = typeof rawMsg === 'string' ? rawMsg : 'ไม่สามารถส่งอีเมลยืนยันได้';
+        if (res.status === 503) {
+          throw new Error('บริการส่งอีเมลยังไม่พร้อม กรุณาติดต่อผู้ดูแลระบบ');
+        }
+        throw new Error(msg);
       }
     } catch (error) {
       console.error('Error sending verification email:', error);
-      alert(error.message || 'เกิดข้อผิดพลาดในการส่งอีเมลยืนยัน');
+      Swal.fire({ icon: 'error', title: 'เกิดข้อผิดพลาด', text: error.message || 'เกิดข้อผิดพลาดในการส่งอีเมลยืนยัน', confirmButtonText: 'ตกลง', confirmButtonColor: '#6366f1' });
     }
   };
 
@@ -679,7 +751,14 @@ export default function SettingsPage({
       
       const data = await res.json();
       if (res.ok && data.ok) {
-        alert('บัญชีถูกลบเรียบร้อยแล้ว');
+        await Swal.fire({
+          icon: 'success',
+          title: 'ลบบัญชีสำเร็จ',
+          text: 'บัญชีของคุณถูกลบเรียบร้อยแล้ว',
+          confirmButtonText: 'ตกลง',
+          confirmButtonColor: '#6366f1',
+          allowOutsideClick: false,
+        });
         localStorage.clear();
         sessionStorage.clear();
         setShowDeletePopup(false);
@@ -693,7 +772,7 @@ export default function SettingsPage({
       }
     } catch (error) {
       console.error('Delete account error:', error);
-      alert(`เกิดข้อผิดพลาดในการลบบัญชี: ${error.message || 'Unknown error'}`);
+      Swal.fire({ icon: 'error', title: 'เกิดข้อผิดพลาด', text: `ไม่สามารถลบบัญชีได้: ${error.message || 'Unknown error'}`, confirmButtonText: 'ตกลง', confirmButtonColor: '#6366f1' });
     } finally {
       setIsDeleting(false);
     }
@@ -782,29 +861,103 @@ export default function SettingsPage({
             </button>
           ) : (
             <div className="password-change-form">
-              <input
-                type="password"
-                placeholder={t('settings.currentPassword')}
-                value={changePasswordData.currentPassword}
-                onChange={(e) => setChangePasswordData(prev => ({ ...prev, currentPassword: e.target.value }))}
-                className="form-input"
-              />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <input
+                  type="password"
+                  placeholder={t('settings.currentPassword')}
+                  value={changePasswordData.currentPassword}
+                  onChange={(e) => {
+                    setChangePasswordData(prev => ({ ...prev, currentPassword: e.target.value }));
+                    if (currentPasswordTouched) setCurrentPasswordTouched(true);
+                  }}
+                  onBlur={() => setCurrentPasswordTouched(true)}
+                  className={`form-input${currentPasswordTouched && !changePasswordData.currentPassword?.trim() ? ' input-error' : ''}`}
+                />
+                {currentPasswordTouched && !changePasswordData.currentPassword?.trim() && (
+                  <p style={{ fontSize: '12px', color: '#ef4444', margin: 0, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <span>✕</span> กรุณากรอกรหัสผ่านปัจจุบัน
+                  </p>
+                )}
+              </div>
               <input
                 type="password"
                 placeholder={t('settings.newPassword')}
                 value={changePasswordData.newPassword}
-                onChange={(e) => setChangePasswordData(prev => ({ ...prev, newPassword: e.target.value }))}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setChangePasswordData(prev => ({ ...prev, newPassword: val }));
+                  setNewPasswordStrength(calcPasswordStrength(val));
+                }}
                 className="form-input"
               />
+              {/* Password strength indicator */}
+              {changePasswordData.newPassword.length > 0 && (() => {
+                const { score, checks } = newPasswordStrength;
+                const colors = ['#ef4444','#f97316','#eab308','#22c55e','#6366f1'];
+                const labels = ['อ่อนมาก','อ่อน','พอใช้','ดี','แข็งแกร่ง'];
+                const barColor = colors[score - 1] || '#e5e7eb';
+                const label = score > 0 ? labels[score - 1] : '';
+                const checkList = [
+                  { key: 'length',  text: 'อย่างน้อย 8 ตัวอักษร' },
+                  { key: 'upper',   text: 'ตัวพิมพ์ใหญ่ (A-Z)' },
+                  { key: 'lower',   text: 'ตัวพิมพ์เล็ก (a-z)' },
+                  { key: 'digit',   text: 'ตัวเลข (0-9)' },
+                  { key: 'special', text: 'อักขระพิเศษ (!@#$...)' },
+                ];
+                return (
+                  <div style={{ marginTop: '-8px', marginBottom: '4px' }}>
+                    {/* Bar */}
+                    <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>
+                      {[1,2,3,4,5].map(i => (
+                        <div key={i} style={{
+                          flex: 1, height: '4px', borderRadius: '99px',
+                          background: i <= score ? barColor : '#e5e7eb',
+                          transition: 'background 0.2s',
+                        }} />
+                      ))}
+                    </div>
+                    {/* Label */}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '6px' }}>
+                      <span style={{ fontSize: '12px', fontWeight: 600, color: barColor }}>{label}</span>
+                    </div>
+                    {/* Checklist */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2px 8px' }}>
+                      {checkList.map(({ key, text }) => (
+                        <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '12px',
+                          color: checks[key] ? '#22c55e' : '#9ca3af' }}>
+                          <span style={{ fontSize: '13px' }}>{checks[key] ? '✓' : '○'}</span>
+                          {text}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
               <input
                 type="password"
                 placeholder={t('settings.confirmNewPassword')}
                 value={changePasswordData.confirmPassword}
                 onChange={(e) => setChangePasswordData(prev => ({ ...prev, confirmPassword: e.target.value }))}
-                className="form-input"
+                className={`form-input${changePasswordData.confirmPassword && changePasswordData.newPassword !== changePasswordData.confirmPassword ? ' input-error' : ''}`}
               />
+              {/* Confirm mismatch hint */}
+              {changePasswordData.confirmPassword && changePasswordData.newPassword !== changePasswordData.confirmPassword && (
+                <p style={{ fontSize: '12px', color: '#ef4444', margin: '-6px 0 4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <span>✕</span> รหัสผ่านไม่ตรงกัน
+                </p>
+              )}
+              {changePasswordData.confirmPassword && changePasswordData.newPassword === changePasswordData.confirmPassword && (
+                <p style={{ fontSize: '12px', color: '#22c55e', margin: '-6px 0 4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <span>✓</span> รหัสผ่านตรงกัน
+                </p>
+              )}
               <div className="form-actions">
-                <button className="btn-secondary" onClick={() => setShowChangePassword(false)}>
+                <button className="btn-secondary" onClick={() => {
+                  setShowChangePassword(false);
+                  setChangePasswordData({ currentPassword: '', newPassword: '', confirmPassword: '' });
+                  setNewPasswordStrength({ score: 0, checks: { length: false, upper: false, lower: false, digit: false, special: false } });
+                  setCurrentPasswordTouched(false);
+                }}>
                   {t('settings.cancel')}
                 </button>
                 <button className="btn-primary" onClick={handleChangePassword} disabled={isSaving}>
@@ -823,13 +976,14 @@ export default function SettingsPage({
         </div>
         <div className="settings-item-control">
           {!showUpdateEmail ? (
-            <button 
+            <button
               className="btn-secondary"
-              onClick={() => setShowUpdateEmail(true)}
+              onClick={() => { setShowUpdateEmail(true); setEmailOtpStep(false); setEmailOtp(''); setEmailOtpError(''); }}
             >
               {t('settings.changeEmail')}
             </button>
-          ) : (
+          ) : !emailOtpStep ? (
+            /* ── Step 1: กรอกอีเมลใหม่ ── */
             <div className="email-update-form">
               <input
                 type="email"
@@ -839,13 +993,73 @@ export default function SettingsPage({
                 className="form-input"
               />
               <div className="form-actions">
-                <button className="btn-secondary" onClick={() => setShowUpdateEmail(false)}>
+                <button className="btn-secondary" onClick={() => { setShowUpdateEmail(false); setEmailOtpStep(false); }}>
                   {t('settings.cancel')}
                 </button>
                 <button className="btn-primary" onClick={handleUpdateEmail} disabled={isSaving}>
                   {isSaving ? t('settings.saving') : t('settings.save')}
                 </button>
               </div>
+            </div>
+          ) : (
+            /* ── Step 2: กรอก OTP ── */
+            <div className="email-otp-form">
+              <p className="email-otp-hint">
+                📧 ส่งรหัส OTP 6 หลักไปที่ <strong>{emailOtpPending}</strong> แล้ว<br/>
+                <span style={{ fontSize: '0.8rem', color: '#6b7280' }}>รหัสหมดอายุใน 10 นาที</span>
+              </p>
+              <div className="email-otp-inputs">
+                {[0,1,2,3,4,5].map((i) => (
+                  <input
+                    key={i}
+                    id={`otp-email-${i}`}
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={1}
+                    className={`otp-box${emailOtpError ? ' otp-box-error' : ''}`}
+                    value={emailOtp[i] || ''}
+                    onChange={(e) => {
+                      const val = e.target.value.replace(/\D/g, '');
+                      const arr = emailOtp.split('');
+                      arr[i] = val.slice(-1);
+                      const next = arr.join('').slice(0, 6);
+                      setEmailOtp(next);
+                      setEmailOtpError('');
+                      if (val && i < 5) document.getElementById(`otp-email-${i + 1}`)?.focus();
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Backspace' && !emailOtp[i] && i > 0)
+                        document.getElementById(`otp-email-${i - 1}`)?.focus();
+                    }}
+                    onPaste={(e) => {
+                      e.preventDefault();
+                      const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
+                      setEmailOtp(pasted);
+                      setEmailOtpError('');
+                      const focusIdx = Math.min(pasted.length, 5);
+                      document.getElementById(`otp-email-${focusIdx}`)?.focus();
+                    }}
+                  />
+                ))}
+              </div>
+              {emailOtpError && <p className="email-otp-error">{emailOtpError}</p>}
+              <div className="form-actions">
+                <button className="btn-secondary" onClick={() => { setEmailOtpStep(false); setEmailOtp(''); setEmailOtpError(''); }}>
+                  ← กลับ
+                </button>
+                <button className="btn-primary" onClick={handleVerifyEmailOtp} disabled={isSaving || emailOtp.length < 6}>
+                  {isSaving ? 'กำลังยืนยัน...' : '✅ ยืนยัน OTP'}
+                </button>
+              </div>
+              <button
+                type="button"
+                className="btn-text-link"
+                style={{ marginTop: 8, fontSize: '0.82rem', color: '#6366f1', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                onClick={handleUpdateEmail}
+                disabled={isSaving}
+              >
+                ส่งรหัสใหม่อีกครั้ง
+              </button>
             </div>
           )}
         </div>
@@ -968,6 +1182,57 @@ export default function SettingsPage({
               type="checkbox"
               checked={settings.tripChangeNotifications}
               onChange={(e) => handleNotificationChange('tripChangeNotifications', e.target.checked)}
+              disabled={!settings.notificationsEnabled}
+            />
+            <span className="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div className="settings-item">
+        <div className="settings-item-label">
+          <label>{t('settings.notifFlight')}</label>
+        </div>
+        <div className="settings-item-control">
+          <label className="toggle-switch">
+            <input
+              type="checkbox"
+              checked={settings.flightAlertNotifications}
+              onChange={(e) => handleNotificationChange('flightAlertNotifications', e.target.checked)}
+              disabled={!settings.notificationsEnabled}
+            />
+            <span className="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div className="settings-item">
+        <div className="settings-item-label">
+          <label>{t('settings.notifCheckin')}</label>
+        </div>
+        <div className="settings-item-control">
+          <label className="toggle-switch">
+            <input
+              type="checkbox"
+              checked={settings.checkinNotifications}
+              onChange={(e) => handleNotificationChange('checkinNotifications', e.target.checked)}
+              disabled={!settings.notificationsEnabled}
+            />
+            <span className="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div className="settings-item">
+        <div className="settings-item-label">
+          <label>{t('settings.notifAccount')}</label>
+        </div>
+        <div className="settings-item-control">
+          <label className="toggle-switch">
+            <input
+              type="checkbox"
+              checked={settings.accountNotifications}
+              onChange={(e) => handleNotificationChange('accountNotifications', e.target.checked)}
               disabled={!settings.notificationsEnabled}
             />
             <span className="toggle-slider"></span>
@@ -1396,12 +1661,16 @@ export default function SettingsPage({
         onLogout={onLogout}
         onNavigateToHome={onNavigateToHome}
         onNavigateToProfile={onNavigateToProfile}
+        onNavigateToSettings={onNavigateToSettings}
         onNavigateToBookings={onNavigateToBookings}
         onNavigateToAI={onNavigateToAI}
         onNavigateToFlights={onNavigateToFlights}
         onNavigateToHotels={onNavigateToHotels}
         onNavigateToCarRentals={onNavigateToCarRentals}
         notificationCount={notificationCount}
+        notifications={notifications}
+        onMarkNotificationAsRead={onMarkNotificationAsRead}
+        onClearAllNotifications={onClearAllNotifications}
       />
       
       <div className="settings-content-area" data-theme={theme} data-font-size={fontSize}>

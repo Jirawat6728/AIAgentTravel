@@ -796,30 +796,76 @@
   margin-bottom: 3rem;
 }
 
+/* ✅ Mobile: logo เต็มแถว + 3 sections เรียงพอดี 3 คอลัมน์ */
+@media (max-width: 640px) {
+  .footer {
+    padding: 2.5rem 1.25rem 1.5rem;
+  }
+
+  .footer-content {
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 0.75rem 1rem;
+  }
+
+  /* section แรก (logo+desc) ขยายเต็มแถว */
+  .footer-content .footer-section:first-child {
+    grid-column: 1 / -1;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid #374151;
+    margin-bottom: 0.25rem;
+  }
+
+  .footer-description {
+    font-size: 0.8rem;
+    margin-top: 0.5rem;
+  }
+
+  .footer-title {
+    font-size: 0.8rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .footer-link {
+    font-size: 0.78rem;
+    margin-bottom: 0.35rem;
+  }
+
+  .footer-bottom {
+    font-size: 0.75rem;
+    padding-top: 1rem;
+  }
+}
+
 .footer-logo {
   display: flex;
   align-items: center;
+  gap: 0.5rem;
 }
 
-.footer-logo-brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  background: #2962ff;
-  color: white;
-  padding: 0.5rem 1rem;
+.footer-logo-icon {
+  width: 2.5rem;
+  height: 2.5rem;
+  background: linear-gradient(135deg, #3b82f6, #1e40af);
   border-radius: 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
 }
 
 .footer-logo-plane {
   width: 1.5rem;
   height: 1.5rem;
-  flex-shrink: 0;
+  color: white;
 }
 
 .footer-logo-text {
-  font-size: 1.125rem;
+  font-size: 1.25rem;
   font-weight: 700;
+  background: linear-gradient(135deg, #3b82f6, #1e40af);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
   white-space: nowrap;
 }
 

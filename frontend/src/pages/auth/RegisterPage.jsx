@@ -44,68 +44,83 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
     return { score, feedback };
   };
 
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({
-      ...prev,
-      [name]: value
-    }));
-
-    // Calculate password strength
-    if (name === 'password') {
-      setPasswordStrength(calculatePasswordStrength(value));
-    }
-
-    // Clear error when user starts typing
-    if (errors[name]) {
-      setErrors(prev => ({
-        ...prev,
-        [name]: ''
-      }));
+  const validateField = (name, value) => {
+    switch (name) {
+      case 'firstName':
+        if (!value.trim()) return 'กรุณากรอกชื่อ';
+        if (value.trim().length < 2) return 'ชื่อต้องมีอย่างน้อย 2 ตัวอักษร';
+        if (/[0-9!@#$%^&*(),.?":{}|<>]/.test(value)) return 'ชื่อต้องไม่มีตัวเลขหรืออักขระพิเศษ';
+        return '';
+      case 'lastName':
+        if (!value.trim()) return 'กรุณากรอกนามสกุล';
+        if (value.trim().length < 2) return 'นามสกุลต้องมีอย่างน้อย 2 ตัวอักษร';
+        if (/[0-9!@#$%^&*(),.?":{}|<>]/.test(value)) return 'นามสกุลต้องไม่มีตัวเลขหรืออักขระพิเศษ';
+        return '';
+      case 'firstNameTh':
+        if (value.trim() && !/^[ก-๙\s]+$/.test(value.trim())) return 'ชื่อภาษาไทยต้องเป็นภาษาไทยเท่านั้น';
+        return '';
+      case 'lastNameTh':
+        if (value.trim() && !/^[ก-๙\s]+$/.test(value.trim())) return 'นามสกุลภาษาไทยต้องเป็นภาษาไทยเท่านั้น';
+        return '';
+      case 'email':
+        if (!value.trim()) return 'กรุณากรอกอีเมล';
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return 'รูปแบบอีเมลไม่ถูกต้อง';
+        return '';
+      case 'phone':
+        if (!value.trim()) return 'กรุณากรอกเบอร์โทรศัพท์';
+        if (!/^0[0-9]{8,9}$/.test(value.replace(/[-\s]/g, ''))) return 'เบอร์โทรต้องขึ้นต้นด้วย 0 และมี 9-10 หลัก';
+        return '';
+      case 'password':
+        if (!value) return 'กรุณากรอกรหัสผ่าน';
+        if (value.length < 8) return 'รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร';
+        if (!/[A-Z]/.test(value)) return 'รหัสผ่านต้องมีตัวพิมพ์ใหญ่อย่างน้อย 1 ตัว';
+        if (!/[a-z]/.test(value)) return 'รหัสผ่านต้องมีตัวพิมพ์เล็กอย่างน้อย 1 ตัว';
+        if (!/\d/.test(value)) return 'รหัสผ่านต้องมีตัวเลขอย่างน้อย 1 ตัว';
+        if (!/[!@#$%^&*(),.?":{}|<>]/.test(value)) return 'รหัสผ่านต้องมีอักขระพิเศษอย่างน้อย 1 ตัว';
+        return '';
+      case 'confirmPassword':
+        if (!value) return 'กรุณายืนยันรหัสผ่าน';
+        if (formData.password !== value) return 'รหัสผ่านไม่ตรงกัน';
+        return '';
+      default:
+        return '';
     }
   };
 
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({ ...prev, [name]: value }));
+
+    if (name === 'password') {
+      setPasswordStrength(calculatePasswordStrength(value));
+      // re-validate confirmPassword ถ้ากรอกไปแล้ว
+      if (formData.confirmPassword) {
+        setErrors(prev => ({
+          ...prev,
+          confirmPassword: formData.confirmPassword !== value ? 'รหัสผ่านไม่ตรงกัน' : '',
+        }));
+      }
+    }
+
+    // clear error ทันทีที่แก้ไข
+    if (errors[name]) {
+      setErrors(prev => ({ ...prev, [name]: '' }));
+    }
+  };
+
+  const handleBlur = (e) => {
+    const { name, value } = e.target;
+    const err = validateField(name, value);
+    if (err) setErrors(prev => ({ ...prev, [name]: err }));
+  };
+
   const validate = () => {
+    const fields = ['firstName', 'lastName', 'firstNameTh', 'lastNameTh', 'email', 'phone', 'password', 'confirmPassword'];
     const newErrors = {};
-
-    if (!formData.email.trim()) {
-      newErrors.email = t('auth.errEmailRequired');
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
-      newErrors.email = t('auth.errEmailInvalid');
-    }
-
-    if (!formData.password) {
-      newErrors.password = t('auth.errPasswordRequired');
-    } else if (formData.password.length < 8) {
-      newErrors.password = t('auth.errPasswordMin');
-    } else if (!/[A-Z]/.test(formData.password)) {
-      newErrors.password = t('auth.errPasswordUppercase');
-    } else if (!/[a-z]/.test(formData.password)) {
-      newErrors.password = t('auth.errPasswordLowercase');
-    } else if (!/\d/.test(formData.password)) {
-      newErrors.password = t('auth.errPasswordNumber');
-    } else if (!/[!@#$%^&*(),.?":{}|<>]/.test(formData.password)) {
-      newErrors.password = t('auth.errPasswordSpecial');
-    }
-
-    if (!formData.confirmPassword) {
-      newErrors.confirmPassword = t('auth.errConfirmRequired');
-    } else if (formData.password !== formData.confirmPassword) {
-      newErrors.confirmPassword = t('auth.errPasswordMismatch');
-    }
-
-    if (!formData.firstName.trim()) {
-      newErrors.firstName = t('auth.errFirstNameRequired');
-    }
-
-    if (!formData.lastName.trim()) {
-      newErrors.lastName = t('auth.errLastNameRequired');
-    }
-
-    if (formData.phone && !/^[0-9]{9,10}$/.test(formData.phone.replace(/[-\s]/g, ''))) {
-      newErrors.phone = t('auth.errPhoneInvalid');
-    }
-
+    fields.forEach(field => {
+      const err = validateField(field, formData[field]);
+      if (err) newErrors[field] = err;
+    });
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -137,13 +152,16 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
       if (data?.verification_email_sent && data?.message) {
         setSuccessMessage(data.message);
       }
-      
-      // Wait 1.5 seconds then navigate to login
-      setTimeout(() => {
-        if (onNavigateToLogin) {
-          onNavigateToLogin();
-        }
-      }, 1500);
+
+      // ถ้าต้องยืนยันอีเมล → App.jsx จะ navigate ไป verify-email-sent แล้ว
+      // ถ้า email verified แล้ว (admin/dev) → navigate ไป login
+      if (data?.email_verified) {
+        setTimeout(() => {
+          if (onNavigateToLogin) {
+            onNavigateToLogin();
+          }
+        }, 1500);
+      }
       
     } catch (error) {
       console.error('Registration error:', error);
@@ -239,8 +257,9 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                     name="firstName"
                     value={formData.firstName}
                     onChange={handleChange}
+                    onBlur={handleBlur}
                     placeholder={t('auth.firstName')}
-                    className={`form-input ${errors.firstName ? 'error' : ''}`}
+                    className={`form-input ${errors.firstName ? 'error' : formData.firstName.trim().length >= 2 && !/[0-9!@#$%^&*(),.?":{}|<>]/.test(formData.firstName) ? 'valid' : ''}`}
                     disabled={isSubmitting}
                   />
                   {errors.firstName && <span className="error-message">{errors.firstName}</span>}
@@ -253,8 +272,9 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                     name="lastName"
                     value={formData.lastName}
                     onChange={handleChange}
+                    onBlur={handleBlur}
                     placeholder={t('auth.lastName')}
-                    className={`form-input ${errors.lastName ? 'error' : ''}`}
+                    className={`form-input ${errors.lastName ? 'error' : formData.lastName.trim().length >= 2 && !/[0-9!@#$%^&*(),.?":{}|<>]/.test(formData.lastName) ? 'valid' : ''}`}
                     disabled={isSubmitting}
                   />
                   {errors.lastName && <span className="error-message">{errors.lastName}</span>}
@@ -267,8 +287,9 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                     name="firstNameTh"
                     value={formData.firstNameTh}
                     onChange={handleChange}
+                    onBlur={handleBlur}
                     placeholder={t('auth.firstNameTh')}
-                    className={`form-input ${errors.firstNameTh ? 'error' : ''}`}
+                    className={`form-input ${errors.firstNameTh ? 'error' : formData.firstNameTh.trim() && /^[ก-๙\s]+$/.test(formData.firstNameTh.trim()) ? 'valid' : ''}`}
                     disabled={isSubmitting}
                   />
                   {errors.firstNameTh && <span className="error-message">{errors.firstNameTh}</span>}
@@ -281,8 +302,9 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                     name="lastNameTh"
                     value={formData.lastNameTh}
                     onChange={handleChange}
+                    onBlur={handleBlur}
                     placeholder={t('auth.lastNameTh')}
-                    className={`form-input ${errors.lastNameTh ? 'error' : ''}`}
+                    className={`form-input ${errors.lastNameTh ? 'error' : formData.lastNameTh.trim() && /^[ก-๙\s]+$/.test(formData.lastNameTh.trim()) ? 'valid' : ''}`}
                     disabled={isSubmitting}
                   />
                   {errors.lastNameTh && <span className="error-message">{errors.lastNameTh}</span>}
@@ -299,8 +321,9 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                     name="email"
                     value={formData.email}
                     onChange={handleChange}
+                    onBlur={handleBlur}
                     placeholder={t('auth.email')}
-                    className={`form-input ${errors.email ? 'error' : ''}`}
+                    className={`form-input ${errors.email ? 'error' : /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email) ? 'valid' : ''}`}
                     disabled={isSubmitting}
                   />
                   {errors.email && <span className="error-message">{errors.email}</span>}
@@ -314,8 +337,11 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                     name="phone"
                     value={formData.phone}
                     onChange={handleChange}
+                    onBlur={handleBlur}
                     placeholder={t('auth.phone')}
-                    className={`form-input ${errors.phone ? 'error' : ''}`}
+                    className={`form-input ${errors.phone ? 'error' : /^0[0-9]{8,9}$/.test(formData.phone.replace(/[-\s]/g, '')) ? 'valid' : ''}`}
+                    disabled={isSubmitting}
+                    maxLength={10}
                   />
                   {errors.phone && <span className="error-message">{errors.phone}</span>}
                 </div>
@@ -332,7 +358,8 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                     value={formData.password}
                     onChange={handleChange}
                     placeholder={t('auth.password')}
-                    className={`form-input has-toggle ${errors.password ? 'error' : ''}`}
+                    className={`form-input has-toggle ${errors.password ? 'error' : passwordStrength.score === 5 ? 'valid' : ''}`}
+                    onBlur={handleBlur}
                     disabled={isSubmitting}
                   />
                   <button
@@ -398,7 +425,8 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                     value={formData.confirmPassword}
                     onChange={handleChange}
                     placeholder={t('auth.confirmPassword')}
-                    className={`form-input has-toggle ${errors.confirmPassword ? 'error' : ''}`}
+                    className={`form-input has-toggle ${errors.confirmPassword ? 'error' : formData.confirmPassword && formData.password === formData.confirmPassword ? 'valid' : ''}`}
+                    onBlur={handleBlur}
                     disabled={isSubmitting}
                   />
                   <button

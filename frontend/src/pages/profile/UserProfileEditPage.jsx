@@ -26,6 +26,9 @@ export default function UserProfileEditPage({
   onNavigateToProfile = null,
   onNavigateToSettings = null,
   notificationCount = 0,
+  notifications = [],
+  onMarkNotificationAsRead = null,
+  onClearAllNotifications = null,
   onRefreshUser = null
 }) {
   const [formData, setFormData] = useState({
@@ -60,12 +63,6 @@ export default function UserProfileEditPage({
   const [isSaving, setIsSaving] = useState(false);
   const [previewImage, setPreviewImage] = useState(null);
   const [hasVisa, setHasVisa] = useState(false); // State สำหรับตรวจสอบว่ามี visa หรือไม่
-  // Phone OTP flow
-  const [showChangePhone, setShowChangePhone] = useState(false);
-  const [newPhone, setNewPhone] = useState('');
-  const [phoneOtp, setPhoneOtp] = useState('');
-  const [phoneOtpSent, setPhoneOtpSent] = useState(false);
-  const [phoneOtpLoading, setPhoneOtpLoading] = useState(false);
   // ผู้จองร่วม (สมาชิกในครอบครัว) - ช่องกรอกละเอียดเท่าผู้จองหลัก
   const emptyFamilyForm = () => ({
     type: 'adult',
@@ -1211,6 +1208,9 @@ export default function UserProfileEditPage({
           onNavigateToProfile={onNavigateToProfile}
           onNavigateToSettings={onNavigateToSettings}
           notificationCount={notificationCount}
+          notifications={notifications}
+          onMarkNotificationAsRead={onMarkNotificationAsRead}
+          onClearAllNotifications={onClearAllNotifications}
         />
       )}
 
@@ -1539,126 +1539,17 @@ export default function UserProfileEditPage({
                 <label htmlFor="phone" className="form-label">
                   เบอร์โทรศัพท์ <span className="required">*</span>
                 </label>
-                {!showChangePhone ? (
-                  <>
-                    <input
-                      type="tel"
-                      id="phone"
-                      name="phone"
-                      value={formData.phone}
-                      readOnly
-                      disabled
-                      className="form-input"
-                      placeholder="0812345678"
-                      style={{ backgroundColor: '#f5f5f5', cursor: 'not-allowed' }}
-                    />
-                  </>
-                ) : (
-                  <div className="phone-otp-flow" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                    {!phoneOtpSent ? (
-                      <>
-                        <input
-                          type="tel"
-                          value={newPhone}
-                          onChange={(e) => setNewPhone(e.target.value)}
-                          placeholder="เบอร์ใหม่ เช่น 0812345678"
-                          className={`form-input ${errors.newPhone ? 'error' : ''}`}
-                        />
-                        {errors.newPhone && <span className="error-message">{errors.newPhone}</span>}
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                          <button
-                            type="button"
-                            className="btn-primary"
-                            disabled={phoneOtpLoading || !newPhone.replace(/[-\s()]/g, '').match(/^0[689]\d{8}$|^0[2-9]\d{7,8}$/)}
-                            onClick={async () => {
-                              const cleaned = newPhone.replace(/[-\s()]/g, '');
-                              if (!/^0[689]\d{8}$|^0[2-9]\d{7,8}$/.test(cleaned)) {
-                                setErrors(prev => ({ ...prev, newPhone: 'รูปแบบเบอร์โทรไม่ถูกต้อง (เช่น 0812345678)' }));
-                                return;
-                              }
-                              setPhoneOtpLoading(true);
-                              setErrors(prev => ({ ...prev, newPhone: '', phoneOtp: '' }));
-                              try {
-                                const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-                                const res = await fetch(`${API_BASE_URL}/api/auth/send-phone-otp`, {
-                                  method: 'POST',
-                                  headers: { 'Content-Type': 'application/json' },
-                                  credentials: 'include',
-                                  body: JSON.stringify({ new_phone: cleaned }),
-                                });
-                                const data = await res.json();
-                                if (res.ok && data.ok) {
-                                  setPhoneOtpSent(true);
-                                  setPhoneOtp('');
-                                } else {
-                                  setErrors(prev => ({ ...prev, newPhone: data.detail || 'ส่ง OTP ไม่สำเร็จ' }));
-                                }
-                              } catch (err) {
-                                setErrors(prev => ({ ...prev, newPhone: err.message || 'ส่ง OTP ไม่สำเร็จ' }));
-                              } finally {
-                                setPhoneOtpLoading(false);
-                              }
-                            }}
-                          >
-                            {phoneOtpLoading ? 'กำลังส่ง...' : 'ส่ง OTP'}
-                          </button>
-                          <button type="button" className="btn-secondary" onClick={() => { setShowChangePhone(false); setNewPhone(''); setPhoneOtpSent(false); }}>ยกเลิก</button>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <input
-                          type="text"
-                          value={phoneOtp}
-                          onChange={(e) => setPhoneOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                          placeholder="รหัส OTP 6 หลัก"
-                          className={`form-input ${errors.phoneOtp ? 'error' : ''}`}
-                          maxLength={6}
-                        />
-                        {errors.phoneOtp && <span className="error-message">{errors.phoneOtp}</span>}
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                          <button
-                            type="button"
-                            className="btn-primary"
-                            disabled={phoneOtpLoading || phoneOtp.length !== 6}
-                            onClick={async () => {
-                              setPhoneOtpLoading(true);
-                              setErrors(prev => ({ ...prev, phoneOtp: '' }));
-                              try {
-                                const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-                                const res = await fetch(`${API_BASE_URL}/api/auth/verify-phone`, {
-                                  method: 'POST',
-                                  headers: { 'Content-Type': 'application/json' },
-                                  credentials: 'include',
-                                  body: JSON.stringify({ otp: phoneOtp }),
-                                });
-                                const data = await res.json();
-                                if (res.ok && data.ok) {
-                                  setFormData(prev => ({ ...prev, phone: data.user?.phone || newPhone }));
-                                  setShowChangePhone(false);
-                                  setNewPhone('');
-                                  setPhoneOtp('');
-                                  setPhoneOtpSent(false);
-                                  if (onRefreshUser) onRefreshUser();
-                                } else {
-                                  setErrors(prev => ({ ...prev, phoneOtp: data.detail || 'รหัส OTP ไม่ถูกต้อง' }));
-                                }
-                              } catch (err) {
-                                setErrors(prev => ({ ...prev, phoneOtp: err.message || 'ยืนยัน OTP ไม่สำเร็จ' }));
-                              } finally {
-                                setPhoneOtpLoading(false);
-                              }
-                            }}
-                          >
-                            {phoneOtpLoading ? 'กำลังยืนยัน...' : 'ยืนยัน OTP'}
-                          </button>
-                          <button type="button" className="btn-secondary" onClick={() => { setPhoneOtpSent(false); setPhoneOtp(''); }}>ส่ง OTP ใหม่</button>
-                          <button type="button" className="btn-secondary" onClick={() => { setShowChangePhone(false); setNewPhone(''); setPhoneOtp(''); setPhoneOtpSent(false); }}>ยกเลิก</button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                )}
+                <input
+                  type="tel"
+                  id="phone"
+                  name="phone"
+                  value={formData.phone}
+                  readOnly
+                  disabled
+                  className={`form-input ${errors.phone ? 'error' : ''}`}
+                  placeholder="0812345678"
+                  style={{ backgroundColor: '#f5f5f5', cursor: 'not-allowed' }}
+                />
                 {errors.phone && <span className="error-message">{errors.phone}</span>}
               </div>
             </div>
@@ -2398,11 +2289,11 @@ export default function UserProfileEditPage({
                             <span style={{ fontWeight: 600 }}>
                               {(member.first_name_th && member.last_name_th) ? `${member.first_name_th} ${member.last_name_th}` : (member.first_name || '(ยังไม่ระบุ)') + ' ' + (member.last_name || '')}
                             </span>
-                            <span style={{ marginLeft: '8px', fontSize: '12px', padding: '2px 8px', borderRadius: '6px', background: member.type === 'adult' ? '#dbeafe' : '#d1fae5', color: member.type === 'adult' ? '#1d4ed8' : '#059669' }}>
+                            <span style={{ marginLeft: '8px', fontSize: '12px', padding: '2px 8px', borderRadius: '6px', background: member.type === 'adult' ? '#1d4ed8' : '#059669', color: '#ffffff', fontWeight: 600 }}>
                               {member.type === 'adult' ? 'ผู้ใหญ่' : 'เด็ก'}
                             </span>
                             {(member.date_of_birth || member.passport_no || member.national_id || member.address_option) && (
-                              <span style={{ marginLeft: '8px', fontSize: '12px', color: '#6b7280' }}>
+                              <span style={{ marginLeft: '8px', fontSize: '12px', color: 'var(--text-secondary, #374151)' }}>
                                 {member.date_of_birth && `วันเกิด ${member.date_of_birth}`}
                                 {member.passport_no && ` • พาสปอร์ต ${member.passport_no}`}
                                 {member.national_id && ` • บัตรประชาชน`}

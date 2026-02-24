@@ -10,7 +10,7 @@ from datetime import datetime
 from collections import defaultdict
 from typing import Callable, Any, Optional, Dict, Tuple
 from app.core.logging import get_logger
-from app.storage.connection_manager import MongoConnectionManager, RedisConnectionManager
+from app.storage.connection_manager import MongoConnectionManager
 
 logger = get_logger(__name__)
 
@@ -330,20 +330,8 @@ class HealthMonitor:
             logger.warning(f"MongoDB health check failed: {e}")
             status["mongodb"] = False
         
-        # Check Redis (optional - don't log warnings if unavailable)
-        try:
-            redis_mgr = RedisConnectionManager.get_instance()
-            redis_client = await redis_mgr.get_redis()
-            if redis_client:
-                await asyncio.wait_for(redis_client.ping(), timeout=0.5)
-                status["redis"] = True
-            else:
-                status["redis"] = False
-        except Exception as e:
-            # Only log if Redis was previously available (to detect new failures)
-            if status.get("redis", False):
-                logger.warning(f"Redis health check failed: {e}")
-            status["redis"] = False
+        # Redis removed — always report as disabled
+        status["redis"] = False
         
         self.health_status = status
         self.last_check = time.time()
@@ -390,18 +378,7 @@ class HealthMonitor:
                 else:
                     consecutive_failures["mongodb"] = 0
                 
-                # Check Redis (optional - only recover if it was previously working)
-                if not status["redis"]:
-                    # Only attempt recovery if Redis was working before
-                    # Don't spam recovery attempts if Redis is intentionally disabled
-                    if status.get("redis_was_available", False):
-                        consecutive_failures["redis"] += 1
-                        if consecutive_failures["redis"] >= 3:
-                            logger.warning("Redis has been unhealthy for 3 consecutive checks")
-                            await self.trigger_recovery("redis")
-                else:
-                    consecutive_failures["redis"] = 0
-                    status["redis_was_available"] = True
+                # Redis removed — no recovery needed
                 
                 await asyncio.sleep(self.check_interval)
                 
@@ -440,32 +417,5 @@ async def recover_mongodb():
         return False
 
 
-async def recover_redis():
-    """Recover Redis connection (only if Redis was previously available)"""
-    try:
-        logger.info("Attempting Redis recovery...")
-        redis_mgr = RedisConnectionManager.get_instance()
-        
-        # Force reinitialize connection
-        if hasattr(redis_mgr, '_redis_unavailable'):
-            redis_mgr._redis_unavailable = False
-        redis_mgr._redis_client = None
-        
-        # Try to reconnect
-        redis_client = await redis_mgr.get_redis()
-        if redis_client:
-            await redis_client.ping()
-            logger.info("Redis recovery successful")
-            return True
-        else:
-            logger.debug("Redis recovery skipped - service not available")
-            return False
-    except Exception as e:
-        logger.debug(f"Redis recovery failed: {e}")
-        return False
-
-
-# Register recovery callbacks (only MongoDB is critical)
+# Register recovery callbacks (only MongoDB is critical; Redis removed)
 health_monitor.register_recovery_callback(recover_mongodb)
-# Redis recovery is optional - only register if needed
-# health_monitor.register_recovery_callback(recover_redis)

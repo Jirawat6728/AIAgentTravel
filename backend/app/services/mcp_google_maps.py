@@ -156,6 +156,28 @@ GOOGLE_MAPS_TOOLS = [
 ]
 
 
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate great-circle distance in km between two points."""
+    r1_lat, r1_lon = radians(lat1), radians(lon1)
+    r2_lat, r2_lon = radians(lat2), radians(lon2)
+    dlon = r2_lon - r1_lon
+    dlat = r2_lat - r1_lat
+    a = sin(dlat / 2) ** 2 + cos(r1_lat) * cos(r2_lat) * sin(dlon / 2) ** 2
+    return 6371 * 2 * atan2(sqrt(a), sqrt(1 - a))
+
+
+def _recommended_transport(distance_km: float) -> list:
+    """Return sensible transport recommendations based on distance (no unconditional 'boat')."""
+    modes = []
+    if distance_km > 500:
+        modes.append("flight")
+    if distance_km <= 100:
+        modes.extend(["car", "bus"])
+    elif distance_km <= 500:
+        modes.extend(["train", "bus", "car"])
+    return modes
+
+
 class GoogleMapsMCP:
     """
     Google Maps MCP executor: geocoding, places, routes, transport comparison.
@@ -165,10 +187,12 @@ class GoogleMapsMCP:
     def __init__(
         self,
         google_maps_client=None,
-        orchestrator: Optional[TravelOrchestrator] = None
+        orchestrator: Optional[TravelOrchestrator] = None,
     ):
         self.google_maps_client = google_maps_client or get_google_maps_client()
         self.orchestrator = orchestrator or TravelOrchestrator()
+        # Track whether we own the orchestrator (to avoid double-close when shared)
+        self._owns_orchestrator = orchestrator is None
         logger.info("GoogleMapsMCP initialized with GoogleMapsClient and TravelOrchestrator")
 
     async def geocode_location(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -183,12 +207,16 @@ class GoogleMapsMCP:
                     "place_name": place_name,
                     "latitude": result["lat"],
                     "longitude": result["lng"],
-                    "formatted_address": result["address"]
-                }
+                    "formatted_address": result["address"],
+                },
             }
         except Exception as e:
             logger.error(f"Geocode location failed: {e}", exc_info=True)
-            return {"success": False, "tool": "geocode_location", "error": f"Could not geocode '{place_name}': {str(e)}"}
+            return {
+                "success": False,
+                "tool": "geocode_location",
+                "error": f"Could not geocode '{place_name}': {str(e)}",
+            }
 
     async def find_nearest_airport(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Find nearest airport IATA code using orchestrator (coordinates + Amadeus IATA)."""
@@ -202,11 +230,15 @@ class GoogleMapsMCP:
                 "location": location,
                 "nearest_airport": {
                     "iata_code": iata,
-                    "coordinates": {"latitude": loc_info["lat"], "longitude": loc_info["lng"]}
-                }
+                    "coordinates": {"latitude": loc_info["lat"], "longitude": loc_info["lng"]},
+                },
             }
         except Exception as e:
-            return {"success": False, "tool": "find_nearest_airport", "error": f"Could not find airport for '{location}': {str(e)}"}
+            return {
+                "success": False,
+                "tool": "find_nearest_airport",
+                "error": f"Could not find airport for '{location}': {str(e)}",
+            }
 
     async def search_nearby_places(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Search for nearby places using Google Maps API."""
@@ -223,7 +255,7 @@ class GoogleMapsMCP:
                 "tool": "search_nearby_places",
                 "results_count": len(results),
                 "places": results,
-                "search_params": {"keyword": keyword, "location": f"{lat},{lng}", "radius": radius}
+                "search_params": {"keyword": keyword, "location": f"{lat},{lng}", "radius": radius},
             }
         except Exception as e:
             logger.error(f"Search nearby places failed: {e}", exc_info=True)
@@ -234,22 +266,27 @@ class GoogleMapsMCP:
         place_id = params.get("place_id", "")
         try:
             result = await self.google_maps_client.get_place_details(place_id)
+            # Use .get() with safe defaults — not all places have every field
             return {
                 "success": True,
                 "tool": "get_place_details",
                 "place": {
                     "place_id": place_id,
-                    "formatted_address": result["formatted_address"],
-                    "opening_hours": result["opening_hours"],
-                    "photo_reference": result["photo_reference"],
-                    "review_summary": result["review_summary"],
-                    "rating": result["rating"],
-                    "user_ratings_total": result["user_ratings_total"]
-                }
+                    "formatted_address": result.get("formatted_address", ""),
+                    "opening_hours": result.get("opening_hours"),
+                    "photo_reference": result.get("photo_reference"),
+                    "review_summary": result.get("review_summary"),
+                    "rating": result.get("rating"),
+                    "user_ratings_total": result.get("user_ratings_total"),
+                },
             }
         except Exception as e:
             logger.error(f"Get place details failed: {e}", exc_info=True)
-            return {"success": False, "tool": "get_place_details", "error": f"Could not get details for place_id '{place_id}': {str(e)}"}
+            return {
+                "success": False,
+                "tool": "get_place_details",
+                "error": f"Could not get details for place_id '{place_id}': {str(e)}",
+            }
 
     async def plan_route(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Plan a route using Google Maps Directions API and orchestrator for airports."""
@@ -260,45 +297,39 @@ class GoogleMapsMCP:
             origin_info = await self.orchestrator.get_coordinates(origin)
             dest_info = await self.orchestrator.get_coordinates(destination)
 
-            lat1, lon1 = radians(origin_info["lat"]), radians(origin_info["lng"])
-            lat2, lon2 = radians(dest_info["lat"]), radians(dest_info["lng"])
-            dlon = lon2 - lon1
-            dlat = lat2 - lat1
-            a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-            c = 2 * atan2(sqrt(a), sqrt(1-a))
-            distance_km = 6371 * c
+            distance_km = _haversine_km(
+                origin_info["lat"], origin_info["lng"],
+                dest_info["lat"], dest_info["lng"],
+            )
 
-            recommended_transport = []
-            if distance_km > 500:
-                recommended_transport.append("flight")
-            if distance_km < 100:
-                recommended_transport.extend(["car", "bus"])
-            if 100 <= distance_km <= 500:
-                recommended_transport.extend(["train", "bus", "car"])
-            recommended_transport.append("boat")
+            recommended_transport = _recommended_transport(distance_km)
 
             origin_airport = None
             dest_airport = None
             try:
-                origin_airport = await self.orchestrator.find_nearest_iata(origin_info["lat"], origin_info["lng"])
+                origin_airport = await self.orchestrator.find_nearest_iata(
+                    origin_info["lat"], origin_info["lng"]
+                )
             except Exception:
                 pass
             try:
-                dest_airport = await self.orchestrator.find_nearest_iata(dest_info["lat"], dest_info["lng"])
+                dest_airport = await self.orchestrator.find_nearest_iata(
+                    dest_info["lat"], dest_info["lng"]
+                )
             except Exception:
                 pass
 
             route_info = None
             if self.orchestrator.gmaps:
                 try:
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     directions_result = await loop.run_in_executor(
                         None,
                         lambda: self.orchestrator.gmaps.directions(
                             origin=f"{origin_info['lat']},{origin_info['lng']}",
                             destination=f"{dest_info['lat']},{dest_info['lng']}",
-                            mode=travel_mode
-                        )
+                            mode=travel_mode,
+                        ),
                     )
                     if directions_result:
                         route = directions_result[0]
@@ -308,8 +339,12 @@ class GoogleMapsMCP:
                             "distance_meters": leg["distance"]["value"],
                             "duration_text": leg["duration"]["text"],
                             "duration_seconds": leg["duration"]["value"],
-                            "steps": len(route["legs"][0].get("steps", [])),
-                            "polyline": route.get("overview_polyline", {}).get("points") if "overview_polyline" in route else None
+                            "steps": len(leg.get("steps", [])),
+                            "polyline": (
+                                route.get("overview_polyline", {}).get("points")
+                                if "overview_polyline" in route
+                                else None
+                            ),
                         }
                 except Exception as e:
                     logger.warning(f"Google Maps Directions API call failed: {e}")
@@ -321,115 +356,130 @@ class GoogleMapsMCP:
                     "origin": {
                         "location": origin,
                         "coordinates": {"latitude": origin_info["lat"], "longitude": origin_info["lng"]},
-                        "nearest_airport": origin_airport
+                        "nearest_airport": origin_airport,
                     },
                     "destination": {
                         "location": destination,
                         "coordinates": {"latitude": dest_info["lat"], "longitude": dest_info["lng"]},
-                        "nearest_airport": dest_airport
+                        "nearest_airport": dest_airport,
                     },
                     "distance_km": round(distance_km, 2),
                     "recommended_transportation": recommended_transport,
-                    "route_details": route_info
-                }
+                    "route_details": route_info,
+                },
             }
         except Exception as e:
             return {"success": False, "tool": "plan_route", "error": f"Could not plan route: {str(e)}"}
 
     async def plan_route_with_waypoints(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Plan a route from origin to destination via waypoints (จุดแวะ) using Google Maps Directions API."""
+        """Plan a route from origin to destination via waypoints using Google Maps Directions API."""
         origin = params.get("origin", "")
         destination = params.get("destination", "")
         waypoints_raw = params.get("waypoints") or []
         travel_mode = params.get("travel_mode", "driving")
         waypoints_list = [w for w in waypoints_raw if isinstance(w, str) and w.strip()]
+
         try:
             origin_info = await self.orchestrator.get_coordinates(origin)
             dest_info = await self.orchestrator.get_coordinates(destination)
+
+            # Geocode each waypoint; keep track of which ones succeeded
             waypoint_infos = []
             for wp in waypoints_list:
                 try:
                     wi = await self.orchestrator.get_coordinates(wp)
                     waypoint_infos.append({"location": wp, "lat": wi["lat"], "lng": wi["lng"]})
-                except Exception:
+                except Exception as wp_err:
+                    logger.warning(f"Could not geocode waypoint '{wp}': {wp_err}")
                     waypoint_infos.append({"location": wp, "lat": None, "lng": None})
-            lat1, lon1 = radians(origin_info["lat"]), radians(origin_info["lng"])
-            lat2, lon2 = radians(dest_info["lat"]), radians(dest_info["lng"])
-            dlon = lon2 - lon1
-            dlat = lat2 - lat1
-            a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-            c = 2 * atan2(sqrt(a), sqrt(1-a))
-            distance_km = round(6371 * c, 2)
+
+            distance_km = round(
+                _haversine_km(
+                    origin_info["lat"], origin_info["lng"],
+                    dest_info["lat"], dest_info["lng"],
+                ),
+                2,
+            )
+
             route_info = None
             legs_summary = []
+
             if self.orchestrator.gmaps:
-                waypoints_str = [f"{wi['lat']},{wi['lng']}" for wi in waypoint_infos if wi.get("lat") is not None and wi.get("lng") is not None]
-                if waypoints_list and len(waypoints_str) != len(waypoints_list):
-                    waypoints_str = []
-                if waypoints_list and waypoints_str:
-                    try:
-                        loop = asyncio.get_event_loop()
-                        directions_result = await loop.run_in_executor(
-                            None,
-                            lambda: self.orchestrator.gmaps.directions(
-                                origin=f"{origin_info['lat']},{origin_info['lng']}",
-                                destination=f"{dest_info['lat']},{dest_info['lng']}",
-                                waypoints=waypoints_str,
-                                mode=travel_mode
-                            )
-                        )
-                        if directions_result:
-                            route = directions_result[0]
-                            total_dist_m = 0
-                            total_dur_s = 0
-                            for idx, leg in enumerate(route.get("legs", [])):
-                                d = leg.get("distance", {}).get("value", 0)
-                                t = leg.get("duration", {}).get("value", 0)
-                                total_dist_m += d
-                                total_dur_s += t
-                                legs_summary.append({
-                                    "from": waypoints_list[idx - 1] if idx > 0 else origin,
-                                    "to": waypoints_list[idx] if idx < len(waypoints_list) else destination,
-                                    "distance_text": leg.get("distance", {}).get("text", ""),
-                                    "duration_text": leg.get("duration", {}).get("text", ""),
-                                })
-                            route_info = {
-                                "distance_text": f"{total_dist_m/1000:.1f} km",
-                                "distance_meters": total_dist_m,
-                                "duration_seconds": total_dur_s,
-                                "legs": legs_summary,
-                            }
-                    except Exception as e:
-                        logger.warning(f"Google Maps Directions with waypoints failed: {e}")
-                elif not waypoints_list:
-                    try:
-                        loop = asyncio.get_event_loop()
-                        directions_result = await loop.run_in_executor(
-                            None,
-                            lambda: self.orchestrator.gmaps.directions(
-                                origin=f"{origin_info['lat']},{origin_info['lng']}",
-                                destination=f"{dest_info['lat']},{dest_info['lng']}",
-                                mode=travel_mode
-                            )
-                        )
-                        if directions_result:
-                            route = directions_result[0]
-                            leg = route["legs"][0]
-                            route_info = {
+                # Only include waypoints that were successfully geocoded
+                valid_waypoints = [
+                    (wp, wi)
+                    for wp, wi in zip(waypoints_list, waypoint_infos)
+                    if wi.get("lat") is not None
+                ]
+                failed_count = len(waypoints_list) - len(valid_waypoints)
+                if failed_count > 0:
+                    logger.warning(
+                        f"plan_route_with_waypoints: {failed_count}/{len(waypoints_list)} waypoints "
+                        "could not be geocoded and will be skipped."
+                    )
+
+                waypoints_str = [f"{wi['lat']},{wi['lng']}" for _, wi in valid_waypoints]
+                valid_wp_names = [wp for wp, _ in valid_waypoints]
+
+                try:
+                    loop = asyncio.get_running_loop()
+                    directions_result = await loop.run_in_executor(
+                        None,
+                        lambda: self.orchestrator.gmaps.directions(
+                            origin=f"{origin_info['lat']},{origin_info['lng']}",
+                            destination=f"{dest_info['lat']},{dest_info['lng']}",
+                            waypoints=waypoints_str if waypoints_str else None,
+                            mode=travel_mode,
+                        ),
+                    )
+                    if directions_result:
+                        route = directions_result[0]
+                        total_dist_m = 0
+                        total_dur_s = 0
+                        # Build stop list: origin → wp1 → wp2 → … → destination
+                        stops = [origin] + valid_wp_names + [destination]
+                        for idx, leg in enumerate(route.get("legs", [])):
+                            d = leg.get("distance", {}).get("value", 0)
+                            t = leg.get("duration", {}).get("value", 0)
+                            total_dist_m += d
+                            total_dur_s += t
+                            from_stop = stops[idx] if idx < len(stops) else origin
+                            to_stop = stops[idx + 1] if (idx + 1) < len(stops) else destination
+                            legs_summary.append({
+                                "from": from_stop,
+                                "to": to_stop,
                                 "distance_text": leg.get("distance", {}).get("text", ""),
-                                "distance_meters": leg.get("distance", {}).get("value", 0),
-                                "duration_seconds": leg.get("duration", {}).get("value", 0),
-                                "legs": [{"from": origin, "to": destination, "distance_text": leg.get("distance", {}).get("text", ""), "duration_text": leg.get("duration", {}).get("text", "")}],
-                            }
-                    except Exception as e:
-                        logger.warning(f"Google Maps Directions failed: {e}")
+                                "duration_text": leg.get("duration", {}).get("text", ""),
+                            })
+                        route_info = {
+                            "distance_text": f"{total_dist_m / 1000:.1f} km",
+                            "distance_meters": total_dist_m,
+                            "duration_seconds": total_dur_s,
+                            "legs": legs_summary,
+                        }
+                except Exception as e:
+                    logger.warning(f"Google Maps Directions with waypoints failed: {e}")
+
             return {
                 "success": True,
                 "tool": "plan_route_with_waypoints",
                 "route": {
-                    "origin": {"location": origin, "coordinates": {"latitude": origin_info["lat"], "longitude": origin_info["lng"]}},
-                    "destination": {"location": destination, "coordinates": {"latitude": dest_info["lat"], "longitude": dest_info["lng"]}},
-                    "waypoints": [{"location": wp, "coordinates": {"latitude": wi["lat"], "longitude": wi["lng"]}} for wp, wi in zip(waypoints_list, waypoint_infos)],
+                    "origin": {
+                        "location": origin,
+                        "coordinates": {"latitude": origin_info["lat"], "longitude": origin_info["lng"]},
+                    },
+                    "destination": {
+                        "location": destination,
+                        "coordinates": {"latitude": dest_info["lat"], "longitude": dest_info["lng"]},
+                    },
+                    "waypoints": [
+                        {
+                            "location": wi["location"],
+                            "coordinates": {"latitude": wi["lat"], "longitude": wi["lng"]},
+                            "geocoded": wi["lat"] is not None,
+                        }
+                        for wi in waypoint_infos
+                    ],
                     "distance_km": distance_km,
                     "route_details": route_info,
                 },
@@ -448,16 +498,16 @@ class GoogleMapsMCP:
                 "tool": "compare_transport_modes",
                 "route_options": route_options,
                 "origin": origin,
-                "destination": destination
+                "destination": destination,
             }
         except Exception as e:
             logger.error(f"Compare transport modes failed: {e}", exc_info=True)
             return {"success": False, "tool": "compare_transport_modes", "error": str(e)}
 
     async def close(self):
-        """Cleanup resources."""
+        """Cleanup resources. Only close orchestrator if we own it (not shared)."""
         try:
-            if self.orchestrator:
+            if self._owns_orchestrator and self.orchestrator:
                 await self.orchestrator.close()
             logger.info("GoogleMapsMCP closed successfully")
         except Exception as e:

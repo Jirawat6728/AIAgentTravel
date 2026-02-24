@@ -1,8 +1,8 @@
 /* LoginPage.css - Card Style Layout */
 
 .login-container {
-  min-height: 100vh;
-  min-height: 100dvh;
+  height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -490,16 +490,73 @@
 }
 
 @media (max-width: 640px) {
+  /* Container เต็มหน้าจอ ไม่ scroll ทั้งหน้า */
   .login-container {
-    padding: 1rem;
+    padding: 0;
+    align-items: flex-start;
+    justify-content: flex-start;
+    background: linear-gradient(160deg, #e0e7ff 0%, #ddd6fe 40%, #f3e8ff 100%);
+    overflow: hidden;
+    height: 100dvh;
   }
 
+  /* Header fix ด้านบนสุด */
+  .login-transparent-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 1rem 1.25rem;
+    z-index: 200;
+    background: rgba(224, 231, 255, 0.85);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+
+  /* Card wrapper เต็มหน้าจอ */
   .login-card-wrapper {
-    border-radius: 1rem;
+    border-radius: 0;
+    box-shadow: none;
+    width: 100%;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    background: transparent;
+    overflow: hidden;
+    padding-top: 64px;
   }
 
+  /* ซ่อนรูปภาพบน mobile */
+  .login-image-section {
+    display: none;
+  }
+
+  .login-image-container {
+    width: 100%;
+    height: 100%;
+  }
+
+  .login-illustration {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  /* Form section scroll ได้อย่างเดียว */
   .login-form-section {
-    padding: 1.5rem;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 2rem 1.5rem 3rem;
+    background: #ffffff;
+    border-radius: 0;
+    box-shadow: none;
+    margin-top: 0;
+    position: relative;
+    z-index: 1;
   }
 
   .login-card {
@@ -507,6 +564,15 @@
   }
 
   .login-title {
-    font-size: 1.5rem;
+    font-size: 1.75rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .login-subtitle {
+    margin-bottom: 1.5rem;
+  }
+
+  .form-content {
+    gap: 1.125rem;
   }
 }

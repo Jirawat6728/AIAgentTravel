@@ -5,7 +5,7 @@ import { useFontSize } from '../../context/FontSizeContext';
 import { useLanguage } from '../../context/LanguageContext';
 import './CarRentalsPage.css';
 
-export default function CarRentalsPage({ user, onLogout, onSignIn, onNavigateToBookings, onNavigateToAI, onNavigateToFlights, onNavigateToHotels, onNavigateToCarRentals, onNavigateToProfile = null, onNavigateToSettings = null, onNavigateToHome = null }) {
+export default function CarRentalsPage({ user, onLogout, onSignIn, onNavigateToBookings, onNavigateToAI, onNavigateToFlights, onNavigateToHotels, onNavigateToCarRentals, onNavigateToProfile = null, onNavigateToSettings = null, onNavigateToHome = null, notificationCount = 0, notifications = [], onMarkNotificationAsRead = null, onClearAllNotifications = null }) {
   const theme = useTheme();
   const { t } = useLanguage();
   const fontSize = useFontSize();
@@ -31,7 +31,10 @@ export default function CarRentalsPage({ user, onLogout, onSignIn, onNavigateToB
         onNavigateToCarRentals={onNavigateToCarRentals}
         onLogout={onLogout}
         onSignIn={onSignIn}
-        notificationCount={0}
+        notificationCount={notificationCount}
+        notifications={notifications}
+        onMarkNotificationAsRead={onMarkNotificationAsRead}
+        onClearAllNotifications={onClearAllNotifications}
         isConnected={true}
         onNavigateToProfile={onNavigateToProfile}
         onNavigateToSettings={onNavigateToSettings}

@@ -51,6 +51,42 @@ def _write_debug_log(data: dict):
     except Exception:
         pass  # Silently ignore debug log errors
 
+def _strip_options_pool_for_controller(state: dict) -> dict:
+    """Remove raw options_pool data from trip plan state before sending to Controller LLM.
+
+    options_pool can contain full Amadeus API responses (50-200 KB each).
+    The Controller only needs to know *whether* options exist and how many,
+    not the full content.  This keeps the context window small and fast.
+    """
+    def _strip_segment(seg: dict) -> dict:
+        pool = seg.get("options_pool")
+        if pool:
+            seg = dict(seg)
+            seg["options_pool"] = f"[{len(pool)} options available]"
+        return seg
+
+    def _strip_list(segments: list) -> list:
+        return [_strip_segment(s) if isinstance(s, dict) else s for s in segments]
+
+    import copy
+    s = copy.deepcopy(state)
+    try:
+        travel = s.get("travel", {})
+        flights = travel.get("flights", {})
+        if isinstance(flights.get("outbound"), list):
+            flights["outbound"] = _strip_list(flights["outbound"])
+        if isinstance(flights.get("inbound"), list):
+            flights["inbound"] = _strip_list(flights["inbound"])
+        if isinstance(travel.get("ground_transport"), list):
+            travel["ground_transport"] = _strip_list(travel["ground_transport"])
+        acc = s.get("accommodation", {})
+        if isinstance(acc.get("segments"), list):
+            acc["segments"] = _strip_list(acc["segments"])
+    except Exception:
+        pass  # Never break the main flow for a logging helper
+    return s
+
+
 class TravelAgent:
     """
     Production-Grade Travel Agent with Two-Pass ReAct Loop
@@ -207,7 +243,7 @@ class TravelAgent:
                         session, action_log, memory_context, user_profile_context, mode=mode, user_input=user_input
                     )
                 else:
-                    # Agent Mode: final auto-select ถ้ายังมี segment ที่มี options แต่ยังไม่เลือก
+                    # Agent Mode: final auto-select + auto-book
                     if mode == "agent":
                         all_segments = (
                             session.trip_plan.travel.flights.outbound
@@ -218,9 +254,15 @@ class TravelAgent:
                         has_options_to_select = any(
                             seg.options_pool and not seg.selected_option for seg in all_segments
                         )
+                        # ✅ ถ้ามี selected options อยู่แล้ว (เช่น flight selected แต่ hotel ไม่มี options)
+                        # ให้ trigger booking ด้วย แทนที่จะข้ามไป
+                        has_any_selected = any(
+                            seg.selected_option is not None for seg in all_segments
+                        )
+                        should_run_auto_complete = has_options_to_select or has_any_selected
                         if has_options_to_select and status_callback:
                             await status_callback("acting", "🤖 Agent กำลังเลือกช้อยส์ที่ดีที่สุด (รอบสุดท้าย)...", "agent_auto_select_final")
-                        if has_options_to_select:
+                        if should_run_auto_complete:
                             await self._run_agent_mode_auto_complete(session, action_log, status_callback)
                             await self.storage.save_session(session)
             else:
@@ -267,9 +309,8 @@ class TravelAgent:
                     logger.info(f"Session saved with trip_plan raw data: {total_segments_with_data} segments with options/selection: session_id={session.session_id}")
             
             # ✅ Agent Mode auto-book: ส่ง flag ไป frontend เพื่อแสดงป๊อปอัปจองสำเร็จ
-            auto_booked = getattr(session, "_agent_auto_booked", False)
-            if auto_booked:
-                return (response_message, {"auto_booked": True})
+            # Return type is always str; auto_booked flag is surfaced via session attribute
+            # so callers can check session._agent_auto_booked without a tuple return.
             return response_message
         
         except Exception as e:
@@ -433,8 +474,9 @@ class TravelAgent:
             ActionLog with all actions taken
         """
         action_log = ActionLog()
-        # ✅ OPTIMIZED FOR 1.5-MINUTE COMPLETION: Reduce iterations to 2 for faster response
-        max_iterations = min(settings.controller_max_iterations, 2)  # ✅ Reduced from 3 to 2 for 1.5-minute target
+        # Cap at 3 iterations max to balance completeness vs latency.
+        # settings.controller_max_iterations can be set to 1 or 2 for faster responses.
+        max_iterations = max(1, min(settings.controller_max_iterations, 3))
         
         # 🆕 LOOP DETECTION: Track action history to detect infinite loops
         action_history: List[tuple[str, str]] = []  # (action_type, payload_hash)
@@ -481,13 +523,6 @@ class TravelAgent:
             logger.debug("ML keyword/validation skipped: %s", ml_err)
 
         for iteration in range(max_iterations):
-            # ✅ SAFETY: If we've reached the limit, force stop
-            if iteration >= max_iterations:
-                logger.warning(
-                    f"[CONTROLLER] Forced stop at iteration {iteration + 1} (limit: {max_iterations})",
-                    extra={"session_id": session.session_id, "user_id": session.user_id}
-                )
-                break
             logger.info(f"Controller Loop iteration {iteration + 1}/{max_iterations}", 
                        extra={"session_id": session.session_id, "user_id": session.user_id})
             
@@ -495,8 +530,10 @@ class TravelAgent:
                 await status_callback("thinking", f"🤖 Agent กำลังวิเคราะห์และวางแผนทริป...", f"controller_iter_{iteration + 1}")
             
             try:
-                # Get current state as JSON
-                state_json = json.dumps(session.trip_plan.model_dump(), ensure_ascii=False, indent=2)
+                # Get current state as JSON — strip options_pool to avoid huge context windows
+                _raw_state = session.trip_plan.model_dump()
+                _raw_state = _strip_options_pool_for_controller(_raw_state)
+                state_json = json.dumps(_raw_state, ensure_ascii=False, indent=2)
                 # ✅ Workflow state สำหรับให้ Controller ตรวจและ validate
                 workflow_state = None
                 try:
@@ -520,7 +557,7 @@ class TravelAgent:
                         ml_validation_result=ml_validation_result,
                     )
                 except Exception as e:
-                    logger.error(f"Failed to call controller LLM: {e}")
+                    logger.error(f"Failed to call controller LLM: {e}", exc_info=True)
                     action = None
                 
                 if not action:
@@ -759,17 +796,19 @@ class TravelAgent:
                     
                     # ✅ CRUD STABILITY: Agent Mode: Auto-select and auto-book immediately after search completes
                     if mode == "agent":
-                        # ✅ CRUD STABILITY: Check if already processing to prevent concurrent calls
-                        if not (hasattr(session, '_auto_select_in_progress') and session._auto_select_in_progress):
+                        # Guard against concurrent auto-select calls
+                        if not getattr(session, '_auto_select_in_progress', False):
+                            setattr(session, '_auto_select_in_progress', True)
                             if status_callback:
                                 await status_callback("acting", "🤖 Agent กำลังเลือกช้อยส์ที่ดีที่สุด...", "agent_auto_select_immediate")
-                            
+
                             logger.info("Agent Mode: Search completed, immediately auto-selecting options...")
                             try:
                                 await self._run_agent_mode_auto_complete(session, action_log, status_callback)
                             except Exception as auto_select_error:
                                 logger.error(f"Agent Mode: Auto-select failed after search: {auto_select_error}", exc_info=True)
-                                # Continue - don't fail the entire turn if auto-select fails
+                            finally:
+                                setattr(session, '_auto_select_in_progress', False)
                             
                             # ✅ CRUD STABILITY: Save session after auto-select to persist state
                             try:
@@ -811,9 +850,14 @@ class TravelAgent:
                 seg.options_pool and not seg.selected_option 
                 for seg in all_segments
             )
+            # ✅ ถ้ามี selected options อยู่แล้ว (เช่น flight selected แต่ hotel ไม่มี options)
+            # ให้ trigger booking ด้วย แทนที่จะข้ามไป
+            has_any_selected = any(
+                seg.selected_option is not None for seg in all_segments
+            )
             
-            if has_options_to_select:
-                if status_callback:
+            if has_options_to_select or has_any_selected:
+                if has_options_to_select and status_callback:
                     await status_callback("acting", "🤖 Agent กำลังเลือกช้อยส์ที่ดีที่สุด (รอบสุดท้าย)...", "agent_auto_select_final")
                 
                 await self._run_agent_mode_auto_complete(session, action_log, status_callback)
@@ -992,16 +1036,18 @@ class TravelAgent:
         if search_tasks:
             if status_callback:
                 await status_callback("searching", "🤖 Agent กำลังค้นหาเที่ยวบินและที่พัก...", "call_search")
+            # Wrap coroutines as Tasks so we can cancel them on timeout
+            search_task_objects = [asyncio.ensure_future(coro) for coro in search_tasks]
             try:
                 results = await asyncio.wait_for(
-                    asyncio.gather(*search_tasks, return_exceptions=True),
+                    asyncio.gather(*search_task_objects, return_exceptions=True),
                     timeout=35.0,
                 )
             except asyncio.TimeoutError:
-                for t in search_tasks:
+                for t in search_task_objects:
                     if not t.done():
                         t.cancel()
-                results = [Exception("Search timed out")] * len(search_tasks)
+                results = [Exception("Search timed out")] * len(search_task_objects)
             for result in results:
                 if isinstance(result, Exception) and "ML_VALIDATION_BLOCK_SEARCH" in str(result):
                     has_ask_user = True
@@ -1097,7 +1143,7 @@ class TravelAgent:
         try:
             # Build prompt
             current_date = datetime.now().strftime("%Y-%m-%d")
-            system_prompt_with_date = CONTROLLER_SYSTEM_PROMPT.replace("Current Date: 2025-01-08", f"Current Date: {current_date}")
+            system_prompt_with_date = CONTROLLER_SYSTEM_PROMPT.replace("{{CURRENT_DATE}}", current_date)
             
             prompt_parts = [
                 user_profile_context if user_profile_context else "",
@@ -1247,7 +1293,7 @@ class TravelAgent:
             prompt = "\n".join(prompt_parts)
             
             # ✅ Use Production LLM Service - Controller Brain
-            start_time = asyncio.get_event_loop().time()
+            start_time = asyncio.get_running_loop().time()
             if self.production_llm:
                 # วิเคราะห์ความยากจากข้อความผู้ใช้ แล้วสลับ Flash/Pro
                 try:
@@ -1267,10 +1313,7 @@ class TravelAgent:
                 )
                 model_used = "gemini-2.5-pro"  # Default model for controller
                 
-                # #region agent log
-                import json as json_module
-                _write_debug_log({"sessionId":"debug-session","hypothesisId":"B,C","location":"agent.py:1240","message":"After production_llm.controller_generate","data":{"model_used":model_used,"data_type":str(type(data)),"has_thought":"thought" in data if isinstance(data, dict) else False,"has_action":"action" in data if isinstance(data, dict) else False,"data_keys":list(data.keys()) if isinstance(data, dict) else None},"timestamp":__import__('time').time()*1000})
-                # #endregion
+                logger.debug(f"Controller LLM (production): model={model_used} has_thought={'thought' in data if isinstance(data, dict) else False} has_action={'action' in data if isinstance(data, dict) else False}")
             else:
                 # Fallback to old LLM service
                 data = await self.llm.generate_json(
@@ -1285,7 +1328,7 @@ class TravelAgent:
             # 🆕 COST TRACKING: Track LLM call (estimate tokens from text length)
             # Note: 1 token ≈ 4 chars for English, ≈ 2-3 for Thai (we use 3 as average)
             try:
-                end_time = asyncio.get_event_loop().time()
+                end_time = asyncio.get_running_loop().time()
                 latency_ms = (end_time - start_time) * 1000
                 
                 # Estimate tokens (rough approximation)
@@ -1307,10 +1350,7 @@ class TravelAgent:
             except Exception as e:
                 logger.warning(f"Failed to track LLM cost: {e}")
             
-            # #region agent log
-            import json as json_module
-            _write_debug_log({"sessionId":"debug-session","hypothesisId":"A","location":"agent.py:1257","message":"Raw LLM data received","data":{"data_type":str(type(data)),"data_exists":data is not None,"is_dict":isinstance(data, dict),"has_thought":"thought" in data if isinstance(data, dict) else False,"has_action":"action" in data if isinstance(data, dict) else False,"data_preview":str(data)[:500] if data else None},"timestamp":__import__('time').time()*1000})
-            # #endregion
+            logger.debug(f"Controller LLM raw response: type={type(data).__name__} exists={data is not None} preview={str(data)[:200] if data else None}")
             
             if not data or not isinstance(data, dict):
                 logger.error(f"Invalid response from Controller LLM: {data}")
@@ -1338,9 +1378,7 @@ class TravelAgent:
                         payload={"missing_fields": ["all"]}
                     )
             
-            # #region agent log
-            _write_debug_log({"sessionId":"debug-session","hypothesisId":"A,D","location":"agent.py:1284","message":"Before self-correction check","data":{"has_action":"action" in data,"has_thought":"thought" in data,"keys":list(data.keys()),"action_value":data.get("action"),"thought_value":data.get("thought")},"timestamp":__import__('time').time()*1000})
-            # #endregion
+            logger.debug(f"Controller LLM self-correction check: action={data.get('action')} thought={'present' if 'thought' in data else 'missing'}")
             
             # 🧠 Self-Correction: Check for missing keys and add defaults based on mode
             # ✅ FIX: Add default thought if missing (common LLM oversight)
@@ -1373,20 +1411,18 @@ class TravelAgent:
                 data["batch_actions"] = data["payload"]
                 data["payload"] = {}
 
-            # #region agent log
-            _write_debug_log({"sessionId":"debug-session","hypothesisId":"A","location":"agent.py:1309","message":"Right before ControllerAction validation","data":{"has_thought":"thought" in data,"thought_value":data.get("thought"),"has_action":"action" in data,"action_value":data.get("action"),"all_keys":list(data.keys()),"data_dump":str(data)[:300]},"timestamp":__import__('time').time()*1000})
-            # #endregion
+            logger.debug(f"Controller LLM: validating ControllerAction action={data.get('action')}")
 
             # Validate and create ControllerAction
             action = ControllerAction(**data)
             
             # ✅ Agent Mode: ALWAYS override ASK_USER - never ask user in Agent Mode
-            if mode == "agent" and action.action == "ASK_USER":
+            if mode == "agent" and action.action == ActionType.ASK_USER:
                 logger.info("Agent Mode: Overriding ASK_USER - Agent Mode never asks user, inferring everything automatically")
                 # Always create itinerary with intelligent defaults
                 action = ControllerAction(
                     thought="Agent Mode: Overriding ASK_USER - inferring all missing information automatically",
-                    action="CREATE_ITINERARY",
+                    action=ActionType.CREATE_ITINERARY,
                     payload={
                         "destination": user_input or "Bangkok",  # Parse from input or default
                         "start_date": (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d"),  # Tomorrow
@@ -2047,8 +2083,9 @@ class TravelAgent:
                 session.trip_plan.travel.ground_transport.append(car_seg)
 
         # Try to convert City names to IATA for flights immediately
+        all_flight_segs = session.trip_plan.travel.flights.all_segments
         if "flights" in focus and travel_mode in [TravelMode.FLIGHT_ONLY, TravelMode.BOTH]:
-            for seg in session.trip_plan.travel.flights.all_segments:
+            for seg in all_flight_segs:
                 if "origin" in seg.requirements:
                     iata = await self._city_to_iata(seg.requirements["origin"])
                     if iata: seg.requirements["origin"] = iata
@@ -2059,7 +2096,7 @@ class TravelAgent:
         action_log.add_action(
             "CREATE_ITINERARY",
             payload,
-            f"Created plan with focus {focus}: {len(session.trip_plan.travel.flights.all_segments)} flights, {len(session.trip_plan.accommodation.segments)} hotels."
+            f"Created plan with focus {focus}: {len(all_flight_segs)} flights, {len(session.trip_plan.accommodation.segments)} hotels."
         )
         session.update_timestamp()
         # ✅ เริ่ม workflow: planning
@@ -2664,18 +2701,21 @@ class TravelAgent:
                                 logger.info(f"🔍 Using Amadeus MCP search_flights for {slot_name}[{segment_index}]")
                                 # ✅ ส่ง non_stop เมื่อผู้ใช้ขอ "บินตรง" / direct / nonstop
                                 non_stop = req.get("direct_flight") is True or req.get("non_stop") is True
-                                mcp_result = await self.mcp_executor.execute_tool(
-                                    "search_flights",
-                                    {
-                                        "origin": req.get("origin"),
-                                        "destination": req.get("destination"),
-                                        "departure_date": req.get("departure_date") or req.get("date"),
-                                        "adults": req.get("adults") or req.get("guests", 1),
-                                        "children": req.get("children", 0),
-                                        "infants": req.get("infants", 0),
-                                        "return_date": req.get("return_date") if "inbound" not in slot_name else None,
-                                        "non_stop": non_stop,
-                                    }
+                                mcp_result = await asyncio.wait_for(
+                                    self.mcp_executor.execute_tool(
+                                        "search_flights",
+                                        {
+                                            "origin": req.get("origin"),
+                                            "destination": req.get("destination"),
+                                            "departure_date": req.get("departure_date") or req.get("date"),
+                                            "adults": req.get("adults") or req.get("guests", 1),
+                                            "children": req.get("children", 0),
+                                            "infants": req.get("infants", 0),
+                                            "return_date": req.get("return_date") if "inbound" not in slot_name else None,
+                                            "non_stop": non_stop,
+                                        }
+                                    ),
+                                    timeout=20.0,
                                 )
                                 
                                 if mcp_result.get("success") and mcp_result.get("flights"):
@@ -2686,17 +2726,17 @@ class TravelAgent:
                                 # Use Amadeus MCP search_hotels
                                 logger.info(f"🔍 Using Amadeus MCP search_hotels for {slot_name}[{segment_index}]")
                                 location = req.get("location") or req.get("destination")
-                                mcp_result = await self.mcp_executor.execute_tool(
-                                    "search_hotels",
-                                    {
-                                        "location_name": location,
-                                        "check_in": req.get("check_in"),
-                                        "check_out": req.get("check_out"),
-                                        "guests": req.get("guests") or req.get("adults", 1),
-                                        "adults": req.get("adults") or req.get("guests", 1),
-                                        "children": req.get("children", 0),
-                                        "radius": req.get("radius", 5)
-                                    }
+                                mcp_result = await asyncio.wait_for(
+                                    self.mcp_executor.execute_tool(
+                                        "search_hotels",
+                                        {
+                                            "location": location,
+                                            "check_in": req.get("check_in"),
+                                            "check_out": req.get("check_out"),
+                                            "guests": req.get("guests") or req.get("adults", 1),
+                                        }
+                                    ),
+                                    timeout=20.0,
                                 )
                                 
                                 if mcp_result.get("success") and mcp_result.get("hotels"):
@@ -2720,10 +2760,10 @@ class TravelAgent:
                                     mcp_result = await self.mcp_executor.execute_tool(
                                         "search_transfers_by_geo",
                                         {
-                                            "start_latitude": origin_coords.get("latitude"),
-                                            "start_longitude": origin_coords.get("longitude"),
-                                            "end_latitude": dest_coords.get("latitude"),
-                                            "end_longitude": dest_coords.get("longitude"),
+                                            "start_lat": origin_coords.get("latitude"),
+                                            "start_lng": origin_coords.get("longitude"),
+                                            "end_lat": dest_coords.get("latitude"),
+                                            "end_lng": dest_coords.get("longitude"),
                                             "start_time": req.get("date") or req.get("departure_date")
                                         }
                                     )
@@ -2977,23 +3017,8 @@ class TravelAgent:
         # Check if this is a transport selection (ground_transport, transport, or transfer)
         is_transport_selection = slot_name in ["ground_transport", "transport", "transfer"]
         
-        # #region agent log
-        _write_debug_log({
-            "sessionId": "debug-session",
-            "runId": "run1",
-            "hypothesisId": "G",
-            "location": "agent.py:2299",
-            "message": "SELECT_OPTION executed - checking if transport",
-            "data": {
-                "slot_name": slot_name,
-                "is_transport_selection": is_transport_selection,
-                "segment_status": str(segment.status),
-                "accommodation_segments_count": len(session.trip_plan.accommodation.segments)
-            },
-            "timestamp": int(datetime.now().timestamp() * 1000)
-        })
-        # #endregion
-        
+        logger.debug(f"SELECT_OPTION: slot={slot_name} is_transport={is_transport_selection} status={segment.status}")
+
         if is_transport_selection and segment.status == SegmentStatus.CONFIRMED:
             # Check if accommodation segments need search
             for acc_idx, acc_seg in enumerate(session.trip_plan.accommodation.segments):
@@ -3005,23 +3030,7 @@ class TravelAgent:
                         f"Auto-triggered search for accommodation after transport selection"
                     )
                     logger.info(f"Transport selected - auto-triggering search for accommodation[{acc_idx}]")
-                    
-                    # #region agent log
-                    _write_debug_log({
-                        "sessionId": "debug-session",
-                        "runId": "run1",
-                        "hypothesisId": "G",
-                        "location": "agent.py:2310",
-                        "message": "Auto-triggering accommodation search",
-                        "data": {
-                            "accommodation_index": acc_idx,
-                            "accommodation_status": str(acc_seg.status),
-                            "accommodation_needs_search": acc_seg.needs_search()
-                        },
-                        "timestamp": int(datetime.now().timestamp() * 1000)
-                    })
-                    # #endregion
-                    
+
                     # Execute search immediately
                     try:
                         await self._execute_call_search(
@@ -3029,22 +3038,7 @@ class TravelAgent:
                             {"slot": "accommodation", "segment_index": acc_idx},
                             action_log
                         )
-                        
-                        # #region agent log
-                        _write_debug_log({
-                            "sessionId": "debug-session",
-                            "runId": "run1",
-                            "hypothesisId": "G",
-                            "location": "agent.py:2325",
-                            "message": "Accommodation search completed",
-                            "data": {
-                                "accommodation_index": acc_idx,
-                                "accommodation_status_after": str(acc_seg.status),
-                                "options_count": len(acc_seg.options_pool) if acc_seg.options_pool else 0
-                            },
-                            "timestamp": int(datetime.now().timestamp() * 1000)
-                        })
-                        # #endregion
+                        logger.debug(f"Accommodation search completed: idx={acc_idx} options={len(acc_seg.options_pool) if acc_seg.options_pool else 0}")
                     except Exception as e:
                         logger.error(f"Error auto-triggering accommodation search: {e}", exc_info=True)
         
@@ -3060,15 +3054,6 @@ class TravelAgent:
         รัน Agent Mode auto-select + auto-book
         ถ้า ENABLE_LANGGRAPH_AGENT_MODE=true ใช้ LangGraph, ไม่ก็เรียก _auto_select_and_book โดยตรง
         """
-        # #region agent debug log (H1)
-        try:
-            import time
-            _path = r"c:\Users\Juins\Desktop\DEMO\AITravelAgent\.cursor\debug.log"
-            with open(_path, "a", encoding="utf-8") as _f:
-                _f.write(json.dumps({"id": f"log_{int(time.time()*1000)}_agent_auto_complete", "timestamp": int(time.time()*1000), "location": "agent.py:_run_agent_mode_auto_complete", "message": "Agent Mode: _run_agent_mode_auto_complete called", "data": {"session_id": getattr(session, "session_id", None)}, "runId": "run1", "hypothesisId": "H1"}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         from app.core.config import settings
         if getattr(settings, "enable_langgraph_agent_mode", False):
             try:
@@ -3109,10 +3094,10 @@ class TravelAgent:
         """
         try:
             # ✅ CRUD STABILITY: Check if already processing (prevent concurrent execution)
-            if hasattr(session, '_auto_select_in_progress') and session._auto_select_in_progress:
+            if getattr(session, '_auto_select_in_progress', False):
                 logger.warning("Agent Mode: Auto-select already in progress, skipping duplicate call")
                 return
-            session._auto_select_in_progress = True
+            setattr(session, '_auto_select_in_progress', True)
             # ✅ Use SlotManager to get all segments with stable access
             all_segments_managed = self.slot_manager.get_all_segments(session.trip_plan)
             
@@ -3124,15 +3109,6 @@ class TravelAgent:
             ]
             
             logger.info(f"Agent Mode: Auto-select check - found {len(segments_to_select)} segments with options that need selection")
-            # #region agent debug log (H1)
-            try:
-                import time
-                _path = r"c:\Users\Juins\Desktop\DEMO\AITravelAgent\.cursor\debug.log"
-                with open(_path, "a", encoding="utf-8") as _f:
-                    _f.write(json.dumps({"id": f"log_{int(time.time()*1000)}_auto_select_and_book", "timestamp": int(time.time()*1000), "location": "agent.py:_auto_select_and_book", "message": "Agent Mode: _auto_select_and_book entered", "data": {"segments_to_select_count": len(segments_to_select)}, "runId": "run1", "hypothesisId": "H1"}, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            # #endregion
             for slot_name, segment, idx in segments_to_select:
                 logger.info(f"Agent Mode: Segment needs selection - {slot_name}[{idx}]: {len(segment.options_pool)} options, selected: {segment.selected_option is not None}")
             
@@ -3178,18 +3154,30 @@ class TravelAgent:
                 if status_callback and num_options > 0:
                     await status_callback("analyzing", f"🤖 Agent กำลังวิเคราะห์ตัวเลือกที่ดีที่สุดสำหรับ{slot_display}...", f"agent_analyze_{slot_name}")
 
-                # 🧠 RL: Get per-user preference scores for these options
+                # 🧠 RL: Get per-user Q-scores and re-rank options before LLM selection
                 rl_context = ""
+                raw_options = [opt.model_dump() if hasattr(opt, 'model_dump') else opt for opt in segment.options_pool]
                 if getattr(self, 'reinforcement_learning_enabled', True):
                     try:
                         rl_svc = get_rl_service()
-                        raw_options = [opt.model_dump() if hasattr(opt, 'model_dump') else opt for opt in segment.options_pool]
+                        # 1. Get numeric Q-scores for each option (List[float], index-aligned)
+                        rl_scores: list = await rl_svc.get_option_scores(session.user_id, slot_name, raw_options)
+                        # 2. Combine: final_score = weighted_score (0–1) + rl_bonus (scaled to 0–0.2)
+                        #    RL bonus: map Q-value range [-1, +1] → [0, 0.2]
+                        for i, opt in enumerate(raw_options):
+                            ws = float(opt.get("weighted_score", 0.0))
+                            q = float(rl_scores[i]) if i < len(rl_scores) else 0.0
+                            rl_bonus = (q + 1.0) / 2.0 * 0.20  # normalize Q [-1,1] → [0, 0.2]
+                            opt["_final_score"] = round(ws + rl_bonus, 4)
+                        # 3. Sort by final_score descending so LLM sees best options first
+                        raw_options.sort(key=lambda x: -x.get("_final_score", 0.0))
+                        # 4. Build text context for LLM reasoning
                         rl_context = await rl_svc.build_rl_context(session.user_id, slot_name, raw_options)
                     except Exception as rl_ctx_err:
                         logger.debug(f"RL context build failed (non-critical): {rl_ctx_err}")
 
                 # Build LLM prompt for smart selection
-                options_json = json.dumps([opt.model_dump() if hasattr(opt, 'model_dump') else opt for opt in segment.options_pool], ensure_ascii=False, indent=2)
+                options_json = json.dumps(raw_options, ensure_ascii=False, indent=2)
 
                 selection_prompt = f"""You are an expert travel advisor. Analyze these options and select the BEST one.
 
@@ -3392,7 +3380,7 @@ Output JSON with your analysis and selection:
                             params={"trip_id": session.trip_id or session.session_id},
                             headers={"X-User-ID": session.user_id}
                         )
-                        if check_response.ok:
+                        if check_response.is_success:
                             check_data = check_response.json()
                             if check_data.get("ok") and check_data.get("bookings"):
                                 # ✅ CRUD STABILITY: Check for existing booking with multiple criteria
@@ -3459,11 +3447,16 @@ Output JSON with your analysis and selection:
                                     for slot_name, seg, idx in self.slot_manager.get_all_segments(session.trip_plan)
                                     if seg.options_pool and len(seg.options_pool) > 0 and not seg.selected_option
                                 ]
-                                if segments_to_retry:
-                                    logger.info(f"Agent Mode: Retrying auto-select for {len(segments_to_retry)} segments (re-run _run_agent_mode_auto_complete)")
-                                    session._auto_select_in_progress = False
+                                # Guard against unbounded recursion: allow at most 1 retry
+                                retry_count = getattr(session, "_auto_select_retry_count", 0)
+                                if segments_to_retry and retry_count < 1:
+                                    logger.info(f"Agent Mode: Retrying auto-select for {len(segments_to_retry)} segments (attempt {retry_count + 1}/1)")
+                                    setattr(session, "_auto_select_in_progress", False)
+                                    setattr(session, "_auto_select_retry_count", retry_count + 1)
                                     await self._run_agent_mode_auto_complete(session, action_log, status_callback)
                                     return
+                                elif segments_to_retry:
+                                    logger.error("Agent Mode: Auto-select retry limit reached (1). Giving up to prevent infinite recursion.")
                                 else:
                                     logger.error("Agent Mode: CRITICAL - Options available but auto-select failed. Cannot proceed with booking.")
                                     return
@@ -3537,8 +3530,17 @@ Output JSON with your analysis and selection:
                             await status_callback("booking", "🤖 Agent กำลังจองทริปทันที...", "agent_auto_book")
                         
                         # Create booking via HTTP request to booking API
-                        # Use settings or default to localhost
-                        booking_url = f"{getattr(settings, 'api_base_url', 'http://localhost:8000')}/api/booking/create"
+                        _api_base = (
+                            getattr(settings, "api_base_url", None)
+                            or getattr(settings, "backend_url", None)
+                            or "http://localhost:8000"
+                        )
+                        if "localhost" in _api_base and not getattr(settings, "api_base_url", None):
+                            logger.warning(
+                                "Agent Mode booking: api_base_url not configured in settings, "
+                                "falling back to localhost:8000. Set API_BASE_URL in .env for production."
+                            )
+                        booking_url = f"{_api_base.rstrip('/')}/api/booking/create"
                         # ✅ Build travel_slots with proper structure
                         travel_slots = {}
                         
@@ -3600,11 +3602,17 @@ Output JSON with your analysis and selection:
                         
                         for attempt in range(max_retries):
                             try:
+                                # ✅ ส่ง X-User-ID header เพื่อให้ booking ถูกบันทึกด้วย user_id ที่ถูกต้อง
+                                # (agent เรียก internal HTTP ไม่มี session cookie)
+                                _booking_headers = {
+                                    "Content-Type": "application/json",
+                                    "X-User-ID": session.user_id,
+                                }
                                 async with httpx.AsyncClient(timeout=30.0) as client:
-                                    response = await client.post(booking_url, json=booking_payload)
+                                    response = await client.post(booking_url, json=booking_payload, headers=_booking_headers)
                                     logger.info(f"Agent Mode: Booking API response status: {response.status_code} (attempt {attempt + 1}/{max_retries})")
                                     
-                                    if not response.ok:
+                                    if not response.is_success:
                                         error_text = await response.text()
                                         
                                         # ✅ CRUD STABILITY: Handle duplicate booking error (409 Conflict)
@@ -3731,15 +3739,7 @@ Output JSON with your analysis and selection:
                         
                         # ✅ Flag for frontend: Agent Mode จองอัตโนมัติสำเร็จ
                         setattr(session, "_agent_auto_booked", True)
-                        # #region agent debug log (H2)
-                        try:
-                            import time
-                            _path = r"c:\Users\Juins\Desktop\DEMO\AITravelAgent\.cursor\debug.log"
-                            with open(_path, "a", encoding="utf-8") as _f:
-                                _f.write(json.dumps({"id": f"log_{int(time.time()*1000)}_agent_auto_booked_set", "timestamp": int(time.time()*1000), "location": "agent.py:_auto_select_and_book", "message": "Agent Mode: _agent_auto_booked set True", "data": {"booking_id": booking_id}, "runId": "run1", "hypothesisId": "H2"}, ensure_ascii=False) + "\n")
-                        except Exception:
-                            pass
-                        # #endregion
+                        logger.info(f"Agent Mode: _agent_auto_booked set True (booking_id={booking_id})")
                         # ✅ CRUD STABILITY: Save session after booking to ensure state is persisted
                         try:
                             await self.storage.save_session(session)
@@ -3767,9 +3767,9 @@ Output JSON with your analysis and selection:
             )
             # ✅ CRUD STABILITY: Don't re-raise - allow turn to continue with error logged
         finally:
-            # ✅ CRUD STABILITY: Always reset flag in finally block
-            if hasattr(session, '_auto_select_in_progress'):
-                session._auto_select_in_progress = False
+            # ✅ CRUD STABILITY: Always reset flags in finally block
+            setattr(session, '_auto_select_in_progress', False)
+            setattr(session, '_auto_select_retry_count', 0)
     
     async def generate_response(
         self,
@@ -3843,7 +3843,9 @@ Output JSON with your analysis and selection:
                     intelligence_warnings.extend(warnings)
             
             # Build enhanced prompt with intelligence context
-            state_json = json.dumps(session.trip_plan.model_dump(), ensure_ascii=False, indent=2)
+            # Strip options_pool to keep context window manageable for Responder LLM
+            _resp_state = _strip_options_pool_for_controller(session.trip_plan.model_dump())
+            state_json = json.dumps(_resp_state, ensure_ascii=False, indent=2)
             action_log_json = json.dumps([a.model_dump() for a in action_log.actions], ensure_ascii=False, indent=2)
             
             intelligence_context = ""
@@ -4063,7 +4065,7 @@ Respond in Thai text only (no JSON, no markdown)."""
                     except Exception as e:
                         logger.debug(f"ModelSelector.analyze_complexity failed: {e}, using action-based complexity")
                         complexity = "complex" if agent_mode_actions else "simple"
-                    start_time = asyncio.get_event_loop().time()
+                    start_time = asyncio.get_running_loop().time()
                     try:
                         logger.info(f"Calling production_llm.responder_generate: complexity={complexity}, prompt_length={len(prompt)}")
                         response_text = await self.production_llm.responder_generate(
@@ -4079,7 +4081,7 @@ Respond in Thai text only (no JSON, no markdown)."""
                         
                         # 🆕 COST TRACKING: Track Responder LLM call
                         try:
-                            end_time = asyncio.get_event_loop().time()
+                            end_time = asyncio.get_running_loop().time()
                             latency_ms = (end_time - start_time) * 1000
                             
                             # Estimate tokens
@@ -4120,8 +4122,9 @@ Respond in Thai text only (no JSON, no markdown)."""
                     except LLMException as llm_error:
                         logger.error(f"Basic LLM failed with LLMException: {llm_error}")
                         error_str = str(llm_error).lower()
-                        # ✅ Handle quota exceeded errors with retry delay
-                        if hasattr(llm_error, 'is_quota_error') and llm_error.is_quota_error:
+                        # Detect quota errors from error message (LLMException has no is_quota_error attr)
+                        _is_quota_error = any(x in error_str for x in ["429", "quota", "exceeded", "resource exhausted"])
+                        if _is_quota_error:
                             retry_delay = getattr(llm_error, 'retry_delay', 10)
                             logger.warning(f"Quota exceeded, waiting {retry_delay} seconds before retry...")
                             await asyncio.sleep(min(retry_delay, 60))  # Cap at 60 seconds

@@ -121,10 +121,38 @@
 .booking-title {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   font-size: clamp(18px, 2.5vw, 20px);
   font-weight: 600;
   color: #2d3748;
+  flex-wrap: wrap;
+}
+
+/* ✅ Airline logo badge */
+.airline-logo-badge {
+  display: inline-flex;
+  align-items: center;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 3px 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  flex-shrink: 0;
+}
+
+.airline-logo-img {
+  height: 22px;
+  width: auto;
+  max-width: 80px;
+  object-fit: contain;
+  display: block;
+}
+
+.airline-logo-fallback {
+  font-size: 13px;
+  font-weight: 600;
+  color: #4a5568;
+  letter-spacing: 0.5px;
 }
 
 .booking-date {
@@ -706,10 +734,121 @@
 }
 
 /* Edit Booking Modal Styles */
+/* ── Passengers ─────────────────────────────────────────────── */
+.booking-passengers {
+  margin-top: 10px;
+  padding: 10px 14px;
+  background: #f8faff;
+  border: 1px solid #e0e7ff;
+  border-radius: 10px;
+}
+
+.passengers-label {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #4b5563;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+
+.passengers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.passenger-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.passenger-type-badge {
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  white-space: nowrap;
+}
+
+.passenger-type-badge.adult {
+  background: #eff6ff;
+  color: #2563eb;
+  border: 1px solid #bfdbfe;
+}
+
+.passenger-type-badge.child {
+  background: #fef3c7;
+  color: #d97706;
+  border: 1px solid #fde68a;
+}
+
+.passenger-name {
+  font-size: 0.875rem;
+  color: #1f2937;
+  font-weight: 500;
+}
+
+.main-booker-tag {
+  font-size: 0.75rem;
+  color: #6b7280;
+  font-weight: 400;
+}
+
+/* ── Edit Booking Modal ─────────────────────────────────────── */
+.edit-booking-modal {
+  max-width: 560px;
+  width: 95vw;
+}
+
 .edit-form {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.edit-form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 480px) {
+  .edit-form-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.edit-notes-input {
+  resize: vertical;
+  min-height: 60px;
+}
+
+.edit-price-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+
+.edit-price-label {
+  font-size: 0.875rem;
+  color: #374151;
+  font-weight: 500;
+}
+
+.edit-price-value {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #059669;
+}
+
+.required {
+  color: #ef4444;
 }
 
 .form-group {
@@ -800,6 +939,328 @@
   .btn-save,
   .btn-cancel-edit {
     width: 100%;
+  }
+}
+
+/* ── Edit Modal: Flight Search Section ─────────────────────── */
+.edit-flight-search-section {
+  background: #f0f7ff;
+  border: 1.5px solid #bfdbfe;
+  border-radius: 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.edit-flight-search-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.edit-flight-search-label {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #1e40af;
+}
+
+.btn-search-flights {
+  padding: 7px 16px;
+  background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+  color: white;
+  border: none;
+  border-radius: 7px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.btn-search-flights:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(59, 130, 246, 0.4);
+}
+
+.btn-search-flights:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.edit-flight-error {
+  font-size: 0.82rem;
+  color: #dc2626;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.edit-flight-no-result {
+  font-size: 0.82rem;
+  color: #92400e;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.edit-flight-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.edit-flight-results-title {
+  font-size: 0.78rem;
+  color: #374151;
+  font-weight: 600;
+}
+
+.edit-flight-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.edit-flight-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: white;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 9px 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s;
+  font-family: inherit;
+  flex-wrap: wrap;
+}
+
+.edit-flight-item:hover {
+  border-color: #3b82f6;
+  background: #eff6ff;
+}
+
+.edit-flight-item.selected {
+  border-color: #10b981;
+  background: #f0fdf4;
+}
+
+.efi-code {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #1e40af;
+  min-width: 70px;
+}
+
+.efi-time {
+  font-size: 0.82rem;
+  color: #374151;
+  font-weight: 500;
+  min-width: 90px;
+}
+
+.efi-route {
+  font-size: 0.78rem;
+  color: #6b7280;
+  flex: 1;
+}
+
+.efi-price {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #059669;
+  margin-left: auto;
+}
+
+.efi-check {
+  font-size: 1rem;
+  color: #10b981;
+  font-weight: 700;
+}
+
+.efi-roundtrip-badge {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  background: #dbeafe;
+  color: #1d4ed8;
+  border-radius: 9999px;
+  padding: 1px 8px;
+  vertical-align: middle;
+}
+
+/* Tab bar for outbound / inbound */
+.efi-tab-bar {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.efi-tab {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1.5px solid #d1d5db;
+  border-radius: 7px;
+  background: #f9fafb;
+  color: #374151;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+}
+
+.efi-tab:hover {
+  border-color: #3b82f6;
+  background: #eff6ff;
+}
+
+.efi-tab.active {
+  border-color: #3b82f6;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.efi-tab-check {
+  color: #10b981;
+}
+
+/* Price summary row */
+.efi-price-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  color: #374151;
+}
+
+.efi-plus {
+  color: #9ca3af;
+  font-weight: 700;
+}
+
+.efi-total {
+  margin-left: auto;
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: #059669;
+}
+
+/* ปุ่มตกลง ยืนยันเที่ยวบิน */
+.btn-confirm-flight {
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px 16px;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: inherit;
+  letter-spacing: 0.01em;
+}
+
+.btn-confirm-flight:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
+}
+
+/* Confirmed summary (collapsed view) */
+.efi-confirmed-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  background: #f0fdf4;
+  border: 1.5px solid #6ee7b7;
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+
+.efi-confirmed-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1;
+}
+
+.efi-confirmed-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.efi-confirmed-leg {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #059669;
+  min-width: 52px;
+}
+
+.efi-confirmed-detail {
+  font-size: 0.8rem;
+  color: #1f2937;
+  font-weight: 500;
+}
+
+.btn-change-flight {
+  padding: 5px 12px;
+  background: white;
+  color: #374151;
+  border: 1.5px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+  font-family: inherit;
+  align-self: center;
+}
+
+.btn-change-flight:hover {
+  border-color: #3b82f6;
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+
+@media (max-width: 480px) {
+  .edit-flight-search-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .btn-search-flights {
+    width: 100%;
+  }
+  .edit-flight-item {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .efi-price-summary {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .efi-total {
+    margin-left: 0;
   }
 }
 

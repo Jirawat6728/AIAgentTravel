@@ -97,13 +97,6 @@ class Settings:
         self.mongodb_uri: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
         self.mongodb_database: str = os.getenv("MONGODB_DATABASE", "travel_agent")
         
-        # Redis Configuration
-        self.redis_host: str = os.getenv("REDIS_HOST", "localhost")
-        self.redis_port: int = int(os.getenv("REDIS_PORT", "6379"))
-        self.redis_password: Optional[str] = os.getenv("REDIS_PASSWORD")
-        self.redis_db: int = int(os.getenv("REDIS_DB", "0"))
-        self.redis_ttl: int = int(os.getenv("REDIS_TTL", "3600")) # Default 1 hour for cache
-
         # Authentication Configuration
         # Try GOOGLE_CLIENT_ID first, fallback to VITE_GOOGLE_CLIENT_ID (for shared .env)
         self.google_client_id: str = (
@@ -156,19 +149,15 @@ class Settings:
         self.omise_secret_key: str = os.getenv("OMISE_SECRET_KEY", "").strip()
         self.omise_public_key: str = os.getenv("OMISE_PUBLIC_KEY", "").strip()
         self.frontend_url: str = os.getenv("FRONTEND_URL", "http://localhost:5173").strip()
-        self.email_service_url: str = os.getenv("EMAIL_SERVICE_URL", "").strip()
+        # Backend base URL — used by Agent Mode to call booking API internally
+        # Set API_BASE_URL in .env for production (e.g. https://api.yourdomain.com)
+        self.api_base_url: str = os.getenv("API_BASE_URL", "").strip()
 
-        # 📱 SMS/OTP Configuration (for phone verification, e.g. Twilio)
-        self.twilio_account_sid: str = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
-        self.twilio_auth_token: str = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
-        self.twilio_phone_number: str = os.getenv("TWILIO_PHONE_NUMBER", "").strip()
-        self.sms_otp_expire_minutes: int = int(os.getenv("SMS_OTP_EXPIRE_MINUTES", "5"))
+        # 📧 Gmail SMTP Configuration (สำหรับส่งอีเมลยืนยัน)
+        self.gmail_user: str = os.getenv("GMAIL_USER", "").strip()
+        self.gmail_app_password: str = os.getenv("GMAIL_APP_PASSWORD", "").strip()
+        self.site_name: str = os.getenv("SITE_NAME", "AI Travel Agent").strip()
 
-    @property
-    def redis_url(self) -> str:
-        """Build Redis URL for langgraph-checkpoint-redis (decode_responses handled by client)"""
-        auth = f":{self.redis_password}@" if self.redis_password else ""
-        return f"redis://{auth}{self.redis_host}:{self.redis_port}/{self.redis_db}"
 
     def validate(self) -> list[str]:
         """
@@ -188,14 +177,27 @@ class Settings:
             logger.warning(f"[config] ⚠️  {msg}")
             warnings.append(msg)
 
+        is_production = os.getenv("APP_ENV", "development").lower() in ("production", "prod")
+
         if self.secret_key == "super-secret-key-for-travel-agent-123":
-            msg = "SECRET_KEY ยังเป็นค่า default — ควรเปลี่ยนก่อน deploy production"
-            logger.warning(f"[config] ⚠️  {msg}")
-            warnings.append(msg)
+            if is_production:
+                msg = "SECRET_KEY ยังเป็นค่า default — ห้าม deploy production โดยไม่เปลี่ยน SECRET_KEY"
+                logger.error(f"[config] ❌ {msg}")
+                raise RuntimeError(msg)
+            else:
+                msg = "SECRET_KEY ยังเป็นค่า default — ควรเปลี่ยนก่อน deploy production"
+                logger.warning(f"[config] ⚠️  {msg}")
+                warnings.append(msg)
 
         # ─── Important: ฟีเจอร์บางส่วนจะไม่ทำงาน ─────────────────────────
         if not self.amadeus_api_key and not self.amadeus_search_api_key:
             msg = "AMADEUS_API_KEY ไม่ได้ตั้งค่า — ค้นหาเที่ยวบิน/โรงแรมจะไม่ทำงาน"
+            logger.warning(f"[config] ⚠️  {msg}")
+            warnings.append(msg)
+
+        search_env = self.amadeus_search_env.lower()
+        if search_env == "test":
+            msg = "AMADEUS_SEARCH_ENV=test — ข้อมูลเที่ยวบิน/โรงแรมเป็นข้อมูลทดสอบ (sandbox) ไม่ใช่ข้อมูลจริง"
             logger.warning(f"[config] ⚠️  {msg}")
             warnings.append(msg)
 
@@ -217,10 +219,9 @@ class Settings:
         # ─── Informational ────────────────────────────────────────────────
         if not self.google_maps_api_key:
             logger.info("[config] ℹ️  GOOGLE_MAPS_API_KEY ไม่ได้ตั้งค่า — Maps features disabled")
-        if not self.email_service_url:
-            logger.info("[config] ℹ️  EMAIL_SERVICE_URL ไม่ได้ตั้งค่า — email notifications disabled")
-        if not self.twilio_account_sid:
-            logger.info("[config] ℹ️  TWILIO_ACCOUNT_SID ไม่ได้ตั้งค่า — SMS/OTP disabled")
+
+        if not self.api_base_url:
+            logger.info("[config] ℹ️  API_BASE_URL ไม่ได้ตั้งค่า — Agent Mode booking จะใช้ localhost:8000")
 
         if not warnings:
             logger.info("[config] ✅ การตรวจสอบ config ผ่านทั้งหมด")

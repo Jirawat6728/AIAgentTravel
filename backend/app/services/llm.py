@@ -14,26 +14,35 @@ import os
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-try:
-    from google.api_core.exceptions import ResourceExhausted
-except ImportError:
-    ResourceExhausted = Exception  # Fallback if not available
-
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.exceptions import LLMException
 
 logger = get_logger(__name__)
 
-# Optional Gemini import (disabled by default)
+# Use new google-genai SDK (v1+); fall back to deprecated google-generativeai if not available
 _gemini_available = False
+_use_new_sdk = False
+genai = None
+HarmCategory = None
+HarmBlockThreshold = None
+
 if settings.enable_gemini:
     try:
-        import google.generativeai as genai
-        from google.generativeai.types import HarmCategory, HarmBlockThreshold
+        import google.genai as genai  # type: ignore
+        from google.genai import types as genai_types  # type: ignore
         _gemini_available = True
+        _use_new_sdk = True
+        logger.info("Using google-genai SDK (v1+)")
     except ImportError:
-        logger.warning("Google Generative AI library not installed. Gemini support disabled.")
+        try:
+            import google.generativeai as genai  # type: ignore
+            from google.generativeai.types import HarmCategory, HarmBlockThreshold  # type: ignore
+            _gemini_available = True
+            _use_new_sdk = False
+            logger.warning("google-genai not found, falling back to deprecated google-generativeai")
+        except ImportError:
+            logger.warning("No Gemini SDK installed. Gemini support disabled.")
 
 class LLMService:
     def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None):
@@ -41,10 +50,13 @@ class LLMService:
         self.gemini_api_key = api_key or settings.gemini_api_key
         self.enable_gemini = settings.enable_gemini and _gemini_available
         self.model_name = model_name or settings.gemini_model_name
-        
+
+        # Shared Gemini client — created once and reused for all calls
+        self._gemini_client = None
+
         if not _gemini_available:
             raise LLMException("Google Generative AI library not installed. Please install: pip install google-generativeai")
-        
+
         # ✅ Enhanced API key validation
         if not self.gemini_api_key or not self.gemini_api_key.strip():
             error_msg = (
@@ -54,7 +66,7 @@ class LLMService:
             )
             logger.error(error_msg)
             raise LLMException(error_msg)
-        
+
         # ✅ Validate API key format (basic check)
         if len(self.gemini_api_key.strip()) < 20:
             error_msg = (
@@ -64,11 +76,17 @@ class LLMService:
             )
             logger.error(error_msg)
             raise LLMException(error_msg)
-        
+
         if self.enable_gemini and self.gemini_api_key:
             try:
-                genai.configure(api_key=self.gemini_api_key)
-                logger.info(f"LLMService initialized with Gemini: model={self.model_name}, key={self.gemini_api_key[:6]}...{self.gemini_api_key[-4:]}")
+                if _use_new_sdk:
+                    # New google-genai SDK: create shared client once
+                    self._gemini_client = genai.Client(api_key=self.gemini_api_key)
+                    logger.info(f"LLMService initialized with google-genai SDK: model={self.model_name}, key={self.gemini_api_key[:6]}...{self.gemini_api_key[-4:]}")
+                else:
+                    # Legacy google-generativeai SDK: needs global configure()
+                    genai.configure(api_key=self.gemini_api_key)
+                    logger.info(f"LLMService initialized with google-generativeai SDK: model={self.model_name}, key={self.gemini_api_key[:6]}...{self.gemini_api_key[-4:]}")
             except Exception as config_error:
                 error_msg = (
                     f"Failed to configure Gemini API: {config_error}\n"
@@ -175,141 +193,122 @@ class LLMService:
             selected_model = selected_model.replace("1.5", "2.5")
             logger.info(f"Auto-updated deprecated 1.5 model to 2.5: {selected_model}")
 
-        try:
-            # Configure generation config
-            generation_config = genai.types.GenerationConfig(
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-            )
+        # Fallback model chain: primary → flash → flash-8b
+        _FALLBACK_CHAIN = [selected_model, "gemini-2.5-flash", "gemini-2.0-flash-lite"]
+        _seen: set = set()
+        fallback_models = [m for m in _FALLBACK_CHAIN if not (m in _seen or _seen.add(m))]
 
-            # Configure safety settings (BLOCK_NONE to prevent over-filtering)
-            safety_settings = {
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-            }
+        last_exc: Optional[Exception] = None
+        for model_attempt, current_model in enumerate(fallback_models):
+            # Max 3 retries per model for transient errors (429/5xx)
+            for retry_attempt in range(3):
+                try:
+                    full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
 
-            # Combine system prompt with user prompt
-            full_prompt = prompt
-            if system_prompt:
-                full_prompt = f"{system_prompt}\n\n{prompt}"
+                    # Ensure model name is valid
+                    if not current_model or current_model.strip() == "":
+                        current_model = settings.gemini_model_name
+                    if "-latest" in current_model:
+                        current_model = current_model.replace("-latest", "")
 
-            # ✅ FIX: Replace deprecated model names
-            if "-latest" in selected_model:
-                selected_model = selected_model.replace("-latest", "")
-                logger.warning(f"Replaced deprecated -latest suffix. Using model: {selected_model}")
-            
-            # ✅ FIX: Ensure model name is valid - use from settings
-            if not selected_model or selected_model.strip() == "":
-                selected_model = settings.gemini_model_name  # Use from .env
-                logger.warning(f"Model name was empty, using from settings: {selected_model}")
+                    timeout_seconds = max(settings.gemini_timeout_seconds, 30)
+                    logger.debug(f"Gemini call: model={current_model} attempt={model_attempt+1}/{len(fallback_models)} retry={retry_attempt+1}/3 timeout={timeout_seconds}s")
 
-            model = genai.GenerativeModel(model_name=selected_model)
+                    if _use_new_sdk:
+                        # ── New google-genai SDK (v1+) — reuse shared client ──
+                        _client = self._gemini_client
+                        config = genai_types.GenerateContentConfig(
+                            temperature=temperature,
+                            max_output_tokens=max_tokens,
+                        )
+                        loop = asyncio.get_running_loop()
+                        def _call_new(_c=_client, _m=current_model, _p=full_prompt, _cfg=config):
+                            return _c.models.generate_content(
+                                model=_m,
+                                contents=_p,
+                                config=_cfg,
+                            )
+                        raw = await asyncio.wait_for(
+                            loop.run_in_executor(None, _call_new),
+                            timeout=timeout_seconds,
+                        )
+                        text = raw.text if hasattr(raw, "text") else self._extract_text(raw)
+                    else:
+                        # ── Legacy google-generativeai SDK ──────────────────────
+                        generation_config = genai.types.GenerationConfig(
+                            temperature=temperature,
+                            max_output_tokens=max_tokens,
+                        )
+                        safety_settings = {
+                            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                        }
+                        model = genai.GenerativeModel(model_name=current_model)
+                        loop = asyncio.get_running_loop()
+                        def _call_gemini():
+                            return model.generate_content(
+                                full_prompt,
+                                generation_config=generation_config,
+                                safety_settings=safety_settings,
+                            )
+                        raw = await asyncio.wait_for(
+                            loop.run_in_executor(None, _call_gemini),
+                            timeout=timeout_seconds,
+                        )
+                        text = self._extract_text(raw)
 
-            # Run in executor to avoid blocking event loop
-            loop = asyncio.get_running_loop()
-            
-            def _call_gemini():
-                return model.generate_content(
-                    full_prompt,
-                    generation_config=generation_config,
-                    safety_settings=safety_settings
-                )
-            
-            # ✅ Optimized for 1.5-minute completion: Reduce LLM timeout to 20s
-            timeout_seconds = min(settings.gemini_timeout_seconds, 20)  # ✅ Reduced from 30s to 20s
-            try:
-                logger.debug(f"Calling Gemini API: model={selected_model}, prompt_length={len(prompt)}, timeout={timeout_seconds}s")
-                response = await asyncio.wait_for(
-                    loop.run_in_executor(None, _call_gemini),
-                    timeout=timeout_seconds
-                )
-                logger.debug(f"Gemini API call completed: model={selected_model}")
-            except asyncio.TimeoutError:
-                logger.error(f"Gemini call timed out after {timeout_seconds}s for model {selected_model}")
-                raise LLMException(f"Gemini call timed out after {timeout_seconds} seconds")
-            except Exception as api_error:
-                error_str = str(api_error).lower()
-                error_msg_full = str(api_error)
-                
-                # ✅ Handle 429 Quota Exceeded errors specifically
-                if "429" in error_str or "quota" in error_str or "exceeded" in error_str:
-                    # Extract retry delay if available
-                    retry_delay = 10  # Default 10 seconds
-                    if "retry" in error_msg_full.lower():
-                        try:
-                            import re
-                            retry_match = re.search(r'retry.*?(\d+(?:\.\d+)?)', error_msg_full, re.IGNORECASE)
-                            if retry_match:
-                                retry_delay = max(int(float(retry_match.group(1))), 10)  # At least 10 seconds
-                        except Exception:
-                            pass
-                    
-                    error_msg = (
-                        f"⚠️ Gemini API quota exceeded (429): {selected_model}\n\n"
-                        f"Free tier limit: 20 requests/day per model\n"
-                        f"Please wait {retry_delay} seconds before retrying, or:\n"
-                        "1. Upgrade your Google Cloud plan to increase quota\n"
-                        "2. Use a different Gemini model\n"
-                        "3. Wait until quota resets (daily limit)\n\n"
-                        f"Error details: {str(api_error)[:300]}\n"
-                        "Learn more: https://ai.google.dev/gemini-api/docs/rate-limits"
-                    )
-                    logger.warning(error_msg)
-                    # ✅ Create special exception for quota errors that includes retry delay
-                    quota_exception = LLMException(error_msg)
-                    quota_exception.retry_delay = retry_delay
-                    quota_exception.is_quota_error = True
-                    raise quota_exception
-                elif "api" in error_str and "key" in error_str:
-                    error_msg = (
-                        f"Gemini API key error: {api_error}\n"
-                        "Please check:\n"
-                        "1. GEMINI_API_KEY is set correctly in .env file\n"
-                        "2. API key is valid and not expired\n"
-                        "3. API key has proper permissions\n"
-                        "Get your API key from: https://makersuite.google.com/app/apikey"
-                    )
-                    logger.error(error_msg)
-                    raise LLMException(error_msg)
-                elif "404" in error_str or "not found" in error_str:
-                    error_msg = (
-                        f"Gemini model not found: {selected_model}\n"
-                        f"Error: {api_error}\n"
-                        "Please check model name in .env file (GEMINI_MODEL_NAME)"
-                    )
-                    logger.error(error_msg)
-                    raise LLMException(error_msg)
-                elif "403" in error_str or "permission" in error_str:
-                    error_msg = (
-                        f"Gemini API permission denied: {api_error}\n"
-                        "Please check:\n"
-                        "1. API key has proper permissions\n"
-                        "2. API key is not restricted\n"
-                        "3. Billing is enabled for your Google Cloud project"
-                    )
-                    logger.error(error_msg)
-                    raise LLMException(error_msg)
-                else:
-                    logger.error(f"Gemini API error: {api_error}", exc_info=True)
-                    raise LLMException(f"Gemini API error: {str(api_error)[:200]}")
+                    text = self._extract_text(raw) if not _use_new_sdk else text
+                    if not text or not text.strip():
+                        logger.warning(f"Gemini returned empty text. model={current_model}")
+                        last_exc = LLMException(f"Gemini returned empty text (model={current_model})")
+                        break  # Try next fallback model
+                    return text
 
-            # Extract text and handle empty responses
-            text = self._extract_text(response)
-            
-            if not text or not text.strip():
-                logger.warning(f"Gemini returned empty text. prompt_length={len(prompt)}, model={selected_model}")
-                # ✅ FIX: Return fallback message instead of empty string
-                return "ขออภัยค่ะ ฉันไม่สามารถสร้างคำตอบได้ในขณะนี้ กรุณาลองใหม่อีกครั้งนะคะ"
-            
-            return text
+                except asyncio.TimeoutError:
+                    last_exc = LLMException(f"Gemini timed out after {timeout_seconds}s (model={current_model})")
+                    logger.warning(f"Gemini timeout: model={current_model} retry={retry_attempt+1}/3")
+                    # Timeout → try next model immediately (no sleep)
+                    break
 
-        except LLMException:
-            raise
-        except Exception as e:
-            logger.error(f"Gemini generation error: {e}", exc_info=True)
-            raise LLMException(f"Gemini call failed: {str(e)[:200]}") from e
+                except LLMException as llm_err:
+                    last_exc = llm_err
+                    error_str = str(llm_err).lower()
+                    is_quota = "429" in error_str or "quota" in error_str or "exceeded" in error_str
+                    is_server_err = "500" in error_str or "503" in error_str or "502" in error_str
+
+                    if is_quota or is_server_err:
+                        # Transient: sleep with exponential backoff then retry
+                        wait = 2.0 * (2 ** retry_attempt)  # 2s, 4s, 8s
+                        logger.warning(f"Gemini transient error ({('quota' if is_quota else 'server')}): model={current_model} retry={retry_attempt+1}/3 wait={wait:.0f}s")
+                        await asyncio.sleep(wait)
+                        continue  # retry same model
+                    else:
+                        # Permanent error (404, 403, API key) → try next model
+                        logger.warning(f"Gemini permanent error: model={current_model} → trying fallback. err={str(llm_err)[:100]}")
+                        break
+
+                except Exception as e:
+                    last_exc = e
+                    error_str = str(e).lower()
+                    is_transient = any(x in error_str for x in ["429", "quota", "500", "503", "502", "exceeded", "resource exhausted"])
+                    if is_transient:
+                        wait = 2.0 * (2 ** retry_attempt)
+                        logger.warning(f"Gemini transient exception: model={current_model} retry={retry_attempt+1}/3 wait={wait:.0f}s err={str(e)[:100]}")
+                        await asyncio.sleep(wait)
+                        continue
+                    else:
+                        logger.error(f"Gemini API error: model={current_model} err={e}", exc_info=True)
+                        break
+            else:
+                # All retries exhausted for this model → try next
+                logger.warning(f"All retries exhausted for model={current_model}, trying next fallback")
+                continue
+
+        # All models and retries failed
+        logger.error(f"All Gemini fallback models failed. last_err={last_exc}")
+        raise LLMException(f"Gemini call failed after all fallbacks: {str(last_exc)[:200]}") from (last_exc if isinstance(last_exc, Exception) else None)
 
     def _extract_text(self, response) -> str:
         """Extract text from Gemini response safely"""
@@ -361,12 +360,13 @@ class LLMService:
             if hasattr(response, 'candidates') and response.candidates:
                 finish_reason = getattr(response.candidates[0], 'finish_reason', 'Unknown')
             logger.warning(f"Unexpected response structure or empty content. Finish reason: {finish_reason}")
-            # ✅ FIX: Return fallback message instead of empty string
-            return "ขออภัยค่ะ ฉันไม่สามารถสร้างคำตอบได้ในขณะนี้ กรุณาลองใหม่อีกครั้งนะคะ"
+            raise LLMException(f"Gemini returned unexpected/empty response structure. finish_reason={finish_reason}")
 
+        except LLMException:
+            raise
         except (AttributeError, IndexError, KeyError) as e:
             logger.error(f"Error extracting text from response: {e}", exc_info=True)
-            # Try a desperate fallback
+            # Try a desperate fallback before raising
             try:
                 if hasattr(response, 'text'):
                     text = response.text
@@ -374,12 +374,10 @@ class LLMService:
                         return text
             except Exception:
                 pass
-            # ✅ FIX: Return fallback message instead of empty string
-            return "ขออภัยค่ะ เกิดข้อผิดพลาดในการดึงข้อมูลคำตอบ กรุณาลองใหม่อีกครั้งนะคะ"
+            raise LLMException(f"Failed to extract text from Gemini response: {e}") from e
         except Exception as e:
             logger.error(f"Unexpected error extracting text from response: {e}", exc_info=True)
-            # ✅ FIX: Return fallback message instead of empty string
-            return "ขออภัยค่ะ เกิดข้อผิดพลาดในการสร้างคำตอบ กรุณาลองใหม่อีกครั้งนะคะ"
+            raise LLMException(f"Unexpected error extracting Gemini response: {e}") from e
 
     @retry(
         retry=retry_if_exception_type(json.JSONDecodeError),
@@ -524,22 +522,22 @@ class LLMServiceWithMCP(LLMService):
                 raise LLMException("Google Generative AI library not installed. Please install: pip install google-generativeai")
             
             try:
-                from google import genai
-                from google.genai import types
-                
                 if not settings.gemini_api_key:
                     raise LLMException("GEMINI_API_KEY not set in environment")
-                
-                self.mcp_client = genai.Client(api_key=settings.gemini_api_key)
+
+                # Reuse the shared client created by LLMService.__init__
+                self.mcp_client = self._gemini_client
                 self.mcp_model_name = settings.gemini_model_name
-                self.timeout = min(settings.gemini_timeout_seconds, 30)  # Strict 30s timeout
-                
+                self.timeout = max(settings.gemini_timeout_seconds, 30)  # At least 30s for tool calls
+
                 # Convert MCP tools to Gemini function declarations
                 from app.services.mcp_server import ALL_MCP_TOOLS
                 self.tools = self._convert_mcp_to_gemini_tools(ALL_MCP_TOOLS)
-                
+
                 masked_key = f"{settings.gemini_api_key[:6]}...{settings.gemini_api_key[-4:]}" if len(settings.gemini_api_key) > 10 else "INVALID_KEY"
                 logger.info(f"LLMServiceWithMCP initialized with Gemini + {len(ALL_MCP_TOOLS)} tools, model: {self.mcp_model_name}, key: {masked_key}")
+            except LLMException:
+                raise
             except Exception as e:
                 logger.error(f"Failed to initialize Gemini MCP support: {e}. Tool calling will not work.", exc_info=True)
                 raise LLMException(f"Failed to initialize MCP support: {e}") from e
@@ -566,6 +564,7 @@ class LLMServiceWithMCP(LLMService):
                 if schema is not None:
                     properties[param_name] = schema
             if not properties:
+                logger.warning(f"MCP tool '{tool['name']}' has no valid properties after schema conversion — skipping tool registration")
                 continue
             func_decl = types.FunctionDeclaration(
                 name=tool["name"],
@@ -784,9 +783,10 @@ class LLMServiceWithMCP(LLMService):
                             text_response += part.text
                     
                     if has_function_call:
+                        # Gemini expects function responses with role="tool"
                         conversation_history.append(
                             types.Content(
-                                role="user",
+                                role="tool",
                                 parts=function_responses
                             )
                         )
@@ -854,7 +854,7 @@ class LLMServiceWithMCP(LLMService):
                 config=config
             )
         
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _call)
 
 

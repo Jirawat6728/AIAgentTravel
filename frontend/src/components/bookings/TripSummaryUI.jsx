@@ -258,24 +258,19 @@ function splitFlightSegmentsToOutboundInbound(segments, travelSlots) {
 export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidation, workflowValidation }) {
   if (!plan) return null;
   
-  // ✅ แสดง validation status ถ้ามี
-  const showValidation = cacheValidation && !cacheValidation.valid;
   const validationIssues = cacheValidation?.issues || [];
   const validationWarnings = cacheValidation?.warnings || [];
-  
-  // ✅ แสดง workflow validation
-  const workflowIssues = workflowValidation?.completeness_issues || [];
-  const currentWorkflowStep = workflowValidation?.current_step || "unknown";
-  const isWorkflowComplete = workflowValidation?.is_complete || false;
 
   const currency =
     plan?.price_breakdown?.currency ||
     plan?.currency ||
     plan?.flight?.currency ||
+    plan?.travel?.flights?.currency ||
     plan?.hotel?.currency ||
+    plan?.accommodation?.currency ||
     'THB';
 
-  // ✅ ราคารวม: จาก plan หรือคำนวณจาก flight+hotel+transport แบบ catalog
+  // ✅ ราคารวม: รองรับทั้ง structure เก่าและใหม่
   const total =
     typeof plan?.total_price === 'number'
       ? plan.total_price
@@ -284,9 +279,9 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
         : typeof plan?.summary?.total_price === 'number'
           ? plan.summary.total_price
           : (() => {
-              const f = (plan?.flight?.total_price ?? plan?.flight?.price_total) || 0;
-              const h = (plan?.hotel?.total_price ?? plan?.hotel?.price_total) || 0;
-              const t = (plan?.transport?.price ?? plan?.transport?.price_amount) || 0;
+              const f = (plan?.flight?.total_price ?? plan?.flight?.price_total ?? plan?.travel?.flights?.total_price) || 0;
+              const h = (plan?.hotel?.total_price ?? plan?.hotel?.price_total ?? plan?.accommodation?.total_price) || 0;
+              const t = (plan?.transport?.price ?? plan?.transport?.price_amount ?? plan?.travel?.ground_transport?.price) || 0;
               const sum = Number(f) + Number(h) + Number(t);
               return sum > 0 ? sum : undefined;
             })();
@@ -295,17 +290,17 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
 
   const origin = travelSlots?.origin_city || travelSlots?.origin || travelSlots?.origin_iata || '';
   const dest = travelSlots?.destination_city || travelSlots?.destination || travelSlots?.destination_iata || '';
-  const dateGo = travelSlots?.departure_date || travelSlots?.start_date || '';
+  const dateGo = travelSlots?.departure_date || travelSlots?.start_date || travelSlots?.check_in || '';
   
   // ✅ คำนวณวันกลับถ้ายังไม่มี
-  let dateBack = travelSlots?.return_date || travelSlots?.end_date || '';
+  let dateBack = travelSlots?.return_date || travelSlots?.end_date || travelSlots?.check_out || '';
   if (!dateBack && dateGo && travelSlots?.nights != null) {
     try {
       const startDate = new Date(dateGo);
       const nights = parseInt(travelSlots.nights) || 0;
       const returnDate = new Date(startDate);
       returnDate.setDate(returnDate.getDate() + nights);
-      dateBack = returnDate.toISOString().split('T')[0]; // ✅ แปลงเป็น YYYY-MM-DD
+      dateBack = returnDate.toISOString().split('T')[0];
     } catch (e) {
       console.error('Error calculating return date:', e);
     }
@@ -316,24 +311,41 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
     travelSlots?.children != null && Number(travelSlots.children) > 0 ? `${travelSlots.children} เด็ก` : null,
   ].filter(Boolean).join(', ');
 
-  // ✅ Extract flight details
-  const flight = plan?.flight || {};
+  // ✅ Extract flight details — รองรับทั้ง plan.flight และ plan.travel.flights
+  const flightData = plan?.flight || plan?.travel?.flights || {};
+  const flight = flightData;
   const flightSegments = flight?.segments || [];
   const firstSegment = flightSegments[0];
   const lastSegment = flightSegments[flightSegments.length - 1];
   // ✅ ถ้าไม่มี outbound/inbound แยกจาก API ให้แยกจาก segments เพื่อแสดงขาไป/ขากลับ
-  const hasOutboundInbound = flight?.outbound?.length > 0 || flight?.inbound?.length > 0;
+  const hasOutboundInbound = (flight?.outbound?.length > 0) || (flight?.inbound?.length > 0);
   const split = hasOutboundInbound ? null : splitFlightSegmentsToOutboundInbound(flightSegments, travelSlots);
   const outboundSegments = hasOutboundInbound ? (flight.outbound || []) : (split?.outbound || []);
   const inboundSegments = hasOutboundInbound ? (flight.inbound || []) : (split?.inbound || []);
   
-  // ✅ Extract hotel details
-  const hotel = plan?.hotel || {};
+  // ✅ Extract hotel details — รองรับทั้ง plan.hotel และ plan.accommodation
+  const hotel = plan?.hotel || plan?.accommodation || {};
   const hotelSegments = hotel?.segments || [];
   
-  // ✅ Extract transport details
-  const transport = plan?.transport || {};
+  // ✅ Extract transport details — รองรับทั้ง plan.transport และ plan.travel.ground_transport
+  const transportRaw = plan?.transport || plan?.travel?.ground_transport || {};
+  const transport = Array.isArray(transportRaw) ? { segments: transportRaw } : transportRaw;
   const transportSegments = transport?.segments || [];
+
+  // ✅ ตรวจสอบว่ามีข้อมูลอะไรบ้าง เพื่อแสดง title ที่เหมาะสม
+  const hasFlightData = flightSegments.length > 0 || outboundSegments.length > 0;
+  const hasHotelData = hotelSegments.length > 0 || !!hotel.hotelName;
+  const hasTransportData = transportSegments.length > 0 || !!transport.type;
+  const isRoundTrip = inboundSegments.length > 0 || !!dateBack;
+  
+  // ✅ Title ตามสถานการณ์
+  const summaryTitle = (() => {
+    if (hasFlightData && hasHotelData) return '✅ สรุปทริป (เที่ยวบิน + ที่พัก)';
+    if (hasFlightData && !hasHotelData) return '✅ สรุปทริป (เที่ยวบิน)';
+    if (!hasFlightData && hasHotelData) return '✅ สรุปทริป (ที่พัก)';
+    if (hasTransportData) return '✅ สรุปทริป (การเดินทาง)';
+    return '✅ สรุปทริป';
+  })();
 
   // ✅ สรุปจำนวนตัวเลือกจาก plan (fallback เมื่อ cache แสดง 0 ทั้งหมด)
   const outboundList = flight?.outbound || plan?.travel?.flights?.outbound || [];
@@ -354,7 +366,7 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
     <div className="plan-card plan-card-summary">
       <div className="plan-card-header">
         <div className="plan-card-title">
-          <span className="plan-card-label">✅ สรุปทริป</span>
+          <span className="plan-card-label">{summaryTitle}</span>
         </div>
       </div>
 
@@ -362,10 +374,10 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
       <div className="plan-card-section">
         <div className="plan-card-section-title">🧾 ภาพรวม</div>
         <div className="plan-card-section-body">
-          {kv('ต้นทาง → ปลายทาง', origin && dest ? `${origin} → ${dest}` : '')}
-          {kv('วันเดินทาง', formatThaiDate(dateGo))}
-          {kv('วันกลับ', formatThaiDate(dateBack))}
-          {kv('ผู้โดยสาร', pax)}
+          {(origin || dest) && kv('ต้นทาง → ปลายทาง', origin && dest ? `${origin} → ${dest}` : origin || dest)}
+          {dateGo && kv(hasHotelData && !hasFlightData ? 'วันเช็คอิน' : 'วันเดินทาง', formatThaiDate(dateGo))}
+          {dateBack && kv(hasHotelData && !hasFlightData ? 'วันเช็คเอาท์' : 'วันกลับ', formatThaiDate(dateBack))}
+          {pax && kv('ผู้โดยสาร', pax)}
         </div>
       </div>
 
@@ -883,9 +895,11 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
   if (!plan) return null;
 
   const flight = plan.flight || plan.travel?.flights || {};
-  const hotel = plan.hotel || plan.accommodation || {};
-  const transport = plan.transport || plan.travel?.ground_transport || {};
-  const currency = plan.currency || 'THB';
+  const hotelRaw = plan.hotel || plan.accommodation || {};
+  const hotel = hotelRaw;
+  const transportRaw = plan.transport || plan.travel?.ground_transport || {};
+  const transport = Array.isArray(transportRaw) ? { segments: transportRaw } : transportRaw;
+  const currency = plan.currency || plan.flight?.currency || plan.travel?.flights?.currency || plan.hotel?.currency || plan.accommodation?.currency || 'THB';
   // ✅ สรุปจำนวนตัวเลือกจาก plan (fallback เมื่อ cache แสดง 0 ทั้งหมด)
   const outboundList = flight.outbound || plan.travel?.flights?.outbound || [];
   const inboundList = flight.inbound || plan.travel?.flights?.inbound || [];
@@ -915,14 +929,18 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
   const hotelSegments = hotel.segments || [];
   const transportSegments = transport.segments || [];
   // ✅ ถ้าไม่มี outbound/inbound แยกจาก API ให้แยกจาก segments เพื่อแสดงขาไป/ขากลับ
-  const hasOutboundInboundFinal = flight.outbound?.length > 0 || flight.inbound?.length > 0;
+  const hasOutboundInboundFinal = (flight.outbound?.length > 0) || (flight.inbound?.length > 0);
   const splitFinal = hasOutboundInboundFinal ? null : splitFlightSegmentsToOutboundInbound(flightSegments, travelSlots);
   const outboundSegmentsFinal = hasOutboundInboundFinal ? (flight.outbound || []) : (splitFinal?.outbound || []);
   const inboundSegmentsFinal = hasOutboundInboundFinal ? (flight.inbound || []) : (splitFinal?.inbound || []);
 
+  // ✅ ตรวจสอบว่ามีข้อมูลอะไรบ้าง
+  const hasFinalFlightData = flightSegments.length > 0 || outboundSegmentsFinal.length > 0;
+  const hasFinalHotelData = hotelSegments.length > 0 || !!hotel.hotelName;
+
   // Format dates
-  const startDate = formatThaiDate(travelSlots?.start_date);
-  const returnDate = formatThaiDate(travelSlots?.return_date || travelSlots?.end_date);
+  const startDate = formatThaiDate(travelSlots?.departure_date || travelSlots?.start_date || travelSlots?.check_in);
+  const returnDate = formatThaiDate(travelSlots?.return_date || travelSlots?.end_date || travelSlots?.check_out);
   const nights = travelSlots?.nights || 0;
   const adults = travelSlots?.adults || 1;
   const children = travelSlots?.children || 0;
@@ -931,7 +949,12 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
     <div className="plan-card plan-card-final-summary">
       <div className="plan-card-header">
         <div className="plan-card-title">
-          <span className="plan-card-label">📋 สรุปทริปสุดท้าย</span>
+          <span className="plan-card-label">
+            {hasFinalFlightData && hasFinalHotelData ? '📋 สรุปทริปสุดท้าย (เที่ยวบิน + ที่พัก)' :
+             hasFinalFlightData ? '📋 สรุปทริปสุดท้าย (เที่ยวบิน)' :
+             hasFinalHotelData ? '📋 สรุปทริปสุดท้าย (ที่พัก)' :
+             '📋 สรุปทริปสุดท้าย'}
+          </span>
           <span className="plan-card-tag final-summary-tag">พร้อมจอง</span>
         </div>
       </div>

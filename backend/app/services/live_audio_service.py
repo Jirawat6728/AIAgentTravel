@@ -305,57 +305,48 @@ class LiveAudioService:
             Dictionary with 'type' ('audio' or 'text') and 'data'
         """
         try:
-            # ✅ FIX: Use session.receive() method which returns async iterator
             async for message in session.receive():
-                # Check for server content (model responses)
+                # ── server_content: audio / text / turn_complete ──────
                 if hasattr(message, 'server_content') and message.server_content:
-                    # Check for model_turn
-                    if hasattr(message.server_content, 'model_turn') and message.server_content.model_turn:
-                        model_turn = message.server_content.model_turn
-                        
-                        # Process parts in model turn
+                    sc = message.server_content
+
+                    # model_turn → audio + text parts
+                    if hasattr(sc, 'model_turn') and sc.model_turn:
+                        model_turn = sc.model_turn
                         if hasattr(model_turn, 'parts') and model_turn.parts:
                             for part in model_turn.parts:
-                                # Audio response
+                                # Audio (inline_data)
                                 if hasattr(part, 'inline_data') and part.inline_data:
-                                    if part.inline_data.mime_type.startswith('audio/'):
-                                        audio_base64 = part.inline_data.data
-                                        audio_bytes = base64.b64decode(audio_base64)
-                                        
+                                    mime = getattr(part.inline_data, 'mime_type', '')
+                                    if mime.startswith('audio/'):
+                                        raw = part.inline_data.data
+                                        # data อาจเป็น bytes หรือ base64 str
+                                        if isinstance(raw, (bytes, bytearray)):
+                                            audio_bytes = bytes(raw)
+                                        else:
+                                            audio_bytes = base64.b64decode(raw)
                                         if on_audio_chunk:
                                             await on_audio_chunk(audio_bytes)
-                                        
-                                        yield {
-                                            "type": "audio",
-                                            "data": audio_bytes,
-                                            "mime_type": part.inline_data.mime_type
-                                        }
-                                
-                                # Text response
+                                        yield {"type": "audio", "data": audio_bytes, "mime_type": mime}
+
+                                # Text
                                 if hasattr(part, 'text') and part.text:
-                                    text = part.text
-                                    
                                     if on_text_chunk:
-                                        await on_text_chunk(text)
-                                    
-                                    yield {
-                                        "type": "text",
-                                        "data": text
-                                    }
-                
-                # Handle other message types (e.g., tool calls, interruptions)
-                if hasattr(message, 'tool_call') and message.tool_call:
-                    yield {
-                        "type": "tool_call",
-                        "data": message.tool_call
-                    }
-                
+                                        await on_text_chunk(part.text)
+                                    yield {"type": "text", "data": part.text}
+
+                    # turn_complete → แจ้ง frontend ว่า AI พูดจบแล้ว
+                    if getattr(sc, 'turn_complete', False):
+                        yield {"type": "turn_complete"}
+
+                # ── interruption ──────────────────────────────────────
                 if hasattr(message, 'interruption') and message.interruption:
-                    yield {
-                        "type": "interruption",
-                        "data": message.interruption
-                    }
-                    
+                    yield {"type": "interruption", "data": message.interruption}
+
+                # ── tool_call (future use) ────────────────────────────
+                if hasattr(message, 'tool_call') and message.tool_call:
+                    yield {"type": "tool_call", "data": message.tool_call}
+
         except Exception as e:
             logger.error(f"Error receiving audio stream: {e}", exc_info=True)
             raise

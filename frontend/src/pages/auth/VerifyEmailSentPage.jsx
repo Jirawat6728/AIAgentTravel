@@ -1,36 +1,39 @@
-import React, { useEffect, useRef } from 'react';
-import Swal from 'sweetalert2';
+import React from 'react';
+import './VerifyEmailSentPage.css';
 
-export default function VerifyEmailSentPage({ email, onNavigateToHome, onNavigateToSettings }) {
-  const didShow = useRef(false);
+export default function VerifyEmailSentPage({ email, from, onNavigateToHome, onNavigateToLogin, onNavigateToSettings }) {
+  const emailDisplay = email || 'อีเมลของคุณ';
 
-  useEffect(() => {
-    if (didShow.current) return;
-    didShow.current = true;
-
-    const emailDisplay = email || 'อีเมลของคุณ';
-    const html = `
-      <p style="color:#6366f1; font-weight:600; margin:0 0 1rem; word-break:break-all;">${emailDisplay}</p>
-      <p style="color:#4b5563; margin:0 0 0.75rem; line-height:1.6;">
-        เราได้ส่งลิงก์ยืนยันอีเมลไปที่กล่องจดหมายของคุณแล้ว<br/>
-        กรุณาคลิกปุ่ม <strong>「ยืนยันอีเมล」</strong> ในอีเมลเพื่อดำเนินการต่อ
-      </p>
-      <p style="color:#9ca3af; font-size:0.9rem; margin:0;">ไม่พบอีเมล? ตรวจสอบโฟลเดอร์ Spam หรือ Junk</p>
-    `;
-
-    Swal.fire({
-      icon: 'info',
-      title: 'กรุณาตรวจสอบอีเมล',
-      html,
-      showConfirmButton: true,
-      confirmButtonText: 'ตกลง',
-      confirmButtonColor: '#6366f1',
-      allowOutsideClick: true,
-      allowEscapeKey: true,
-    }).then(() => {
+  const handleContinue = () => {
+    if (from === 'register' || from === 'login') {
+      onNavigateToLogin?.();
+    } else {
       onNavigateToSettings?.();
-    });
-  }, [email, onNavigateToHome, onNavigateToSettings]);
+    }
+  };
 
-  return null;
+  return (
+    <div className="verify-email-sent-container">
+      <div className="verify-email-sent-card">
+        <div className="verify-email-sent-icon">📧</div>
+        <h1>ตรวจสอบอีเมลของคุณ</h1>
+        <p className="verify-email-sent-email">{emailDisplay}</p>
+        <p className="verify-email-sent-desc">
+          เราได้ส่งลิงก์ยืนยันอีเมลไปที่กล่องจดหมายของคุณแล้ว<br />
+          กรุณาคลิก <strong>「ยืนยันอีเมล」</strong> ในอีเมลเพื่อเข้าสู่ระบบ
+        </p>
+        <p className="verify-email-sent-note">
+          ไม่พบอีเมล? ตรวจสอบโฟลเดอร์ Spam หรือ Junk
+        </p>
+        <div className="verify-email-sent-actions">
+          <button className="btn-primary" onClick={handleContinue}>
+            {from === 'register' || from === 'login' ? 'ไปหน้าเข้าสู่ระบบ' : 'กลับไปตั้งค่า'}
+          </button>
+          <button className="btn-secondary" onClick={onNavigateToHome}>
+            ไปหน้าแรก
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }

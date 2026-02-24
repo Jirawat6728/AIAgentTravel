@@ -158,77 +158,26 @@ async def monitoring_health() -> Dict[str, Any]:
 
 
 # =============================================================================
-# Redis Sync Endpoints
+# Redis Sync Endpoints (no-op — Redis removed, using MongoDB 100%)
 # =============================================================================
 
 @router.post("/sync/redis/session/{session_id}")
 async def sync_session_from_redis(session_id: str) -> Dict[str, Any]:
-    """
-    Manually sync a specific session from Redis to long-term memory (memories collection)
-    
-    Args:
-        session_id: Session identifier to sync
-        
-    Returns:
-        Sync result with status
-    """
-    try:
-        from app.storage.redis_sync import redis_sync_service
-        
-        result = await redis_sync_service.sync_session_with_history(session_id)
-        
-        return {
-            "ok": True,
-            "session_id": session_id,
-            "sync_result": result,
-            "message": "Session synced to long-term memory successfully" if result.get("session") or result.get("history") else "No data to sync"
-        }
-    except Exception as e:
-        logger.error(f"Error syncing session {session_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    """No-op: Redis removed — data is already in MongoDB."""
+    return {"ok": True, "session_id": session_id, "message": "MongoDB-only mode: no sync needed"}
 
 
 @router.post("/sync/redis/all")
 async def sync_all_from_redis() -> Dict[str, Any]:
-    """
-    Manually sync all sessions from Redis to long-term memory (memories collection)
-    
-    Returns:
-        Sync statistics
-    """
-    try:
-        from app.storage.redis_sync import redis_sync_service
-        
-        stats = await redis_sync_service.sync_all_to_long_term_memory()
-        
-        return {
-            "ok": True,
-            "message": "Bulk sync to long-term memory completed",
-            "stats": stats
-        }
-    except Exception as e:
-        logger.error(f"Error in bulk sync: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    """No-op: Redis removed — data is already in MongoDB."""
+    return {"ok": True, "message": "MongoDB-only mode: no sync needed", "stats": {}}
 
 
 @router.get("/sync/redis/status")
 async def get_sync_status() -> Dict[str, Any]:
-    """
-    Get Redis sync service status
-    
-    Returns:
-        Current sync service status and statistics
-    """
-    try:
-        from app.storage.redis_sync import redis_sync_service
-        
-        status = await redis_sync_service.get_sync_status()
-        
-        return {
-            "ok": True,
-            "timestamp": datetime.utcnow().isoformat(),
-            "status": status
-        }
-    except Exception as e:
-        logger.error(f"Error getting sync status: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    """No-op: Redis removed."""
+    return {
+        "ok": True,
+        "timestamp": datetime.utcnow().isoformat(),
+        "status": {"redis_available": False, "redis_removed": True, "message": "Redis removed — using MongoDB only"}
+    }

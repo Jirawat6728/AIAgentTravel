@@ -6,7 +6,7 @@ import { useFontSize } from '../../context/FontSizeContext';
 import { useLanguage } from '../../context/LanguageContext';
 import './FlightsPage.css';
 
-export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBookings, onNavigateToAI, onNavigateToFlights, onNavigateToHotels, onNavigateToCarRentals, onNavigateToHome = null, onNavigateToProfile = null, onNavigateToSettings = null }) {
+export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBookings, onNavigateToAI, onNavigateToFlights, onNavigateToHotels, onNavigateToCarRentals, onNavigateToHome = null, onNavigateToProfile = null, onNavigateToSettings = null, notificationCount = 0, notifications = [], onMarkNotificationAsRead = null, onClearAllNotifications = null }) {
   const theme = useTheme();
   const { t } = useLanguage();
   const fontSize = useFontSize();
@@ -127,11 +127,27 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
           }
         }
       };
+      const firstSeg = f.itineraries?.[0]?.segments?.[0] || {};
+      const lastSeg = f.itineraries?.[0]?.segments?.slice(-1)[0] || {};
       const travelSlots = {
         origin_city: origin,
         destination_city: destination,
         departure_date: date,
-        adults: 1
+        adults: 1,
+        // ✅ เพิ่ม flights array เพื่อให้ MyBookings แสดง airline logo ได้
+        flights: [{
+          selected_option: {
+            raw_data: f,
+            price_amount: parseFloat(f.price?.total) || 0,
+            currency: f.price?.currency || "THB",
+            display_name: `${firstSeg.carrierCode || ''}${firstSeg.number || ''}`
+          }
+        }],
+        source: 'flight_search',
+        airline_code: firstSeg.carrierCode || '',
+        flight_number: `${firstSeg.carrierCode || ''}${firstSeg.number || ''}`,
+        departure_iata: firstSeg.departure?.iataCode || '',
+        arrival_iata: lastSeg.arrival?.iataCode || ''
       };
       const payload = {
         trip_id: tripId,
@@ -202,6 +218,15 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
         onNavigateToHome={onNavigateToHome}
         onNavigateToProfile={onNavigateToProfile}
         onNavigateToSettings={onNavigateToSettings}
+        onNavigateToBookings={onNavigateToBookings}
+        onNavigateToAI={onNavigateToAI}
+        onNavigateToFlights={onNavigateToFlights}
+        onNavigateToHotels={onNavigateToHotels}
+        onNavigateToCarRentals={onNavigateToCarRentals}
+        notificationCount={notificationCount}
+        notifications={notifications}
+        onMarkNotificationAsRead={onMarkNotificationAsRead}
+        onClearAllNotifications={onClearAllNotifications}
         isConnected={true}
       />
       <div className="flights-content" data-theme={theme} data-font-size={fontSize}>

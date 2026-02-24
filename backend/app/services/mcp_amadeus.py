@@ -42,9 +42,24 @@ AMADEUS_TOOLS = [
                     "description": "Number of adult passengers (default: 1)",
                     "default": 1
                 },
+                "children": {
+                    "type": "integer",
+                    "description": "Number of child passengers aged 2-11 (default: 0)",
+                    "default": 0
+                },
+                "infants": {
+                    "type": "integer",
+                    "description": "Number of infant passengers under 2 (default: 0)",
+                    "default": 0
+                },
                 "return_date": {
                     "type": "string",
                     "description": "Optional return date for round-trip in YYYY-MM-DD format"
+                },
+                "non_stop": {
+                    "type": "boolean",
+                    "description": "If true, search only for direct (non-stop) flights",
+                    "default": False
                 }
             },
             "required": ["origin", "destination", "departure_date"]
@@ -179,19 +194,42 @@ class AmadeusMCP:
 
     async def search_flights(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Search flights using Amadeus API. Returns raw Amadeus data in 'flights' for pipeline normalization."""
-        origin = (params.get("origin") or "BKK").strip() or "BKK"
-        destination = (params.get("destination") or "NRT").strip() or "NRT"
+        origin = (params.get("origin") or "").strip()
+        destination = (params.get("destination") or "").strip()
+
+        if not origin:
+            return {
+                "success": False,
+                "tool": "search_flights",
+                "error": "Origin is required. Please provide an airport code (e.g. BKK) or city name.",
+                "flights": [],
+                "results_count": 0,
+            }
+        if not destination:
+            return {
+                "success": False,
+                "tool": "search_flights",
+                "error": "Destination is required. Please provide an airport code (e.g. NRT) or city name.",
+                "flights": [],
+                "results_count": 0,
+            }
+
         departure_date = params.get("departure_date") or params.get("date")
-        adults = max(1, int(params.get("adults", 1) or params.get("guests", 1)))
+        adults = max(1, int(params.get("adults", 1) or params.get("guests", 1) or 1))
+        children = max(0, int(params.get("children", 0) or 0))
+        infants = max(0, int(params.get("infants", 0) or 0))
 
         departure_date = self._normalize_flight_date(departure_date)
         if not departure_date:
             departure_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
             logger.info(f"📅 No departure_date provided, using default: {departure_date}")
 
-        # ✅ บินตรง: ใช้ non_stop จาก params (เมื่อผู้ใช้ขอ "บินตรง" / direct)
-        non_stop = params.get("non_stop") is True or params.get("direct_flight") is True
-        logger.info(f"🔍 Searching flights: {origin} → {destination} on {departure_date} for {adults} adult(s) (non_stop={non_stop})")
+        # non_stop can come from the schema field or legacy direct_flight alias
+        non_stop = bool(params.get("non_stop")) or bool(params.get("direct_flight"))
+        logger.info(
+            f"🔍 Searching flights: {origin} → {destination} on {departure_date} "
+            f"for {adults} adult(s), {children} child(ren), {infants} infant(s) (non_stop={non_stop})"
+        )
 
         try:
             results = await self.orchestrator.get_flights(
@@ -203,7 +241,7 @@ class AmadeusMCP:
             )
             logger.info(f"📊 Amadeus API returned {len(results) if results else 0} flight results")
 
-            # ✅ Validate: ถ้าขอบินตรง ให้กรองเฉพาะเที่ยวบินที่จริงๆ เป็น non-stop (ป้องกัน API คืนต่อเครื่องมา)
+            # Filter non-stop if requested (API may still return connecting flights)
             if non_stop and results:
                 def _is_non_stop_offer(offer: dict) -> bool:
                     itins = offer.get("itineraries") or []
@@ -214,9 +252,12 @@ class AmadeusMCP:
                 before = len(results)
                 results = [r for r in results if _is_non_stop_offer(r)]
                 if before > len(results):
-                    logger.warning(f"✅ Validated non-stop: filtered out {before - len(results)} connecting offers (kept {len(results)} direct)")
+                    logger.warning(
+                        f"✅ Validated non-stop: filtered out {before - len(results)} connecting offers "
+                        f"(kept {len(results)} direct)"
+                    )
 
-            if not results or len(results) == 0:
+            if not results:
                 try:
                     search_date = datetime.strptime(departure_date, "%Y-%m-%d")
                     today = datetime.now()
@@ -226,31 +267,37 @@ class AmadeusMCP:
                     if days_ahead < 0:
                         date_warning = f"⚠️ Date is in the past ({-days_ahead} days ago)"
                     elif days_ahead > max_days:
-                        date_warning = f"⚠️ Date is {days_ahead} days ahead (max: {max_days} days) - Amadeus may not have data"
+                        date_warning = (
+                            f"⚠️ Date is {days_ahead} days ahead (max: {max_days} days) "
+                            "- Amadeus may not have data yet"
+                        )
                 except Exception:
                     date_warning = ""
 
-                logger.error(
-                    f"❌ No flights found for {origin} → {destination} on {departure_date}\n"
-                    f"   {date_warning}"
-                )
+                logger.error(f"❌ No flights found for {origin} → {destination} on {departure_date}\n   {date_warning}")
                 return {
                     "success": True,
                     "tool": "search_flights",
                     "results_count": 0,
                     "flights": [],
-                    "message": f"No flights found for {origin} → {destination} on {departure_date}. {date_warning or 'Please try different dates or check route availability.'}",
+                    "message": (
+                        f"No flights found for {origin} → {destination} on {departure_date}. "
+                        f"{date_warning or 'Please try different dates or check route availability.'}"
+                    ),
                     "search_params": {
                         "origin": origin,
                         "destination": destination,
                         "date": departure_date,
-                        "adults": adults
+                        "adults": adults,
+                        "children": children,
+                        "infants": infants,
                     },
                     "diagnostics": {
                         "date_warning": date_warning,
                         "suggestion": "Try dates within 11 months from today or check if route is available",
-                    }
+                    },
                 }
+
             return {
                 "success": True,
                 "tool": "search_flights",
@@ -261,8 +308,10 @@ class AmadeusMCP:
                     "destination": destination,
                     "date": departure_date,
                     "adults": adults,
+                    "children": children,
+                    "infants": infants,
                     "non_stop": non_stop,
-                }
+                },
             }
         except Exception as e:
             logger.error(f"❌ Error searching flights: {e}", exc_info=True)
@@ -272,16 +321,21 @@ class AmadeusMCP:
                 "error": str(e),
                 "results_count": 0,
                 "flights": [],
-                "search_params": {"origin": origin, "destination": destination, "date": departure_date, "adults": adults}
+                "search_params": {
+                    "origin": origin,
+                    "destination": destination,
+                    "date": departure_date,
+                    "adults": adults,
+                },
             }
 
     async def search_hotels(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Search hotels using Amadeus API with error handling."""
         try:
-            location = params.get("location") or params.get("location_name", "Tokyo")
+            location = params.get("location") or params.get("location_name", "")
             check_in = params.get("check_in")
             check_out = params.get("check_out")
-            guests = params.get("guests", 1)
+            guests = int(params.get("guests", 1) or 1)
 
             if not location:
                 raise AgentException("Location is required")
@@ -304,47 +358,55 @@ class AmadeusMCP:
                 location_name=location,
                 check_in=check_in,
                 check_out=check_out,
-                guests=guests
+                guests=guests,
             )
             logger.info(f"📊 Amadeus API returned {len(results) if results else 0} hotel results")
 
-            # Fallback: try ±1 day if no results
-            if not results or len(results) == 0:
+            # Fallback: try both ±1 day if no results
+            if not results:
                 try:
                     check_in_dt = datetime.fromisoformat(check_in)
                     check_out_dt = datetime.fromisoformat(check_out)
                     fallback_dates = [
-                        ((check_in_dt + timedelta(days=-1)).strftime("%Y-%m-%d"),
-                         (check_out_dt + timedelta(days=-1)).strftime("%Y-%m-%d")),
-                        ((check_in_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
-                         (check_out_dt + timedelta(days=1)).strftime("%Y-%m-%d"))
+                        (
+                            (check_in_dt + timedelta(days=-1)).strftime("%Y-%m-%d"),
+                            (check_out_dt + timedelta(days=-1)).strftime("%Y-%m-%d"),
+                        ),
+                        (
+                            (check_in_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+                            (check_out_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+                        ),
                     ]
-                    for fb_check_in, fb_check_out in fallback_dates[:1]:
-                        fb_results = await asyncio.wait_for(
-                            self.orchestrator.get_hotels(
-                                location_name=location,
-                                check_in=fb_check_in,
-                                check_out=fb_check_out,
-                                guests=guests
-                            ),
-                            timeout=5.0
-                        )
-                        if fb_results and len(fb_results) > 0:
-                            for item in fb_results:
-                                item["_fallback_check_in"] = fb_check_in
-                                item["_fallback_check_out"] = fb_check_out
-                            results = fb_results[:3]
-                            break
+                    for fb_check_in, fb_check_out in fallback_dates:
+                        try:
+                            fb_results = await asyncio.wait_for(
+                                self.orchestrator.get_hotels(
+                                    location_name=location,
+                                    check_in=fb_check_in,
+                                    check_out=fb_check_out,
+                                    guests=guests,
+                                ),
+                                timeout=5.0,
+                            )
+                            if fb_results:
+                                for item in fb_results:
+                                    item["_fallback_check_in"] = fb_check_in
+                                    item["_fallback_check_out"] = fb_check_out
+                                results = fb_results
+                                logger.info(f"Hotel fallback succeeded with dates {fb_check_in} – {fb_check_out}")
+                                break
+                        except Exception as fb_err:
+                            logger.warning(f"Hotel fallback {fb_check_in} failed: {fb_err}")
                 except Exception as e:
-                    logger.warning(f"Fallback hotel search failed: {e}")
+                    logger.warning(f"Hotel fallback search failed: {e}")
 
-            if not results or len(results) == 0:
+            if not results:
                 date_warning = ""
                 try:
                     check_in_dt = datetime.fromisoformat(check_in)
                     days_ahead = (check_in_dt - datetime.now()).days
                     if days_ahead < 0:
-                        date_warning = f"⚠️ Check-in date is in the past"
+                        date_warning = "⚠️ Check-in date is in the past"
                     elif days_ahead > 330:
                         date_warning = f"⚠️ Check-in date is {days_ahead} days ahead - Amadeus may not have data"
                 except Exception:
@@ -354,17 +416,26 @@ class AmadeusMCP:
                     "tool": "search_hotels",
                     "results_count": 0,
                     "hotels": [],
-                    "message": f"No hotels found in {location} for {check_in} to {check_out}. {date_warning or 'Please try different dates.'}",
-                    "search_params": {"location": location, "check_in": check_in, "check_out": check_out, "guests": guests},
-                    "diagnostics": {"date_warning": date_warning}
+                    "message": (
+                        f"No hotels found in {location} for {check_in} to {check_out}. "
+                        f"{date_warning or 'Please try different dates.'}"
+                    ),
+                    "search_params": {
+                        "location": location,
+                        "check_in": check_in,
+                        "check_out": check_out,
+                        "guests": guests,
+                    },
+                    "diagnostics": {"date_warning": date_warning},
                 }
 
+            # Separate original vs fallback results and show up to 5 total
             fallback_results = [r for r in results if r.get("_fallback_check_in")]
             original_results = [r for r in results if not r.get("_fallback_check_in")]
-            display_results = (original_results[:3] if len(original_results) >= 3 else original_results) + fallback_results[:2]
+            display_results = original_results[:3] + fallback_results[:2]
 
             formatted = []
-            for idx, hotel in enumerate(display_results[:3]):
+            for idx, hotel in enumerate(display_results):
                 try:
                     hotel_data = hotel.get("hotel", {})
                     offers = hotel.get("offers", [])
@@ -376,9 +447,16 @@ class AmadeusMCP:
                         "option_number": idx + 1,
                         "name": hotel_data.get("name", "Unknown Hotel"),
                         "rating": hotel_data.get("rating", 0),
-                        "address": hotel_data.get("address", {}).get("lines", [""])[0] if hotel_data.get("address", {}).get("lines") else "",
+                        "address": (
+                            hotel_data.get("address", {}).get("lines", [""])[0]
+                            if hotel_data.get("address", {}).get("lines")
+                            else ""
+                        ),
                         "price": {"total": price.get("total", "0"), "currency": price.get("currency", "THB")},
-                        "room_type": first_offer.get("room", {}).get("typeEstimated", {}).get("category", "Standard")
+                        "room_type": (
+                            first_offer.get("room", {}).get("typeEstimated", {}).get("category", "Standard")
+                        ),
+                        "_fallback": bool(hotel.get("_fallback_check_in")),
                     })
                 except Exception as e:
                     logger.warning(f"Error formatting hotel {idx + 1}: {e}")
@@ -389,11 +467,21 @@ class AmadeusMCP:
                 "tool": "search_hotels",
                 "results_count": len(formatted),
                 "hotels": formatted,
-                "search_params": {"location": location, "check_in": check_in, "check_out": check_out, "guests": guests}
+                "search_params": {
+                    "location": location,
+                    "check_in": check_in,
+                    "check_out": check_out,
+                    "guests": guests,
+                },
             }
         except AmadeusException as e:
             logger.error(f"Amadeus API error in search_hotels: {e}")
-            return {"success": False, "tool": "search_hotels", "error": f"Amadeus API error: {str(e)}", "search_params": params}
+            return {
+                "success": False,
+                "tool": "search_hotels",
+                "error": f"Amadeus API error: {str(e)}",
+                "search_params": params,
+            }
         except Exception as e:
             logger.error(f"Unexpected error in search_hotels: {e}", exc_info=True)
             return {"success": False, "tool": "search_hotels", "error": str(e), "search_params": params}
@@ -403,38 +491,61 @@ class AmadeusMCP:
         origin = params.get("origin", "")
         destination = params.get("destination", "")
         date = params.get("date", "")
-        passengers = params.get("passengers", 1)
+        passengers = int(params.get("passengers", 1) or 1)
 
-        airport_code = None
-        if isinstance(origin, str) and len(origin) == 3 and origin.isupper():
-            airport_code = origin
-        else:
-            try:
-                loc = await self.orchestrator.get_coordinates(origin)
-                airport_code = await self.orchestrator.find_nearest_iata(loc["lat"], loc["lng"])
-            except Exception as e:
-                logger.error(f"Could not resolve transfer origin from '{origin}': {e}")
-                return {"success": False, "tool": "search_transfers", "error": f"Could not resolve origin airport from '{origin}'"}
+        try:
+            airport_code: Optional[str] = None
+            if isinstance(origin, str) and len(origin) == 3 and origin.isupper():
+                airport_code = origin
+            else:
+                try:
+                    loc = await self.orchestrator.get_coordinates(origin)
+                    airport_code = await self.orchestrator.find_nearest_iata(loc["lat"], loc["lng"])
+                except Exception as e:
+                    logger.error(f"Could not resolve transfer origin from '{origin}': {e}")
+                    return {
+                        "success": False,
+                        "tool": "search_transfers",
+                        "error": f"Could not resolve origin airport from '{origin}'",
+                    }
 
-        results = await self.orchestrator.get_transfers(airport_code=airport_code, address=destination)
-        formatted = []
-        for idx, transfer in enumerate(results[:5]):
-            vehicle = transfer.get("vehicle", {})
-            price = transfer.get("price", {})
-            formatted.append({
-                "option_number": idx + 1,
-                "vehicle_type": vehicle.get("type", "Car"),
-                "category": vehicle.get("category", "Standard"),
-                "capacity": vehicle.get("capacity", 0),
-                "price": {"total": price.get("total", "0"), "currency": price.get("currency", "THB")}
-            })
-        return {
-            "success": True,
-            "tool": "search_transfers",
-            "results_count": len(formatted),
-            "transfers": formatted,
-            "search_params": {"origin": origin, "destination": destination, "date": date, "passengers": passengers}
-        }
+            results = await self.orchestrator.get_transfers(airport_code=airport_code, address=destination)
+            if results is None:
+                results = []
+
+            formatted = []
+            for idx, transfer in enumerate(results[:5]):
+                vehicle = transfer.get("vehicle", {})
+                price = transfer.get("price", {})
+                formatted.append({
+                    "option_number": idx + 1,
+                    "vehicle_type": vehicle.get("type", "Car"),
+                    "category": vehicle.get("category", "Standard"),
+                    "capacity": vehicle.get("capacity", 0),
+                    "price": {"total": price.get("total", "0"), "currency": price.get("currency", "THB")},
+                })
+
+            return {
+                "success": True,
+                "tool": "search_transfers",
+                "results_count": len(formatted),
+                "transfers": formatted,
+                "search_params": {
+                    "origin": origin,
+                    "destination": destination,
+                    "date": date,
+                    "passengers": passengers,
+                },
+            }
+        except Exception as e:
+            logger.error(f"Error in search_transfers: {e}", exc_info=True)
+            return {
+                "success": False,
+                "tool": "search_transfers",
+                "error": str(e),
+                "transfers": [],
+                "results_count": 0,
+            }
 
     async def search_transfers_by_geo(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Search transfers using exact geo coordinates."""
@@ -443,71 +554,121 @@ class AmadeusMCP:
         end_lat = params.get("end_lat")
         end_lng = params.get("end_lng")
         start_time = params.get("start_time")
-        passengers = params.get("passengers", 1)
+        passengers = int(params.get("passengers", 1) or 1)
 
-        results = await self.orchestrator.get_transfers_by_geo(
-            start_lat=start_lat, start_lng=start_lng,
-            end_lat=end_lat, end_lng=end_lng,
-            start_time=start_time, passengers=passengers
-        )
-        formatted = []
-        for idx, transfer in enumerate(results[:5]):
-            vehicle = transfer.get("vehicle", {})
-            price = transfer.get("price", {})
-            quotation = transfer.get("quotation", {})
-            formatted.append({
-                "option_number": idx + 1,
-                "vehicle_type": vehicle.get("type", "Car"),
-                "category": vehicle.get("category", "Standard"),
-                "capacity": vehicle.get("capacity", 0),
-                "price": {"total": price.get("total", "0"), "currency": price.get("currency", "THB")},
-                "provider": transfer.get("transferType", "PRIVATE"),
-                "duration": quotation.get("duration", "N/A"),
-                "distance": quotation.get("distance", "N/A")
-            })
-        return {
-            "success": True,
-            "tool": "search_transfers_by_geo",
-            "results_count": len(formatted),
-            "transfers": formatted,
-            "search_params": {
-                "start_coords": f"{start_lat},{start_lng}",
-                "end_coords": f"{end_lat},{end_lng}",
-                "start_time": start_time,
-                "passengers": passengers
+        try:
+            results = await self.orchestrator.get_transfers_by_geo(
+                start_lat=start_lat,
+                start_lng=start_lng,
+                end_lat=end_lat,
+                end_lng=end_lng,
+                start_time=start_time,
+                passengers=passengers,
+            )
+            if results is None:
+                results = []
+
+            formatted = []
+            for idx, transfer in enumerate(results[:5]):
+                vehicle = transfer.get("vehicle", {})
+                price = transfer.get("price", {})
+                quotation = transfer.get("quotation", {})
+                formatted.append({
+                    "option_number": idx + 1,
+                    "vehicle_type": vehicle.get("type", "Car"),
+                    "category": vehicle.get("category", "Standard"),
+                    "capacity": vehicle.get("capacity", 0),
+                    "price": {"total": price.get("total", "0"), "currency": price.get("currency", "THB")},
+                    "provider": transfer.get("transferType", "PRIVATE"),
+                    "duration": quotation.get("duration", "N/A"),
+                    "distance": quotation.get("distance", "N/A"),
+                })
+
+            return {
+                "success": True,
+                "tool": "search_transfers_by_geo",
+                "results_count": len(formatted),
+                "transfers": formatted,
+                "search_params": {
+                    "start_coords": f"{start_lat},{start_lng}",
+                    "end_coords": f"{end_lat},{end_lng}",
+                    "start_time": start_time,
+                    "passengers": passengers,
+                },
             }
-        }
+        except Exception as e:
+            logger.error(f"Error in search_transfers_by_geo: {e}", exc_info=True)
+            return {
+                "success": False,
+                "tool": "search_transfers_by_geo",
+                "error": str(e),
+                "transfers": [],
+                "results_count": 0,
+            }
 
     async def search_activities(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Search activities using Amadeus API."""
-        location = params.get("location", "Tokyo")
-        radius = params.get("radius", 10)
+        location = (params.get("location") or "").strip()
+        radius = int(params.get("radius", 10) or 10)
+
+        if not location:
+            return {
+                "success": False,
+                "tool": "search_activities",
+                "error": "Location is required for activity search.",
+                "activities": [],
+                "results_count": 0,
+            }
+
         try:
             loc_info = await self.orchestrator.get_coordinates(location)
             lat, lng = loc_info["lat"], loc_info["lng"]
         except Exception as e:
-            logger.warning(f"Could not geocode {location}: {e}")
-            lat, lng = 35.6762, 139.6503
+            logger.error(f"Could not geocode location '{location}' for activities: {e}")
+            return {
+                "success": False,
+                "tool": "search_activities",
+                "error": f"Could not find coordinates for '{location}': {str(e)}",
+                "activities": [],
+                "results_count": 0,
+            }
 
-        results = await self.orchestrator.get_activities(lat, lng)
-        formatted = []
-        for idx, activity in enumerate(results[:3]):
-            price = activity.get("price", {})
-            formatted.append({
-                "option_number": idx + 1,
-                "name": activity.get("name", "Activity"),
-                "description": (activity.get("shortDescription", "") or "")[:200],
-                "price": {"amount": price.get("amount", "0"), "currency": price.get("currencyCode", "THB")},
-                "rating": activity.get("rating", 0),
-                "pictures": (activity.get("pictures", []) or [])[:1]
-            })
-        return {
-            "success": True,
-            "tool": "search_activities",
-            "results_count": len(formatted),
-            "activities": formatted,
-            "search_params": {"location": location, "radius": radius}
-        }
+        try:
+            results = await self.orchestrator.get_activities(lat, lng, radius=radius)
+            if results is None:
+                results = []
+
+            formatted = []
+            for idx, activity in enumerate(results[:5]):
+                price = activity.get("price", {})
+                formatted.append({
+                    "option_number": idx + 1,
+                    "name": activity.get("name", "Activity"),
+                    "description": (activity.get("shortDescription", "") or "")[:200],
+                    "price": {
+                        "amount": price.get("amount", "0"),
+                        "currency": price.get("currencyCode", "THB"),
+                    },
+                    "rating": activity.get("rating", 0),
+                    "pictures": (activity.get("pictures", []) or [])[:1],
+                })
+
+            return {
+                "success": True,
+                "tool": "search_activities",
+                "results_count": len(formatted),
+                "activities": formatted,
+                "search_params": {"location": location, "radius": radius},
+            }
+        except Exception as e:
+            logger.error(f"Error fetching activities for '{location}': {e}", exc_info=True)
+            return {
+                "success": False,
+                "tool": "search_activities",
+                "error": str(e),
+                "activities": [],
+                "results_count": 0,
+            }
 
     async def close(self):
         """Cleanup resources."""

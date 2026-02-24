@@ -1,6 +1,6 @@
 """
-เซอร์วิสแคชตัวเลือก (Redis)
-เก็บตัวเลือกทั้งหมด (เที่ยวบิน การเดินทาง ที่พัก) ใน Redis สำหรับ AI และ TripSummary
+เซอร์วิสแคชตัวเลือก (in-memory — Redis ถูกลบออกแล้ว)
+เก็บตัวเลือกทั้งหมด (เที่ยวบิน การเดินทาง ที่พัก) ใน memory สำหรับ AI และ TripSummary
 """
 
 from typing import Dict, List, Optional, Any
@@ -8,27 +8,26 @@ from datetime import datetime, timedelta
 import hashlib
 import json
 from app.core.logging import get_logger
-from app.core.config import settings
-from app.storage.connection_manager import RedisConnectionManager
 
 logger = get_logger(__name__)
 
-# Redis key prefixes
-KEY_PREFIX_ENTRY = "options_cache:entry:"
-KEY_PREFIX_SESSION = "options_cache:session:"
-KEY_AMADEUS_RAW_PREFIX = "amadeus_raw:session:"
-KEY_AMADEUS_RAW_INDEX = "amadeus_raw:index:"
 DEFAULT_TTL_HOURS = 24
 DEFAULT_TTL_RAW_HOURS = 24
 
+# In-memory stores
+# options_store: cache_key -> cache_entry dict
+_options_store: Dict[str, Dict[str, Any]] = {}
+# session_index: session_id -> set of cache_keys
+_session_index: Dict[str, set] = {}
+# raw_store: "{session_id}:{slot_name}:{segment_index}" -> raw data
+_raw_store: Dict[str, Any] = {}
 
-def _serialize_dt(dt: datetime) -> str:
-    """Serialize datetime to ISO string for JSON storage."""
+
+def _serialize_dt(dt: datetime) -> Optional[str]:
     return dt.isoformat() if dt else None
 
 
 def _deserialize_dt(s: Optional[str]) -> Optional[datetime]:
-    """Deserialize ISO string to datetime."""
     if not s:
         return None
     try:
@@ -39,28 +38,22 @@ def _deserialize_dt(s: Optional[str]) -> Optional[datetime]:
 
 class OptionsCacheService:
     """
-    Cache service เก็บตัวเลือกใน Redis:
+    Cache service เก็บตัวเลือกใน memory (Redis removed):
     - ไฟท์บิน (ขาไป, ขากลับ)
     - พาหนะทุกชนิด (ขาไป, ขากลับ)
     - ที่พักทุกชนิด
     """
 
     def __init__(self):
-        self._redis_mgr = RedisConnectionManager.get_instance()
-        logger.info("OptionsCacheService initialized (Redis backend)")
-
-    async def _get_redis(self):
-        """Get Redis client (async). Returns None if Redis unavailable."""
-        return await self._redis_mgr.get_redis()
+        logger.info("OptionsCacheService initialized (in-memory, Redis removed)")
 
     def _generate_cache_key(
         self,
         session_id: str,
         slot_name: str,
         requirements: Dict[str, Any],
-        segment_index: int = 0
+        segment_index: int = 0,
     ) -> str:
-        """Generate unique cache key from requirements."""
         normalized = {
             "origin": requirements.get("origin", ""),
             "destination": requirements.get("destination", ""),
@@ -76,12 +69,6 @@ class OptionsCacheService:
         key_hash = hashlib.md5(key_data.encode()).hexdigest()
         return f"{slot_name}:{segment_index}:{key_hash}"
 
-    def _entry_key(self, cache_key: str) -> str:
-        return f"{KEY_PREFIX_ENTRY}{cache_key}"
-
-    def _session_key(self, session_id: str) -> str:
-        return f"{KEY_PREFIX_SESSION}{session_id}"
-
     async def save_options(
         self,
         session_id: str,
@@ -89,21 +76,14 @@ class OptionsCacheService:
         segment_index: int,
         requirements: Dict[str, Any],
         options: List[Dict[str, Any]],
-        ttl_hours: int = DEFAULT_TTL_HOURS
+        ttl_hours: int = DEFAULT_TTL_HOURS,
     ) -> bool:
-        """Save options to Redis cache."""
         try:
-            redis_client = await self._get_redis()
-            if redis_client is None:
-                logger.warning("Redis unavailable, cannot save options")
-                return False
-
             cache_key = self._generate_cache_key(session_id, slot_name, requirements, segment_index)
             now = datetime.utcnow()
             expires_at = now + timedelta(hours=ttl_hours)
-            ttl_seconds = ttl_hours * 3600
 
-            cache_entry = {
+            _options_store[cache_key] = {
                 "cache_key": cache_key,
                 "session_id": session_id,
                 "slot_name": slot_name,
@@ -116,19 +96,16 @@ class OptionsCacheService:
                 "last_accessed": _serialize_dt(now),
             }
 
-            entry_key = self._entry_key(cache_key)
-            session_key = self._session_key(session_id)
+            if session_id not in _session_index:
+                _session_index[session_id] = set()
+            _session_index[session_id].add(cache_key)
 
-            pipe = redis_client.pipeline()
-            pipe.set(entry_key, json.dumps(cache_entry, default=str), ex=ttl_seconds)
-            pipe.sadd(session_key, cache_key)
-            pipe.execute()
-
-            logger.info(f"Cached {len(options)} options for {slot_name}[{segment_index}] in session {session_id} (Redis)")
+            logger.info(
+                f"Cached {len(options)} options for {slot_name}[{segment_index}] in session {session_id} (memory)"
+            )
             return True
-
         except Exception as e:
-            logger.error(f"Failed to save options to Redis: {e}", exc_info=True)
+            logger.error(f"Failed to save options to memory cache: {e}", exc_info=True)
             return False
 
     async def get_options(
@@ -136,79 +113,52 @@ class OptionsCacheService:
         session_id: str,
         slot_name: str,
         segment_index: int,
-        requirements: Dict[str, Any]
+        requirements: Dict[str, Any],
     ) -> Optional[List[Dict[str, Any]]]:
-        """Get options from Redis cache."""
         try:
-            redis_client = await self._get_redis()
-            if redis_client is None:
-                return None
-
             cache_key = self._generate_cache_key(session_id, slot_name, requirements, segment_index)
-            entry_key = self._entry_key(cache_key)
-
-            raw = await redis_client.get(entry_key)
-            if not raw:
+            entry = _options_store.get(cache_key)
+            if not entry:
                 logger.debug(f"Cache miss for {cache_key}")
                 return None
 
-            cache_entry = json.loads(raw)
-            expires_at = _deserialize_dt(cache_entry.get("expires_at"))
+            expires_at = _deserialize_dt(entry.get("expires_at"))
             if expires_at and expires_at < datetime.utcnow():
                 logger.debug(f"Cache expired for {cache_key}")
-                await redis_client.delete(entry_key)
-                session_key = self._session_key(session_id)
-                await redis_client.srem(session_key, cache_key)
+                _options_store.pop(cache_key, None)
+                if session_id in _session_index:
+                    _session_index[session_id].discard(cache_key)
                 return None
 
-            # Refresh last_accessed and optionally extend TTL
-            cache_entry["last_accessed"] = _serialize_dt(datetime.utcnow())
-            ttl = await redis_client.ttl(entry_key)
-            if ttl > 0:
-                await redis_client.set(entry_key, json.dumps(cache_entry, default=str), ex=ttl)
-
-            options = cache_entry.get("options", [])
-            logger.info(f"Cache hit: Retrieved {len(options)} options for {slot_name}[{segment_index}] (Redis)")
+            entry["last_accessed"] = _serialize_dt(datetime.utcnow())
+            options = entry.get("options", [])
+            logger.info(
+                f"Cache hit: Retrieved {len(options)} options for {slot_name}[{segment_index}] (memory)"
+            )
             return options
-
         except Exception as e:
-            logger.error(f"Failed to get options from Redis: {e}", exc_info=True)
+            logger.error(f"Failed to get options from memory cache: {e}", exc_info=True)
             return None
 
     async def get_all_session_options(self, session_id: str) -> Dict[str, Any]:
-        """Get all cached options for a session from Redis."""
-        result = {
+        result: Dict[str, Any] = {
             "flights_outbound": [],
             "flights_inbound": [],
             "ground_transport": [],
-            "accommodation": []
+            "accommodation": [],
         }
         try:
-            redis_client = await self._get_redis()
-            if redis_client is None:
-                return result
-
-            session_key = self._session_key(session_id)
-            cache_keys = await redis_client.smembers(session_key)
-            if not cache_keys:
-                return result
-
+            cache_keys = list(_session_index.get(session_id, set()))
+            now = datetime.utcnow()
             for cache_key in cache_keys:
-                entry_key = self._entry_key(cache_key)
-                raw = await redis_client.get(entry_key)
-                if not raw:
-                    await redis_client.srem(session_key, cache_key)
-                    continue
-                try:
-                    entry = json.loads(raw)
-                except json.JSONDecodeError:
-                    await redis_client.delete(entry_key)
-                    await redis_client.srem(session_key, cache_key)
+                entry = _options_store.get(cache_key)
+                if not entry:
+                    _session_index.get(session_id, set()).discard(cache_key)
                     continue
                 expires_at = _deserialize_dt(entry.get("expires_at"))
-                if expires_at and expires_at < datetime.utcnow():
-                    await redis_client.delete(entry_key)
-                    await redis_client.srem(session_key, cache_key)
+                if expires_at and expires_at < now:
+                    _options_store.pop(cache_key, None)
+                    _session_index.get(session_id, set()).discard(cache_key)
                     continue
                 slot_name = entry.get("slot_name")
                 segment_index = entry.get("segment_index", 0)
@@ -226,11 +176,10 @@ class OptionsCacheService:
                 for slot_options in result.values()
                 for options in slot_options
             )
-            logger.info(f"Retrieved {total_options} total cached options for session {session_id} (Redis)")
+            logger.info(f"Retrieved {total_options} total cached options for session {session_id} (memory)")
             return result
-
         except Exception as e:
-            logger.error(f"Failed to get all session options from Redis: {e}", exc_info=True)
+            logger.error(f"Failed to get all session options from memory cache: {e}", exc_info=True)
             return result
 
     async def save_selected_option(
@@ -239,39 +188,26 @@ class OptionsCacheService:
         slot_name: str,
         segment_index: int,
         requirements: Dict[str, Any],
-        selected_option: Dict[str, Any]
+        selected_option: Dict[str, Any],
     ) -> bool:
-        """Save selected option to Redis cache (for TripSummary)."""
         try:
-            redis_client = await self._get_redis()
-            if redis_client is None:
-                return False
-
             cache_key = self._generate_cache_key(session_id, slot_name, requirements, segment_index)
-            entry_key = self._entry_key(cache_key)
-            raw = await redis_client.get(entry_key)
-            if not raw:
+            entry = _options_store.get(cache_key)
+            if not entry:
                 logger.warning(f"Cannot save selected option: cache entry not found for {cache_key}")
                 return False
-
-            cache_entry = json.loads(raw)
-            cache_entry["selected_option"] = selected_option
-            cache_entry["selected_at"] = _serialize_dt(datetime.utcnow())
-            cache_entry["last_accessed"] = _serialize_dt(datetime.utcnow())
-            ttl = await redis_client.ttl(entry_key)
-            if ttl <= 0:
-                ttl = DEFAULT_TTL_HOURS * 3600
-            await redis_client.set(entry_key, json.dumps(cache_entry, default=str), ex=ttl)
-
-            logger.info(f"Saved selected option for {slot_name}[{segment_index}] in session {session_id} (Redis)")
+            entry["selected_option"] = selected_option
+            entry["selected_at"] = _serialize_dt(datetime.utcnow())
+            entry["last_accessed"] = _serialize_dt(datetime.utcnow())
+            logger.info(
+                f"Saved selected option for {slot_name}[{segment_index}] in session {session_id} (memory)"
+            )
             return True
-
         except Exception as e:
-            logger.error(f"Failed to save selected option to Redis: {e}", exc_info=True)
+            logger.error(f"Failed to save selected option to memory cache: {e}", exc_info=True)
             return False
 
     async def validate_cache_data(self, session_id: str) -> Dict[str, Any]:
-        """Validate cached data for a session (reads from Redis)."""
         try:
             all_options = await self.get_all_session_options(session_id)
             issues = []
@@ -314,47 +250,27 @@ class OptionsCacheService:
                     "flights_inbound": sum(len(opts) if opts else 0 for opts in (all_options.get("flights_inbound") or [])),
                     "ground_transport": sum(len(opts) if opts else 0 for opts in (all_options.get("ground_transport") or [])),
                     "accommodation": sum(len(opts) if opts else 0 for opts in (all_options.get("accommodation") or [])),
-                }
+                },
             }
         except Exception as e:
             logger.error(f"Failed to validate cache data: {e}", exc_info=True)
-            return {
-                "valid": False,
-                "issues": [f"Validation error: {str(e)}"],
-                "warnings": [],
-                "summary": {}
-            }
+            return {"valid": False, "issues": [f"Validation error: {str(e)}"], "warnings": [], "summary": {}}
 
     async def clear_session_cache(self, session_id: str) -> bool:
-        """Clear all cached options for a session in Redis."""
         try:
-            redis_client = await self._get_redis()
-            if redis_client is None:
-                logger.warning("Redis unavailable, cannot clear session cache")
-                return False
-
-            session_key = self._session_key(session_id)
-            cache_keys = await redis_client.smembers(session_key)
-            deleted = 0
+            cache_keys = list(_session_index.pop(session_id, set()))
             for cache_key in cache_keys:
-                entry_key = self._entry_key(cache_key)
-                await redis_client.delete(entry_key)
-                deleted += 1
-            await redis_client.delete(session_key)
-            logger.info(f"Cleared {deleted} cache entries for session {session_id} (Redis)")
+                _options_store.pop(cache_key, None)
+            logger.info(f"Cleared {len(cache_keys)} cache entries for session {session_id} (memory)")
             return True
-
         except Exception as e:
-            logger.error(f"Failed to clear session cache in Redis: {e}", exc_info=True)
+            logger.error(f"Failed to clear session cache in memory: {e}", exc_info=True)
             return False
 
-    # ---------- Amadeus raw data (เก็บ raw response จาก Amadeus ไว้จัดช้อย / แก้ไข) ----------
+    # ---------- Amadeus raw data ----------
 
     def _raw_key(self, session_id: str, slot_name: str, segment_index: int) -> str:
-        return f"{KEY_AMADEUS_RAW_PREFIX}{session_id}:{slot_name}:{segment_index}"
-
-    def _raw_index_key(self, session_id: str) -> str:
-        return f"{KEY_AMADEUS_RAW_INDEX}{session_id}"
+        return f"{session_id}:{slot_name}:{segment_index}"
 
     async def save_raw_amadeus(
         self,
@@ -364,19 +280,10 @@ class OptionsCacheService:
         raw_response: Any,
         ttl_hours: int = DEFAULT_TTL_RAW_HOURS,
     ) -> bool:
-        """เก็บ raw response จาก Amadeus ต่อ slot ไว้ที่ Redis (สำหรับจัดช้อย / แก้ไข)"""
         try:
-            redis_client = await self._get_redis()
-            if redis_client is None:
-                return False
             rk = self._raw_key(session_id, slot_name, segment_index)
-            idx_key = self._raw_index_key(session_id)
-            ttl = ttl_hours * 3600
-            pipe = redis_client.pipeline()
-            pipe.set(rk, json.dumps(raw_response, default=str), ex=ttl)
-            pipe.sadd(idx_key, rk)
-            pipe.execute()
-            logger.info(f"Saved raw Amadeus for {session_id} {slot_name}[{segment_index}] (Redis)")
+            _raw_store[rk] = raw_response
+            logger.info(f"Saved raw Amadeus for {session_id} {slot_name}[{segment_index}] (memory)")
             return True
         except Exception as e:
             logger.error(f"save_raw_amadeus failed: {e}", exc_info=True)
@@ -388,68 +295,37 @@ class OptionsCacheService:
         slot_name: Optional[str] = None,
         segment_index: Optional[int] = None,
     ) -> Any:
-        """อ่าน raw Amadeus ของ session (ทั้งหมด หรือต่อ slot)"""
         try:
-            redis_client = await self._get_redis()
-            if redis_client is None:
-                return {} if slot_name is None else None
-            idx_key = self._raw_index_key(session_id)
-            keys = await redis_client.smembers(idx_key)
-            if not keys:
-                return {} if slot_name is None else None
+            if slot_name is not None and segment_index is not None:
+                rk = self._raw_key(session_id, slot_name, segment_index)
+                return _raw_store.get(rk)
+            # Return all for session
             out = {}
-            for k in keys:
-                k_str = k.decode() if isinstance(k, bytes) else k
-                if not k_str.startswith(KEY_AMADEUS_RAW_PREFIX):
-                    continue
-                rest = k_str[len(KEY_AMADEUS_RAW_PREFIX):]
-                parts = rest.rsplit(":", 2)
-                if len(parts) != 3:
-                    continue
-                sid, sname, segidx_str = parts[0], parts[1], parts[2]
-                if sid != session_id:
-                    continue
-                try:
-                    segidx = int(segidx_str)
-                except ValueError:
-                    continue
-                if slot_name is not None and sname != slot_name:
-                    continue
-                if segment_index is not None and segidx != segment_index:
-                    continue
-                raw = await redis_client.get(k_str)
-                if raw:
-                    try:
-                        out[f"{sname}:{segidx}"] = json.loads(raw)
-                    except json.JSONDecodeError:
-                        out[f"{sname}:{segidx}"] = raw
-            if slot_name is not None and segment_index is not None and out:
-                return out.get(f"{slot_name}:{segment_index}")
+            for k, v in _raw_store.items():
+                if k.startswith(f"{session_id}:"):
+                    rest = k[len(session_id) + 1:]
+                    parts = rest.rsplit(":", 1)
+                    if len(parts) == 2:
+                        sname, segidx_str = parts
+                        if slot_name is None or sname == slot_name:
+                            out[f"{sname}:{segidx_str}"] = v
             return out
         except Exception as e:
             logger.warning(f"get_raw_amadeus failed: {e}")
             return {} if slot_name is None else None
 
     async def clear_raw_amadeus(self, session_id: str) -> bool:
-        """เคลียร์ raw Amadeus ของ session (เรียกเมื่อ workflow เสร็จ/จองสำเร็จ)"""
         try:
-            redis_client = await self._get_redis()
-            if redis_client is None:
-                return False
-            idx_key = self._raw_index_key(session_id)
-            keys = await redis_client.smembers(idx_key)
-            for k in keys:
-                k_str = k.decode() if isinstance(k, bytes) else k
-                await redis_client.delete(k_str)
-            await redis_client.delete(idx_key)
-            logger.info(f"Cleared raw Amadeus for session {session_id} (Redis)")
+            keys_to_delete = [k for k in _raw_store if k.startswith(f"{session_id}:")]
+            for k in keys_to_delete:
+                _raw_store.pop(k, None)
+            logger.info(f"Cleared raw Amadeus for session {session_id} (memory)")
             return True
         except Exception as e:
             logger.error(f"clear_raw_amadeus failed: {e}", exc_info=True)
             return False
 
     async def clear_session_all(self, session_id: str) -> bool:
-        """เคลียร์ options cache + raw Amadeus ของ session (ใช้เมื่อ workflow done/จองสำเร็จ)"""
         ok1 = await self.clear_session_cache(session_id)
         ok2 = await self.clear_raw_amadeus(session_id)
         return ok1 and ok2
@@ -460,7 +336,7 @@ _options_cache_service: Optional[OptionsCacheService] = None
 
 
 def get_options_cache() -> OptionsCacheService:
-    """Get or create options cache service instance (Redis backend)."""
+    """Get or create options cache service instance (in-memory backend)."""
     global _options_cache_service
     if _options_cache_service is None:
         _options_cache_service = OptionsCacheService()

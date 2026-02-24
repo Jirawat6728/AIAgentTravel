@@ -33,7 +33,6 @@ from app.core.security import (
 from app.storage.mongodb_storage import MongoStorage
 from app.models.database import User, SessionDocument, FamilyMember
 from app.services.email_service import get_email_service
-from app.services.sms_service import get_sms_service, generate_otp
 
 logger = get_logger(__name__)
 
@@ -276,6 +275,37 @@ async def login(request: LoginRequest, response: Response, raw_request: Request)
             )
             raise HTTPException(status_code=401, detail="อีเมลหรือรหัสผ่านไม่ถูกต้อง")
 
+        # ตรวจสอบว่า email ยืนยันแล้วหรือยัง (ยกเว้น admin)
+        admin_email_normalized = (settings.admin_email or "").lower().strip()
+        if normalized_email != admin_email_normalized and not user_data.get("email_verified", False):
+            # generate token ใหม่ + ส่งอีเมลยืนยันไปที่อีเมลที่ login
+            email_service = get_email_service()
+            new_token = email_service.generate_verification_token()
+            await users_collection.update_one(
+                {"email": normalized_email},
+                {"$set": {
+                    "email_verification_token": new_token,
+                    "email_verification_sent_at": datetime.utcnow()
+                }}
+            )
+            user_name = user_data.get("full_name") or user_data.get("first_name", "")
+            email_service.send_verification_email(
+                to_email=normalized_email,
+                token=new_token,
+                user_name=user_name,
+            )
+            logger.info(f"Re-sent verification email to {normalized_email} on login attempt")
+
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "EMAIL_NOT_VERIFIED",
+                    "email": normalized_email,
+                    "email_sent": True,
+                    "message": "กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ ระบบได้ส่งลิงก์ยืนยันไปที่อีเมลของคุณแล้ว"
+                }
+            )
+
         # Update last login (use normalized email)
         await users_collection.update_one(
             {"email": normalized_email},
@@ -384,6 +414,8 @@ async def google_login(request: GoogleLoginRequest, response: Response):
         picture = idinfo.get('picture')
         given_name = idinfo.get('given_name')
         family_name = idinfo.get('family_name')
+        # Google ยืนยันอีเมลให้แล้ว — ใช้ค่าจาก token โดยตรง
+        google_email_verified = bool(idinfo.get('email_verified', False))
         
         # ✅ Validate required fields
         if not google_id:
@@ -433,15 +465,21 @@ async def google_login(request: GoogleLoginRequest, response: Response):
                 last_name=last_name_val,
                 profile_image=picture,
                 created_at=datetime.utcnow(),
-                last_login=datetime.utcnow()
+                last_login=datetime.utcnow(),
+                email_verified=google_email_verified,
+                auth_provider="google",
             )
             await users_collection.insert_one(user.model_dump())
-            logger.info(f"✅ Created new Google user: {email} (user_id: {google_id})")
+            logger.info(f"✅ Created new Google user: {email} (user_id: {google_id}, email_verified: {google_email_verified})")
         else:
             # ✅ Update existing user (update profile image and last login)
             update_data = {
-                "last_login": datetime.utcnow()
+                "last_login": datetime.utcnow(),
+                "auth_provider": "google",
             }
+            # ยืนยันอีเมลอัตโนมัติจาก Google token
+            if google_email_verified:
+                update_data["email_verified"] = True
             # Update profile image if available and different
             if picture and user_data.get("profile_image") != picture:
                 update_data["profile_image"] = picture
@@ -460,7 +498,7 @@ async def google_login(request: GoogleLoginRequest, response: Response):
             # ✅ Reload user data to get updated fields
             user_data = await users_collection.find_one({"email": email})
             user = User(**user_data)
-            logger.info(f"✅ Google user logged in: {email} (user_id: {user.user_id})")
+            logger.info(f"✅ Google user logged in: {email} (user_id: {user.user_id}, email_verified: {google_email_verified})")
 
         # Set session cookie (simplified: use google_id as session_id for now)
         # In production, use a signed JWT or a session store
@@ -573,6 +611,33 @@ async def update_profile(request: Request, profile: ProfileUpdateRequest):
 
         # Get updated user
         user_data = await users_collection.find_one({"user_id": user_id})
+
+        # Notification: อัปเดตโปรไฟล์ / เพิ่ม co-traveler
+        try:
+            from app.services.notification_service import create_and_push_notification
+            if "family" in update_data:
+                # ตรวจว่าเพิ่ม family member ใหม่หรือไม่
+                new_family = update_data["family"] or []
+                notif_msg = f"เพิ่มผู้จองร่วม {len(new_family)} คนเรียบร้อยแล้ว" if new_family else "อัปเดตรายชื่อผู้จองร่วมเรียบร้อยแล้ว"
+                await create_and_push_notification(
+                    db=storage.db,
+                    user_id=user_id,
+                    notif_type="account_cotraveler_added",
+                    title="อัปเดตผู้จองร่วม",
+                    message=notif_msg,
+                    metadata={"family_count": len(new_family)},
+                )
+            elif any(k in update_data for k in ("full_name", "first_name", "last_name", "phone", "avatar_url")):
+                await create_and_push_notification(
+                    db=storage.db,
+                    user_id=user_id,
+                    notif_type="account_profile_updated",
+                    title="อัปเดตโปรไฟล์สำเร็จ",
+                    message="ข้อมูลโปรไฟล์ของคุณถูกอัปเดตเรียบร้อยแล้ว",
+                )
+        except Exception:
+            pass
+
         return {"ok": True, "user": User(**user_data).model_dump()}
 
     except Exception as e:
@@ -634,6 +699,20 @@ async def change_password(request: Request, password_data: dict):
         )
 
         logger.info(f"Password changed for user: {user_id}")
+
+        # Notification: เปลี่ยนรหัสผ่านสำเร็จ
+        try:
+            from app.services.notification_service import create_and_push_notification
+            await create_and_push_notification(
+                db=storage.db,
+                user_id=user_id,
+                notif_type="account_password_changed",
+                title="เปลี่ยนรหัสผ่านสำเร็จ",
+                message="รหัสผ่านของคุณถูกเปลี่ยนเรียบร้อยแล้ว หากไม่ใช่คุณกรุณาติดต่อฝ่ายบริการทันที",
+            )
+        except Exception:
+            pass
+
         return {"ok": True, "message": "เปลี่ยนรหัสผ่านสำเร็จ"}
     
     except HTTPException:
@@ -646,75 +725,167 @@ async def change_password(request: Request, password_data: dict):
 @router.post("/update-email")
 async def update_email(request: Request, email_data: dict):
     """
-    ขอเปลี่ยนอีเมล: เก็บอีเมลใหม่แบบ pending ส่งลิงก์ยืนยันไปอีเมลใหม่
-    เมื่อผู้ใช้กดลิงก์ที่ /verify-email-change → อีเมลจะถูกอัปเดตใน MongoDB และยืนยันในครั้งเดียว
+    ขอเปลี่ยนอีเมล: เก็บอีเมลใหม่แบบ pending และส่ง OTP 6 หลักไปที่อีเมลใหม่
+    ผู้ใช้ต้องกรอก OTP ใน UI เพื่อยืนยัน (ผ่าน /verify-email-change-otp)
     """
     user_id = request.cookies.get(settings.session_cookie_name)
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    
+
     new_email = email_data.get("new_email", "").strip().lower()
-    
     if not new_email or "@" not in new_email:
         raise HTTPException(status_code=400, detail="กรุณากรอกอีเมลที่ถูกต้อง")
-    
+
     try:
         storage = MongoStorage()
         await storage.connect()
         users_collection = storage.db["users"]
-        
+
         user_data = await users_collection.find_one({"user_id": user_id})
         if not user_data:
             raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้")
-        
+
         current_email = (user_data.get("email") or "").strip().lower()
         if new_email == current_email:
             raise HTTPException(status_code=400, detail="อีเมลใหม่เหมือนอีเมลปัจจุบัน")
-        
-        # Check if new email already used by another user
+
         normalized_new = new_email.lower().strip()
         existing_user = await users_collection.find_one({"email": normalized_new})
         if existing_user and existing_user.get("user_id") != user_id:
             raise HTTPException(status_code=400, detail="อีเมลนี้ถูกใช้งานแล้ว")
-        
+
         from app.services.email_service import get_email_service
         email_service = get_email_service()
-        verification_token = email_service.generate_verification_token()
-        
-        # เก็บ pending_new_email + token (ยังไม่เปลี่ยน email จนกว่าจะกดลิงก์)
+        otp = email_service.generate_verification_token()  # 6-digit OTP
+
+        # เก็บ pending_new_email + OTP (หมดอายุใน 10 นาที)
         await users_collection.update_one(
             {"user_id": user_id},
             {
                 "$set": {
                     "pending_new_email": normalized_new,
-                    "email_verification_token": verification_token,
+                    "email_verification_token": otp,
                     "email_verification_sent_at": datetime.utcnow(),
                 }
             }
         )
-        
+
         user_name = user_data.get("full_name") or user_data.get("first_name") or None
         try:
-            email_sent = email_service.send_email_change_verification(
-                normalized_new, verification_token, user_name=user_name
+            from app.services.email_service import get_email_service
+            _email_svc = get_email_service()
+            sent = _email_svc.send_email_change_otp(
+                to_email=normalized_new,
+                token=otp,
+                user_name=user_name or "คุณ",
+                new_email=normalized_new,
             )
-            if email_sent:
-                logger.info(f"Email change verification sent to {normalized_new} for user {user_id}")
+            if sent:
+                logger.info(f"Email change OTP sent to {normalized_new} for user {user_id}")
+            else:
+                logger.warning(f"Email change OTP send failed (SMTP) for {normalized_new}")
         except Exception as email_error:
-            logger.error(f"Failed to send email change verification: {email_error}", exc_info=True)
-        
+            logger.error(f"Failed to send email change OTP: {email_error}", exc_info=True)
+
         return {
             "ok": True,
-            "message": f"ส่งลิงก์ยืนยันการเปลี่ยนอีเมลไปที่ {normalized_new} แล้ว กรุณากดลิงก์ในอีเมลเพื่อเปลี่ยนอีเมลและยืนยัน",
+            "message": f"ส่งรหัส OTP ไปที่ {normalized_new} แล้ว กรุณากรอกรหัส 6 หลักเพื่อยืนยัน",
             "email": current_email,
             "pending_email": normalized_new,
         }
-    
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error updating email: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"เกิดข้อผิดพลาดในการอัปเดตอีเมล: {str(e)}")
+
+
+@router.post("/verify-email-change-otp")
+async def verify_email_change_otp(request: Request, body: dict):
+    """
+    ยืนยันการเปลี่ยนอีเมลด้วย OTP 6 หลัก
+    เมื่อ OTP ถูกต้อง → อัปเดต email ใน MongoDB เป็น pending_new_email และตั้ง email_verified = True
+    """
+    user_id = request.cookies.get(settings.session_cookie_name)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    otp = (body.get("otp") or "").strip()
+    if not otp or len(otp) != 6 or not otp.isdigit():
+        raise HTTPException(status_code=400, detail="กรุณากรอกรหัส OTP 6 หลัก")
+
+    try:
+        storage = MongoStorage()
+        await storage.connect()
+        users_collection = storage.db["users"]
+
+        user_data = await users_collection.find_one({"user_id": user_id})
+        if not user_data:
+            raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้")
+
+        stored_otp = user_data.get("email_verification_token")
+        pending_new = (user_data.get("pending_new_email") or "").strip().lower()
+
+        if not stored_otp or not pending_new:
+            raise HTTPException(status_code=400, detail="ไม่พบการรอเปลี่ยนอีเมล กรุณาขอรหัสใหม่")
+
+        # ตรวจสอบอายุ OTP (10 นาที)
+        sent_at = user_data.get("email_verification_sent_at")
+        if sent_at:
+            if isinstance(sent_at, str):
+                sent_at = date_parser.parse(sent_at)
+            if datetime.utcnow() - sent_at > timedelta(minutes=10):
+                await users_collection.update_one(
+                    {"user_id": user_id},
+                    {"$unset": {"pending_new_email": "", "email_verification_token": "", "email_verification_sent_at": ""}}
+                )
+                raise HTTPException(status_code=400, detail="รหัส OTP หมดอายุ (10 นาที) กรุณาขอรหัสใหม่")
+
+        if stored_otp != otp:
+            raise HTTPException(status_code=400, detail="รหัส OTP ไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง")
+
+        # OTP ถูกต้อง → เปลี่ยนอีเมลและยืนยันทันที
+        await users_collection.update_one(
+            {"user_id": user_id},
+            {
+                "$set": {"email": pending_new, "email_verified": True},
+                "$unset": {
+                    "pending_new_email": "",
+                    "email_verification_token": "",
+                    "email_verification_sent_at": "",
+                }
+            }
+        )
+
+        logger.info(f"✅ Email changed via OTP for user {user_id} -> {pending_new}")
+
+        # Notification
+        try:
+            from app.services.notification_service import create_and_push_notification
+            await create_and_push_notification(
+                db=storage.db,
+                user_id=user_id,
+                notif_type="account_email_changed",
+                title="เปลี่ยนอีเมลสำเร็จ",
+                message=f"อีเมลของคุณถูกเปลี่ยนเป็น {pending_new} เรียบร้อยแล้ว",
+                metadata={"new_email": pending_new},
+            )
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "message": "เปลี่ยนอีเมลและยืนยันสำเร็จ",
+            "email": pending_new,
+            "email_verified": True,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error verifying email change OTP: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="เกิดข้อผิดพลาดในการยืนยัน OTP")
 
 
 @router.delete("/profile")
@@ -920,14 +1091,9 @@ async def register(request: RegisterRequest, response: Response, raw_request: Re
         # Skip email verification only for configured admin email (default admin@example.com)
         if normalized_email != admin_email_normalized:
             email_service = get_email_service()
-            if email_service.is_configured:
-                email_verification_token = email_service.generate_verification_token()
-                email_verification_sent_at = datetime.utcnow()
-                email_verified = False
-            else:
-                # If email service is not configured, mark as verified (for development)
-                logger.warning("Email service not configured. Skipping email verification.")
-                email_verified = True
+            email_verification_token = email_service.generate_verification_token()
+            email_verification_sent_at = datetime.utcnow()
+            email_verified = False
         else:
             # Admin email is automatically verified
             email_verified = True
@@ -960,22 +1126,20 @@ async def register(request: RegisterRequest, response: Response, raw_request: Re
             raise
         logger.info(f"Registered new user: {request.email}")
         
-        # ส่งอีเมลยืนยันทันทีหลังลงทะเบียน (ทุกเมล ยกเว้น admin)
-        verification_email_sent = False
+        # ส่งอีเมลยืนยันผ่าน Gmail SMTP ไปที่อีเมลที่กรอกตอนลงทะเบียน
+        verification_email_sent = bool(email_verification_token)
         if normalized_email != admin_email_normalized and email_verification_token:
             email_service = get_email_service()
-            if email_service.is_configured:
-                user_name = f"{request.first_name} {request.last_name}"
-                email_sent = email_service.send_verification_email(
-                    to_email=normalized_email,
-                    token=email_verification_token,
-                    user_name=user_name
-                )
-                if email_sent:
-                    logger.info(f"✅ Verification email sent to {normalized_email} (after registration)")
-                    verification_email_sent = True
-                else:
-                    logger.warning(f"⚠️ Failed to send verification email to {normalized_email}")
+            user_name = f"{request.first_name} {request.last_name}"
+            email_sent = email_service.send_verification_email(
+                to_email=normalized_email,
+                token=email_verification_token,
+                user_name=user_name,
+            )
+            if email_sent:
+                logger.info(f"Verification email sent to {normalized_email}")
+            else:
+                logger.warning(f"Failed to send verification email to {normalized_email} (token saved in DB)")
 
         # Create user response (without password hash)
         user = User(
@@ -991,18 +1155,23 @@ async def register(request: RegisterRequest, response: Response, raw_request: Re
             last_login=datetime.utcnow()
         )
 
-        response.set_cookie(
-            key=settings.session_cookie_name,
-            value=user.user_id,
-            httponly=True,
-            max_age=settings.session_expiry_days * 24 * 60 * 60,
-            samesite="lax",
-            secure=False
-        )
-        result = {"ok": True, "user": user.model_dump()}
+        # ไม่ set session cookie จนกว่าจะยืนยันอีเมล
+        # ถ้า email ยืนยันแล้ว (admin หรือ email service ไม่ได้ตั้งค่า) → set cookie ได้เลย
+        if email_verified:
+            response.set_cookie(
+                key=settings.session_cookie_name,
+                value=user.user_id,
+                httponly=True,
+                max_age=settings.session_expiry_days * 24 * 60 * 60,
+                samesite="lax",
+                secure=False
+            )
+
+        result = {"ok": True, "user": user.model_dump(), "email_verified": email_verified}
         if verification_email_sent:
             result["verification_email_sent"] = True
-            result["message"] = f"ลงทะเบียนสำเร็จ ระบบได้ส่งอีเมลยืนยันไปที่ {normalized_email} แล้ว กรุณากดลิงก์ในอีเมลเพื่อยืนยัน (ลิงก์ใช้ได้ 24 ชั่วโมง)"
+            result["email"] = normalized_email
+            result["message"] = f"ลงทะเบียนสำเร็จ กรุณายืนยันอีเมล {normalized_email} ด้วยรหัส OTP 6 หลักที่ส่งไปให้"
         return result
 
     except HTTPException:
@@ -1470,7 +1639,8 @@ async def send_verification_email(request: Request):
     """
     Send email verification email to current user (resend)
     """
-    user_id = request.cookies.get(settings.session_cookie_name)
+    from app.core.security import extract_user_id_from_request
+    user_id = extract_user_id_from_request(request)
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
     
@@ -1504,18 +1674,11 @@ async def send_verification_email(request: Request):
                 "email_verified": True
             }
         
-        # Generate new verification token (เก็บใน DB สำหรับ /verify-email)
+        # Generate token ใหม่ + ส่งอีเมลยืนยันไปที่อีเมลของ user
         email_service = get_email_service()
-        if not email_service.is_configured:
-            raise HTTPException(
-                status_code=503,
-                detail="กรุณาตั้งค่า FIREBASE_PROJECT_ID หรือ FIREBASE_CREDENTIALS_PATH (Firebase) หรือ EMAIL_SERVICE_URL (ส่งลิงก์ทางอีเมล) ใน backend/.env"
-            )
-        
         verification_token = email_service.generate_verification_token()
         verification_sent_at = datetime.utcnow()
         
-        # Update user with new token
         await users_collection.update_one(
             {"user_id": user_id},
             {
@@ -1526,22 +1689,18 @@ async def send_verification_email(request: Request):
             }
         )
         
-        # ส่งอีเมลยืนยัน: ถ้ามี EMAIL_SERVICE_URL จะส่งลิงก์ทางอีเมล ไม่ก็ใช้ Firebase ฝั่ง Client
+        user_name = user_data.get("full_name") or user_data.get("first_name", "")
         email_sent = email_service.send_verification_email(
             to_email=email,
             token=verification_token,
-            user_name=user_data.get("full_name") or user_data.get("first_name", "")
+            user_name=user_name,
         )
-        if not email_sent:
-            raise HTTPException(
-                status_code=503,
-                detail="ไม่สามารถส่งอีเมลได้ กรุณาตั้งค่า EMAIL_SERVICE_URL ใน backend/.env และให้บริการ email (เช่น email-nest) รันอยู่ หรือใช้เข้าสู่ระบบด้วย Google/Firebase เพื่อยืนยันอีเมล"
-            )
-        logger.info(f"Verification email sent to {email}")
+        logger.info(f"Verification email {'sent' if email_sent else 'failed'} for {email}")
         return {
             "ok": True,
-            "message": "ส่งลิงก์ยืนยันไปที่อีเมลแล้ว กรุณากดลิงก์ในอีเมล",
+            "message": "ส่งลิงก์ยืนยันไปที่อีเมลแล้ว กรุณาตรวจสอบกล่องจดหมาย",
             "email": email,
+            "verification_email_sent": email_sent,
         }
     
     except HTTPException:
@@ -1551,85 +1710,127 @@ async def send_verification_email(request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.post("/verify-email")
-async def verify_email(token: str = Query(..., description="Verification token from email link")):
+class FirebaseVerifyRequest(BaseModel):
+    email: str
+
+
+@router.post("/verify-email-firebase")
+async def verify_email_firebase(request: FirebaseVerifyRequest):
     """
-    Verify email address using verification token
+    เรียกจาก frontend หลัง Firebase applyActionCode สำเร็จ
+    Set email_verified=True ใน MongoDB โดยใช้ email เป็น key
     """
-    if not token:
-        raise HTTPException(status_code=400, detail="Verification token is required")
-    
+    if not request.email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    normalized_email = request.email.lower().strip()
+
     try:
         storage = MongoStorage()
         await storage.connect()
         users_collection = storage.db["users"]
-        
-        # Find user by verification token
-        user_data = await users_collection.find_one({"email_verification_token": token})
-        
+
+        user_data = await users_collection.find_one({"email": normalized_email})
         if not user_data:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid or expired verification token"
-            )
-        
-        # Check if token is expired (24 hours)
-        verification_sent_at = user_data.get("email_verification_sent_at")
-        if verification_sent_at:
-            if isinstance(verification_sent_at, str):
-                verification_sent_at = date_parser.parse(verification_sent_at)
-            
-            token_age = datetime.utcnow() - verification_sent_at
-            if token_age > timedelta(hours=24):
-                # Token expired - clear it
-                await users_collection.update_one(
-                    {"user_id": user_data["user_id"]},
-                    {
-                        "$unset": {
-                            "email_verification_token": "",
-                            "email_verification_sent_at": ""
-                        }
-                    }
-                )
-                raise HTTPException(
-                    status_code=400,
-                    detail="Verification token has expired. Please request a new one."
-                )
-        
-        # Check if already verified
-        if user_data.get("email_verified"):
-            return {
-                "ok": True,
-                "message": "Email already verified",
-                "email_verified": True
-            }
-        
-        # Verify email
+            # ลอง case-insensitive
+            user_data = await users_collection.find_one({
+                "email": {"$regex": f"^{normalized_email}$", "$options": "i"}
+            })
+
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+
         await users_collection.update_one(
-            {"user_id": user_data["user_id"]},
+            {"email": user_data["email"]},
             {
-                "$set": {
-                    "email_verified": True
-                },
+                "$set": {"email_verified": True},
                 "$unset": {
                     "email_verification_token": "",
                     "email_verification_sent_at": ""
                 }
             }
         )
-        
-        logger.info(f"✅ Email verified for user: {user_data.get('email')}")
-        
-        return {
-            "ok": True,
-            "message": "Email verified successfully",
-            "email_verified": True
-        }
-    
+        logger.info(f"✅ Email verified via Firebase for: {normalized_email}")
+        return {"ok": True, "message": "Email verified successfully", "email_verified": True}
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error verifying email: {e}", exc_info=True)
+        logger.error(f"Error verifying email via Firebase: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+class VerifyEmailOTPRequest(BaseModel):
+    email: str
+    otp: str
+
+
+@router.post("/verify-email")
+async def verify_email(request: VerifyEmailOTPRequest):
+    """
+    ยืนยันอีเมลด้วย OTP 6 หลัก
+    """
+    if not request.email or not request.otp:
+        raise HTTPException(status_code=400, detail="กรุณากรอกอีเมลและรหัส OTP")
+
+    normalized_email = request.email.lower().strip()
+    otp = request.otp.strip()
+
+    try:
+        storage = MongoStorage()
+        await storage.connect()
+        users_collection = storage.db["users"]
+
+        user_data = await users_collection.find_one({"email": normalized_email})
+
+        if not user_data:
+            raise HTTPException(status_code=404, detail="ไม่พบบัญชีผู้ใช้นี้")
+
+        # ถ้า email ยืนยันแล้ว
+        if user_data.get("email_verified"):
+            await users_collection.update_one(
+                {"email": normalized_email},
+                {"$unset": {"email_verification_token": "", "email_verification_sent_at": ""}}
+            )
+            return {"ok": True, "message": "อีเมลของคุณได้รับการยืนยันแล้ว", "email_verified": True, "already_verified": True}
+
+        stored_otp = user_data.get("email_verification_token")
+        if not stored_otp:
+            raise HTTPException(status_code=400, detail="ไม่พบรหัส OTP กรุณาขอรหัสใหม่")
+
+        # ตรวจสอบหมดอายุ (10 นาที)
+        verification_sent_at = user_data.get("email_verification_sent_at")
+        if verification_sent_at:
+            if isinstance(verification_sent_at, str):
+                verification_sent_at = date_parser.parse(verification_sent_at)
+            token_age = datetime.utcnow() - verification_sent_at
+            if token_age > timedelta(minutes=10):
+                await users_collection.update_one(
+                    {"email": normalized_email},
+                    {"$unset": {"email_verification_token": "", "email_verification_sent_at": ""}}
+                )
+                raise HTTPException(status_code=400, detail="รหัส OTP หมดอายุแล้ว (10 นาที) กรุณาขอรหัสใหม่")
+
+        # ตรวจสอบ OTP ตรงกันไหม
+        if stored_otp != otp:
+            raise HTTPException(status_code=400, detail="รหัส OTP ไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง")
+
+        # OTP ถูกต้อง — ยืนยันอีเมล
+        await users_collection.update_one(
+            {"email": normalized_email},
+            {
+                "$set": {"email_verified": True},
+                "$unset": {"email_verification_token": "", "email_verification_sent_at": ""}
+            }
+        )
+
+        logger.info(f"Email verified via OTP for: {normalized_email}")
+        return {"ok": True, "message": "ยืนยันอีเมลสำเร็จ", "email_verified": True}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error verifying email OTP: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -1693,7 +1894,24 @@ async def verify_email_change(token: str = Query(..., description="Token from em
         )
         
         logger.info(f"✅ Email changed and verified for user {user_data.get('user_id')} -> {pending_new}")
-        
+
+        # Notification: เปลี่ยนอีเมลสำเร็จ
+        try:
+            from app.services.notification_service import create_and_push_notification
+            from app.storage.mongodb_storage import MongoStorage as _MS
+            _storage = _MS()
+            await _storage.connect()
+            await create_and_push_notification(
+                db=_storage.db,
+                user_id=user_data["user_id"],
+                notif_type="account_email_changed",
+                title="เปลี่ยนอีเมลสำเร็จ",
+                message=f"อีเมลของคุณถูกเปลี่ยนเป็น {pending_new} เรียบร้อยแล้ว",
+                metadata={"new_email": pending_new},
+            )
+        except Exception:
+            pass
+
         return {
             "ok": True,
             "message": "เปลี่ยนอีเมลและยืนยันสำเร็จ",
@@ -1707,104 +1925,4 @@ async def verify_email_change(token: str = Query(..., description="Token from em
         logger.error(f"Error verifying email change: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="เกิดข้อผิดพลาดในการยืนยันการเปลี่ยนอีเมล")
 
-
-# =============================================================================
-# Phone OTP (เปลี่ยนเบอร์โทร - ส่ง OTP)
-# =============================================================================
-
-@router.post("/send-phone-otp")
-async def send_phone_otp(request: Request, body: dict):
-    """
-    ส่ง OTP ไปเบอร์โทรที่ระบุ (สำหรับเปลี่ยนเบอร์) รองรับทุกเครือข่าย
-    Body: { "new_phone": "0812345678" }
-    """
-    user_id = request.cookies.get(settings.session_cookie_name)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    new_phone = (body.get("new_phone") or "").strip().replace(" ", "")
-    if not new_phone or len(new_phone) < 9:
-        raise HTTPException(status_code=400, detail="กรุณากรอกเบอร์โทรที่ถูกต้อง (เช่น 0812345678)")
-    try:
-        storage = MongoStorage()
-        await storage.connect()
-        users_collection = storage.db["users"]
-        user_data = await users_collection.find_one({"user_id": user_id})
-        if not user_data:
-            raise HTTPException(status_code=404, detail="User not found")
-        otp = generate_otp(6)
-        sent_at = datetime.utcnow()
-        await users_collection.update_one(
-            {"user_id": user_id},
-            {
-                "$set": {
-                    "phone_pending": new_phone,
-                    "phone_verification_otp": otp,
-                    "phone_verification_sent_at": sent_at,
-                }
-            },
-        )
-        sms_service = get_sms_service()
-        sent = sms_service.send_otp(new_phone, otp)
-        if not sent:
-            raise HTTPException(status_code=503, detail="ส่ง OTP ไม่สำเร็จ (ตรวจสอบ Twilio/SMS ใน .env)")
-        logger.info(f"✅ Phone OTP sent to {new_phone} for user {user_id}")
-        return {"ok": True, "message": "ส่ง OTP ไปที่เบอร์โทรแล้ว กรุณากรอกรหัส OTP"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error sending phone OTP: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@router.post("/verify-phone")
-async def verify_phone(request: Request, body: dict):
-    """
-    ยืนยันเบอร์โทรด้วย OTP แล้วอัปเดตเบอร์ในโปรไฟล์
-    Body: { "otp": "123456" }
-    """
-    user_id = request.cookies.get(settings.session_cookie_name)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    otp = (body.get("otp") or "").strip()
-    if not otp or len(otp) != 6:
-        raise HTTPException(status_code=400, detail="กรุณากรอกรหัส OTP 6 หลัก")
-    try:
-        storage = MongoStorage()
-        await storage.connect()
-        users_collection = storage.db["users"]
-        user_data = await users_collection.find_one({"user_id": user_id})
-        if not user_data:
-            raise HTTPException(status_code=404, detail="User not found")
-        phone_pending = user_data.get("phone_pending")
-        stored_otp = user_data.get("phone_verification_otp")
-        sent_at = user_data.get("phone_verification_sent_at")
-        if not phone_pending or not stored_otp:
-            raise HTTPException(status_code=400, detail="ไม่พบการรอยืนยันเบอร์โทร กรุณากดส่ง OTP ก่อน")
-        if sent_at:
-            if isinstance(sent_at, str):
-                sent_at = date_parser.parse(sent_at)
-            age_minutes = (datetime.utcnow() - sent_at).total_seconds() / 60
-            if age_minutes > settings.sms_otp_expire_minutes:
-                await users_collection.update_one(
-                    {"user_id": user_id},
-                    {"$unset": {"phone_pending": "", "phone_verification_otp": "", "phone_verification_sent_at": ""}},
-                )
-                raise HTTPException(status_code=400, detail="รหัส OTP หมดอายุแล้ว กรุณาขอ OTP ใหม่")
-        if otp != stored_otp:
-            raise HTTPException(status_code=400, detail="รหัส OTP ไม่ถูกต้อง")
-        await users_collection.update_one(
-            {"user_id": user_id},
-            {
-                "$set": {"phone": phone_pending},
-                "$unset": {"phone_pending": "", "phone_verification_otp": "", "phone_verification_sent_at": ""},
-            },
-        )
-        logger.info(f"✅ Phone verified for user {user_id}: {phone_pending}")
-        user_data = await users_collection.find_one({"user_id": user_id})
-        return {"ok": True, "message": "ยืนยันเบอร์โทรสำเร็จ", "user": User(**user_data).model_dump()}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error verifying phone: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
 

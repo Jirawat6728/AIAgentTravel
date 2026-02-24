@@ -151,7 +151,7 @@ When mode='agent', you are a GENIUS AUTONOMOUS agent with FULL INTELLIGENCE:
 - For multi-day trips, ALWAYS set trip_type="round_trip" and provide "days" field (NOT end_date)
 - Example: "อยากไปสมุย 3 วัน" with start_date="2025-01-30" → payload: {"start_date": "2025-01-30", "days": 3}, trip_type="round_trip"
 
-Current Date: 2025-01-08
+Current Date: {{CURRENT_DATE}}
 
 Trip Plan Structure:
 - travel:

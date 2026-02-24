@@ -27,7 +27,7 @@ setup_logging("travel_agent", settings.log_level, settings.log_file)
 logger = get_logger(__name__)
 
 
-from app.storage.connection_manager import MongoConnectionManager, RedisConnectionManager
+from app.storage.connection_manager import MongoConnectionManager
 from app.storage.mongodb_storage import MongoStorage
 
 @asynccontextmanager
@@ -71,7 +71,6 @@ async def lifespan(app: FastAPI):
     
     # Store connection managers for health checks
     app.state.mongo_mgr = None
-    app.state.redis_mgr = None
     app.state.startup_success = False
     
     # Initialize DB Connections with Retry
@@ -106,33 +105,7 @@ async def lifespan(app: FastAPI):
                 logger.critical("Failed to initialize MongoDB after all retries. Server may be unstable.")
                 # Don't exit - allow server to start but mark as unhealthy
     
-    # Redis Initialization (Optional - don't fail startup if unavailable)
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"Initializing Redis (attempt {attempt + 1}/{max_retries})...")
-            redis_mgr = RedisConnectionManager.get_instance()
-            redis_client = await redis_mgr.get_redis()
-            
-            # Test connection (Redis is optional)
-            if redis_client:
-                await redis_client.ping()
-                logger.info("[OK] Redis connection verified")
-                app.state.redis_mgr = redis_mgr
-                break
-            else:
-                # Redis unavailable but that's OK
-                if attempt == max_retries - 1:
-                    logger.info("[INFO] Redis unavailable - continuing without Redis (optional service)")
-                else:
-                    await asyncio.sleep(retry_delay)
-            
-        except Exception as e:
-            logger.debug(f"[INFO] Redis initialization failed (attempt {attempt + 1}): {e}")
-            if attempt < max_retries - 1:
-                import asyncio
-                await asyncio.sleep(retry_delay)
-            else:
-                logger.info("[INFO] Redis unavailable - continuing without Redis (optional service)")
+    logger.info("[INFO] Redis disabled — using MongoDB only")
     
     # Mark startup as successful if at least MongoDB is available
     if app.state.mongo_mgr:
@@ -149,15 +122,16 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Failed to start health monitor: {e}")
         
-        # Start Redis sync service in background (if Redis is available)
-        if app.state.redis_mgr:
-            try:
-                from app.storage.redis_sync import redis_sync_service
-                # Start background sync (runs every 50% of Redis TTL)
-                asyncio.create_task(redis_sync_service.start_background_sync())
-                logger.info("[OK] Redis sync service started")
-            except Exception as e:
-                logger.warning(f"Failed to start Redis sync service: {e}")
+        # Start check-in reminder scheduler (every 15 min)
+        try:
+            from app.services.checkin_reminder_service import start_reminder_scheduler
+            from app.storage.mongodb_storage import MongoStorage as _MS
+            _reminder_storage = _MS()
+            await _reminder_storage.connect()
+            asyncio.create_task(start_reminder_scheduler(_reminder_storage.db, interval_minutes=15))
+            logger.info("[OK] Check-in reminder scheduler started")
+        except Exception as e:
+            logger.warning(f"Failed to start check-in reminder scheduler: {e}")
     else:
         logger.critical("="*60)
         logger.critical("⚠️  Server started in DEGRADED MODE - MongoDB unavailable")
@@ -172,27 +146,10 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     
-    # Stop Redis sync service on shutdown
-    try:
-        from app.storage.redis_sync import redis_sync_service
-        redis_sync_service.stop_background_sync()
-        logger.info("[OK] Redis sync service stopped")
-    except Exception:
-        pass
-    
     # Graceful Shutdown
     logger.info("="*60)
     logger.info("Initiating graceful shutdown...")
     logger.info("="*60)
-    
-    try:
-        # Close Redis connections
-        if app.state.redis_mgr:
-            logger.info("Closing Redis connections...")
-            await app.state.redis_mgr.close()
-            logger.info("[OK] Redis connections closed")
-    except Exception as e:
-        logger.error(f"Error closing Redis: {e}")
     
     try:
         # Close MongoDB connections
@@ -590,31 +547,8 @@ async def health(request: Request):
         health_status["status"] = "degraded"
         logger.error(f"MongoDB health check failed: {e}")
     
-    # Check Redis (with timeout, optional - don't block health check)
-    try:
-        import asyncio
-        redis_mgr = request.app.state.redis_mgr
-        if redis_mgr:
-            try:
-                redis_client = await redis_mgr.get_redis()
-                if redis_client:
-                    # Use timeout for Redis ping (0.5 second max)
-                    await asyncio.wait_for(redis_client.ping(), timeout=0.5)
-                    health_status["checks"]["redis"] = {"status": "healthy", "message": "Connection OK"}
-                else:
-                    health_status["checks"]["redis"] = {"status": "unavailable", "message": "Client not available"}
-            except asyncio.TimeoutError:
-                health_status["checks"]["redis"] = {"status": "slow", "message": "Ping timeout (0.5s)"}
-            except Exception as redis_err:
-                health_status["checks"]["redis"] = {"status": "unhealthy", "message": str(redis_err)[:100]}
-        else:
-            health_status["checks"]["redis"] = {"status": "unavailable", "message": "Not initialized"}
-        # Redis failure is not critical - don't mark overall status as unhealthy
-    except Exception as e:
-        health_status["checks"]["redis"] = {"status": "unhealthy", "message": str(e)[:100]}
-        logger.warning(f"Redis health check failed: {e}")
-        # Redis failure is not critical
-    
+    health_status["checks"]["redis"] = {"status": "disabled", "message": "Redis removed — using MongoDB only"}
+
     # Return appropriate status code
     if health_status["status"] == "unhealthy":
         return JSONResponse(

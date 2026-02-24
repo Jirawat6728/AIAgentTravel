@@ -7,8 +7,9 @@ from fastapi import APIRouter, HTTPException, Header, BackgroundTasks, Request, 
 from fastapi.responses import StreamingResponse
 import json
 import asyncio
+import os
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Any, Dict
 from app.models import UserSession, TripPlan
 from app.models.trip_plan import SegmentStatus
@@ -25,29 +26,48 @@ from app.services.options_cache import get_options_cache
 from app.services.tts_service import TTSService
 from app.services.live_audio_service import LiveAudioService
 from fastapi.responses import Response
-import asyncio
 import base64
-import json
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 # ✅ Helper function to safely write debug logs
+def _calc_nights(check_in: Optional[str], check_out: Optional[str]) -> Optional[int]:
+    """คำนวณจำนวนคืนจาก check_in/check_out ISO string — คืน None ถ้าข้อมูลไม่ครบหรือ parse ไม่ได้"""
+    if not check_in or not check_out:
+        return None
+    try:
+        ci = datetime.fromisoformat(check_in.replace("Z", "+00:00"))
+        co = datetime.fromisoformat(check_out.replace("Z", "+00:00"))
+        nights = (co - ci).days
+        return nights if nights > 0 else None
+    except (ValueError, AttributeError):
+        return None
+
+
+_DEBUG_LOG_ENABLED = os.getenv("DEBUG_LOG_ENABLED", "false").lower() == "true"
+_DEBUG_LOG_MAX_BYTES = int(os.getenv("DEBUG_LOG_MAX_BYTES", str(10 * 1024 * 1024)))  # 10 MB default
+
 def _write_debug_log(data: dict):
-    """Safely write debug log, creating directory if needed"""
+    """Write debug log only when DEBUG_LOG_ENABLED=true, with size-based rotation."""
+    if not _DEBUG_LOG_ENABLED:
+        return
     try:
         from pathlib import Path
-        # Use relative path from backend root
+        import logging.handlers as _lh
         debug_log_dir = Path(__file__).parent.parent.parent / 'data' / 'logs' / 'debug'
         debug_log_dir.mkdir(parents=True, exist_ok=True)
         debug_log_path = debug_log_dir / 'chat_debug.log'
-        
+        # Rotate if file exceeds max size
+        if debug_log_path.exists() and debug_log_path.stat().st_size > _DEBUG_LOG_MAX_BYTES:
+            backup = debug_log_path.with_suffix('.log.1')
+            backup.unlink(missing_ok=True)
+            debug_log_path.rename(backup)
         with open(debug_log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(data, ensure_ascii=False) + '\n')
     except Exception as e:
         logger.debug(f"Failed to write debug log: {e}")
-        pass  # Silently ignore debug log errors
 
 async def _is_admin_user(user_id: str, storage) -> bool:
     """ตรวจสอบว่า user_id เป็น admin หรือไม่ (เช็กจาก DB เท่านั้น ไม่ hardcode)"""
@@ -85,13 +105,21 @@ def get_tts_service() -> TTSService:
 
 class ChatRequest(BaseModel):
     """Request model for chat endpoint matching frontend"""
-    message: str = Field(..., min_length=1, description="User's message")
+    message: str = Field(..., min_length=1, max_length=4000, description="User's message")
     user_id: Optional[str] = None
     client_trip_id: Optional[str] = None  # ✅ Backward compatibility
     trip_id: Optional[str] = None  # ✅ trip_id: สำหรับ 1 ทริป (1 trip = หลาย chat ได้)
     chat_id: Optional[str] = None  # ✅ chat_id: สำหรับแต่ละแชท (1 chat = 1 chat_id)
     trigger: Optional[str] = "user_message"
     mode: Optional[str] = "normal"  # ✅ 'normal' = ผู้ใช้เลือกช้อยส์เอง, 'agent' = AI ดำเนินการเอง
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: Optional[str]) -> Optional[str]:
+        allowed = {"normal", "agent", None}
+        if v not in allowed:
+            raise ValueError(f"mode must be one of {allowed - {None}}")
+        return v
 
 
 class ChatResponse(BaseModel):
@@ -664,9 +692,10 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
             "total_price": pricing.get("total_amount") or selected_hotel.get("price_amount"),
             "currency": pricing.get("currency") or selected_hotel.get("currency", "THB"),
             "rating": visuals.get("review_score") or raw_data.get("star_rating"),
-            "nights": (first_hotel_seg.requirements.get("check_out") and first_hotel_seg.requirements.get("check_in")) and 
-                     (datetime.fromisoformat(first_hotel_seg.requirements["check_out"].replace("Z", "+00:00")) - 
-                      datetime.fromisoformat(first_hotel_seg.requirements["check_in"].replace("Z", "+00:00"))).days or None
+            "nights": _calc_nights(
+                first_hotel_seg.requirements.get("check_in"),
+                first_hotel_seg.requirements.get("check_out"),
+            )
         }
     
     # Transport: Extract from segments with selected_option (CONFIRMED หรือ Agent Mode)
@@ -1043,8 +1072,7 @@ async def chat_stream(
             # ✅ SECURITY: Double-check session ownership (additional safety layer)
             if existing_session and existing_session.user_id != user_id:
                 logger.error(f"🚨 SECURITY ALERT: Unauthorized chat stream attempt: user {user_id} tried to access session {session_id} owned by {existing_session.user_id}")
-                raise HTTPException(status_code=403, detail="You do not have permission to access this session")
-                yield f"data: {json.dumps({'error': 'You do not have permission to access this session'})}\n\n"
+                yield f"data: {json.dumps({'status': 'error', 'error': 'You do not have permission to access this session'})}\n\n"
                 return
             
             # ✅ CRITICAL: Check GEMINI_API_KEY before initializing LLM
@@ -1243,13 +1271,12 @@ async def chat_stream(
                 })
                 # #endregion
                 
-                result = await asyncio.wait_for(task, timeout=timeout_seconds)  # ✅ str or (str, {"auto_booked": True})
-                if isinstance(result, tuple):
-                    response_text, agent_extra = result
-                    auto_booked = agent_extra.get("auto_booked", False)
-                else:
-                    response_text = result
-                    auto_booked = False
+                result = await asyncio.wait_for(task, timeout=timeout_seconds)
+                # run_turn always returns str; auto_booked flag is stored on the session object
+                response_text = result if isinstance(result, str) else (result[0] if isinstance(result, tuple) else str(result))
+                # Read auto_booked from session after run_turn completes
+                _session_after = await storage.get_session(session_id)
+                auto_booked = bool(getattr(_session_after, "_agent_auto_booked", False)) if _session_after else False
                 
                 # ✅ CRITICAL: Log detailed response info
                 if response_text is None:
@@ -1378,14 +1405,7 @@ async def chat_stream(
                         "✅ จองอัตโนมัติสำเร็จ! กรุณาชำระเงินที่ My Bookings เพื่อยืนยันการจอง"
                     )
             
-            # #region agent debug log (H3)
-            try:
-                _debug_path = r"c:\Users\Juins\Desktop\DEMO\AITravelAgent\.cursor\debug.log"
-                with open(_debug_path, "a", encoding="utf-8") as _df:
-                    _df.write(json.dumps({"id": f"log_{int(datetime.utcnow().timestamp()*1000)}_final_data", "timestamp": int(datetime.utcnow().timestamp()*1000), "location": "chat.py:stream", "message": "Completion final_data built", "data": {"mode": mode, "has_current_plan": bool(metadata.get("current_plan")), "auto_booked": auto_booked if mode == "agent" else None}, "runId": "run1", "hypothesisId": "H3"}, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            # #endregion
+            _write_debug_log({"id": f"log_{int(datetime.utcnow().timestamp()*1000)}_final_data", "timestamp": int(datetime.utcnow().timestamp()*1000), "location": "chat.py:stream", "message": "Completion final_data built", "data": {"mode": mode, "has_current_plan": bool(metadata.get("current_plan")), "auto_booked": auto_booked if mode == "agent" else None}, "runId": "run1", "hypothesisId": "H3"})
             
             # ✅ CRITICAL: Log before sending to ensure we have response
             logger.info(f"Sending completion event: session={session_id}, response_length={len(response_text)}, has_metadata={bool(metadata)}")
@@ -1561,6 +1581,9 @@ async def chat(
         if session and session.user_id != user_id:
             logger.error(f"🚨 SECURITY ALERT: Unauthorized chat attempt: user {user_id} tried to access session {session_id} owned by {session.user_id}")
             raise HTTPException(status_code=403, detail="You do not have permission to access this session")
+
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
         
         # ✅ Update trip_id and chat_id if provided (for new sessions or migration)
         if trip_id and (not session.trip_id or session.trip_id != trip_id):
@@ -1578,7 +1601,12 @@ async def chat(
         
         # Run agent turn (this returns the response text)
         # Note: TravelAgent.run_turn should handle internal state updates
-        response_text = await agent.run_turn(session_id, request.message, mode=mode)
+        result = await agent.run_turn(session_id, request.message, mode=mode)
+        # run_turn always returns str; auto_booked flag is stored on the session object
+        response_text = result if isinstance(result, str) else (result[0] if isinstance(result, tuple) else str(result))
+        # Read auto_booked from session after run_turn completes
+        _session_after = await storage.get_session(session_id)
+        auto_booked = bool(getattr(_session_after, "_agent_auto_booked", False)) if _session_after else False
         
         # Get the updated session for additional metadata
         updated_session = await storage.get_session(session_id)
@@ -2122,30 +2150,27 @@ async def live_audio_conversation(websocket: WebSocket):
             "message": "พร้อมสนทนาด้วยเสียงแล้ว"
         })
         
-        # Start receiving audio stream from session
+        # ── callbacks ──────────────────────────────────────────────────
         async def send_audio_to_client(audio_bytes: bytes):
-            """Send audio chunk to WebSocket client"""
+            """ส่ง PCM audio เป็น binary frame (เร็วกว่า base64)"""
             try:
-                audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
-                await websocket.send_json({
-                    "type": "audio",
-                    "data": audio_base64,
-                    "mime_type": "audio/pcm"
-                })
+                await websocket.send_bytes(audio_bytes)
             except Exception as e:
                 logger.error(f"Error sending audio to client: {e}")
-        
+
         async def send_text_to_client(text: str):
-            """Send text chunk to WebSocket client"""
             try:
-                await websocket.send_json({
-                    "type": "text",
-                    "data": text
-                })
+                await websocket.send_json({"type": "text", "data": text})
             except Exception as e:
                 logger.error(f"Error sending text to client: {e}")
-        
-        # Start background task to receive audio from session
+
+        async def send_turn_complete():
+            try:
+                await websocket.send_json({"type": "turn_complete"})
+            except Exception as e:
+                logger.error(f"Error sending turn_complete: {e}")
+
+        # ── background task: รับ audio/text จาก Gemini Live ──────────
         async def receive_from_session():
             try:
                 async for message in live_service.receive_audio_stream(
@@ -2153,60 +2178,57 @@ async def live_audio_conversation(websocket: WebSocket):
                     on_audio_chunk=send_audio_to_client,
                     on_text_chunk=send_text_to_client
                 ):
-                    # Message already sent via callbacks
-                    pass
+                    # ตรวจ turn_complete จาก server_content
+                    if message.get("type") == "turn_complete":
+                        await send_turn_complete()
+                    elif message.get("type") == "interruption":
+                        await websocket.send_json({"type": "interruption"})
             except Exception as e:
                 logger.error(f"Error receiving from session: {e}", exc_info=True)
-                await websocket.send_json({
-                    "type": "error",
-                    "message": f"Session error: {str(e)}"
-                })
-        
-        # Start receiving task
+                try:
+                    await websocket.send_json({"type": "error", "message": f"Session error: {str(e)}"})
+                except Exception:
+                    pass
+
         receive_task = asyncio.create_task(receive_from_session())
-        
-        # Main loop: receive audio/text from client and send to session
+
+        # ── main loop: รับ PCM binary จาก browser ────────────────────
         while True:
             try:
-                # Receive message from client
                 data = await websocket.receive()
-                
-                if "text" in data:
-                    # Text message
+
+                if "bytes" in data:
+                    # ✅ binary frame = raw PCM 16-bit LE 16kHz mono จาก ScriptProcessor
+                    audio_bytes = data["bytes"]
+                    if audio_bytes:
+                        await live_service.send_audio_chunk(session, audio_bytes)
+
+                elif "text" in data:
                     message_data = json.loads(data["text"])
                     message_type = message_data.get("type")
-                    
+
                     if message_type == "text":
-                        # Send text to session
                         text = message_data.get("data", "")
                         if text:
                             await live_service.send_text_message(session, text, turn_complete=True)
-                    
+                    elif message_type == "end_turn":
+                        await live_service.send_text_message(session, "", turn_complete=True)
                     elif message_type == "audio":
-                        # Send audio chunk to session
+                        # base64 fallback (legacy)
                         audio_base64 = message_data.get("data", "")
                         if audio_base64:
                             audio_bytes = base64.b64decode(audio_base64)
                             await live_service.send_audio_chunk(session, audio_bytes)
-                    
-                    elif message_type == "end_turn":
-                        # Mark turn as complete
-                        await live_service.send_text_message(session, "", turn_complete=True)
-                
-                elif "bytes" in data:
-                    # Binary audio data (raw PCM)
-                    audio_bytes = data["bytes"]
-                    await live_service.send_audio_chunk(session, audio_bytes)
-                
+
             except WebSocketDisconnect:
                 logger.info("WebSocket disconnected")
                 break
             except Exception as e:
                 logger.error(f"Error processing WebSocket message: {e}", exc_info=True)
-                await websocket.send_json({
-                    "type": "error",
-                    "message": f"Processing error: {str(e)}"
-                })
+                try:
+                    await websocket.send_json({"type": "error", "message": f"Processing error: {str(e)}"})
+                except Exception:
+                    pass
         
         # Cancel receive task
         receive_task.cancel()
@@ -2276,14 +2298,7 @@ async def delete_chat_session(chat_id: str, fastapi_request: Request):
         # Delete conversation/messages document
         conv_result = await conversations_collection.delete_one({"session_id": session_id, "user_id": user_id})
 
-        # Also clear from Redis cache if available
-        try:
-            storage = HybridStorage()
-            if hasattr(storage, 'redis') and storage.redis:
-                await storage.redis.delete(f"session:{session_id}")
-                await storage.redis.delete(f"history:{session_id}")
-        except Exception as cache_err:
-            logger.debug(f"Failed to clear Redis cache for deleted session: {cache_err}")
+        # Redis removed — MongoDB is the only storage
 
         logger.info(f"Deleted session {session_id}: sessions={session_result.deleted_count}, conversations={conv_result.deleted_count}")
         return {"ok": True, "session_id": session_id, "deleted_sessions": session_result.deleted_count, "deleted_conversations": conv_result.deleted_count}
@@ -2420,15 +2435,7 @@ async def auto_delete_old_conversations(request: AutoDeleteRequest, fastapi_requ
             "session_id": {"$in": old_session_ids}
         })
 
-        # Clear Redis cache for deleted sessions
-        try:
-            storage = HybridStorage()
-            if hasattr(storage, 'redis') and storage.redis:
-                for sid in old_session_ids:
-                    await storage.redis.delete(f"session:{sid}")
-                    await storage.redis.delete(f"history:{sid}")
-        except Exception as cache_err:
-            logger.debug(f"Failed to clear Redis cache during auto-delete: {cache_err}")
+        # Redis removed — MongoDB is the only storage
 
         logger.info(
             f"Auto-deleted {s_result.deleted_count} sessions and {c_result.deleted_count} conversations "
@@ -2447,3 +2454,16 @@ async def auto_delete_old_conversations(request: AutoDeleteRequest, fastapi_requ
     except Exception as e:
         logger.error(f"Auto-delete conversations error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Auto-delete failed: {str(e)}")
+
+
+class FlushSessionRequest(BaseModel):
+    session_id: Optional[str] = None  # flush specific session; if None, flush all user sessions
+
+
+@router.post("/flush-session")
+async def flush_session_to_mongodb(request: FlushSessionRequest, fastapi_request: Request):
+    """
+    No-op endpoint kept for frontend compatibility.
+    Redis removed — all data is already persisted directly to MongoDB in real-time.
+    """
+    return {"ok": True, "flushed": 0, "message": "MongoDB-only mode: data already persisted"}

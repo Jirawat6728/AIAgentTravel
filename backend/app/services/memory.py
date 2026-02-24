@@ -153,11 +153,6 @@ If no new information, return an empty list. Output JSON ONLY."""
                 logger.warning(f"Memory consolidation: 'new_memories' is not a list: {type(new_memories)}, skipping")
                 return
             
-            # ✅ Validate memories data structure
-            if not isinstance(new_memories, list):
-                logger.warning(f"Invalid memories structure from LLM: {type(new_memories)}, expected list")
-                return
-            
             for m_data in new_memories:
                 # ✅ Validate memory item structure
                 if not isinstance(m_data, dict):

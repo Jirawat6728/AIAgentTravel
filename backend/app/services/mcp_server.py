@@ -6,7 +6,6 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
 import asyncio
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.core.logging import get_logger
 from app.core.exceptions import AmadeusException, AgentException
@@ -29,6 +28,9 @@ __all__ = ["AMADEUS_TOOLS", "GOOGLE_MAPS_TOOLS", "WEATHER_TOOLS", "ALL_MCP_TOOLS
 # All tools combined (Amadeus + Google Maps + Weather/Timezone)
 ALL_MCP_TOOLS = AMADEUS_TOOLS + GOOGLE_MAPS_TOOLS + WEATHER_TOOLS
 
+# Non-retryable exceptions: validation errors and unknown tool errors should not be retried
+_NON_RETRYABLE = (AgentException,)
+
 
 # =============================================================================
 # MCP Tool Executor
@@ -38,145 +40,177 @@ class MCPToolExecutor:
     """
     Production-Grade MCP Tool Executor
     Executes MCP tools (function calls) for LLM with robust error handling
-    
+
     Features:
-    - Retry logic with exponential backoff
+    - Retry logic with exponential backoff (only for transient errors)
     - Timeout protection
     - Input validation and sanitization
     - Graceful error handling
     - Comprehensive logging
     """
-    
+
     def __init__(self):
         try:
             self.orchestrator = TravelOrchestrator()
             self.google_maps_client = get_google_maps_client()
             self.amadeus_mcp = AmadeusMCP(self.orchestrator)
+            # GoogleMapsMCP shares the same orchestrator — close() is guarded to avoid double-close
             self.google_maps_mcp = GoogleMapsMCP(self.google_maps_client, self.orchestrator)
             self.weather_mcp = WeatherMCP(self.orchestrator)
             self.max_retries = MCP_MAX_RETRIES
             self.timeout = MCP_TIMEOUT_SECONDS
             logger.info(
-                f"MCPToolExecutor initialized (AmadeusMCP + GoogleMapsMCP + WeatherMCP, retries={self.max_retries}, timeout={self.timeout}s)"
+                f"MCPToolExecutor initialized (AmadeusMCP + GoogleMapsMCP + WeatherMCP, "
+                f"retries={self.max_retries}, timeout={self.timeout}s)"
             )
         except Exception as e:
             logger.error(f"Failed to initialize MCPToolExecutor: {e}", exc_info=True)
             raise
-    
+
     def _validate_parameters(self, tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Validate and sanitize tool parameters
-        
-        Args:
-            tool_name: Tool name
-            parameters: Raw parameters
-            
-        Returns:
-            Validated and sanitized parameters
+        Validate and sanitize tool parameters.
+        Pass-through all parameters (including optional extras like children/infants)
+        so that tool implementations can use them even if not in the schema.
         """
-        validated = {}
-        
         # Get tool definition to check required fields
         tool_def = next((t for t in ALL_MCP_TOOLS if t["name"] == tool_name), None)
         if not tool_def:
             raise AgentException(f"Unknown tool: {tool_name}")
-        
+
         required = tool_def["parameters"].get("required", [])
         properties = tool_def["parameters"].get("properties", {})
-        
-        # Validate required fields (with special handling for search_hotels, get_weather_forecast)
+
+        validated: Dict[str, Any] = {}
+
+        # ── Validate required fields ──────────────────────────────────────────
         for field in required:
-            # ✅ Special case: search_hotels accepts either 'location' or 'location_name'
+            # Special case: search_hotels accepts 'location' or 'location_name'
             if tool_name == "search_hotels" and field == "location":
-                if "location" not in parameters and "location_name" not in parameters:
-                    raise AgentException(f"Missing required parameter: 'location' or 'location_name'")
-                validated[field] = parameters.get("location") or parameters.get("location_name")
-            # ✅ Special case: get_weather_forecast accepts place_name OR (latitude + longitude)
+                val = parameters.get("location") or parameters.get("location_name")
+                if not val:
+                    raise AgentException("Missing required parameter: 'location' or 'location_name'")
+                validated[field] = val
+
+            # Special case: get_weather_forecast accepts place_name OR lat+lng
             elif tool_name == "get_weather_forecast" and field == "place_name":
-                if parameters.get("place_name") or (parameters.get("latitude") is not None and parameters.get("longitude") is not None):
+                if parameters.get("place_name") or (
+                    parameters.get("latitude") is not None and parameters.get("longitude") is not None
+                ):
                     validated[field] = parameters.get("place_name") or ""
                 else:
                     raise AgentException("Missing required parameter: place_name or (latitude and longitude)")
+
+            # Special case: search_transfers_by_geo — accept both short and long names
+            elif tool_name == "search_transfers_by_geo":
+                alias_map = {
+                    "start_lat": ["start_lat", "start_latitude"],
+                    "start_lng": ["start_lng", "start_longitude"],
+                    "end_lat":   ["end_lat",   "end_latitude"],
+                    "end_lng":   ["end_lng",   "end_longitude"],
+                    "start_time": ["start_time"],
+                }
+                if field in alias_map:
+                    val = None
+                    for alias in alias_map[field]:
+                        if parameters.get(alias) is not None:
+                            val = parameters[alias]
+                            break
+                    if val is None:
+                        raise AgentException(f"Missing required parameter: {field}")
+                    validated[field] = val
+                elif field not in parameters or parameters[field] is None:
+                    raise AgentException(f"Missing required parameter: {field}")
+                else:
+                    validated[field] = parameters[field]
+
             elif field not in parameters or parameters[field] is None:
                 raise AgentException(f"Missing required parameter: {field}")
             else:
                 validated[field] = parameters[field]
-        
-        # Validate optional fields with defaults
+
+        # ── Copy schema-defined optional fields with defaults ─────────────────
         for field, prop_def in properties.items():
-            if field in parameters:
-                validated[field] = parameters[field]
-            elif "default" in prop_def:
-                validated[field] = prop_def["default"]
-        
-        # Sanitize string inputs
+            if field not in validated:
+                if field in parameters:
+                    validated[field] = parameters[field]
+                elif "default" in prop_def:
+                    validated[field] = prop_def["default"]
+
+        # ── Pass-through extra parameters not in schema (e.g. children, infants, non_stop) ──
+        for key, value in parameters.items():
+            if key not in validated:
+                validated[key] = value
+
+        # ── Sanitize string inputs ────────────────────────────────────────────
         for key, value in validated.items():
             if isinstance(value, str):
-                validated[key] = value.strip()[:500]  # Limit length
-        
+                validated[key] = value.strip()[:500]
+
         return validated
-    
-    @retry(
-        retry=retry_if_exception_type((AmadeusException, Exception)),
-        stop=stop_after_attempt(MCP_MAX_RETRIES),
-        wait=wait_exponential(multiplier=1, min=MCP_RETRY_DELAY, max=10)
-    )
+
     async def execute_tool(self, tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Execute a tool by name with given parameters (with retry logic)
-        
-        Args:
-            tool_name: Name of the tool to execute
-            parameters: Tool parameters as dictionary
-            
-        Returns:
-            Tool execution result as dictionary
+        Execute a tool by name with given parameters.
+        Retries up to MCP_MAX_RETRIES times for transient (non-validation) errors.
+        Validation errors (AgentException) are returned immediately without retry.
         """
+        logger.info(f"Executing MCP tool: {tool_name} with params: {parameters}")
+
+        # Validate first — do NOT retry on validation failures
         try:
-            logger.info(f"Executing MCP tool: {tool_name} with params: {parameters}")
-            
-            # Validate parameters
             validated_params = self._validate_parameters(tool_name, parameters)
-            
-            # Execute with timeout
+        except AgentException as e:
+            logger.warning(f"MCP tool {tool_name} validation failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "tool": tool_name,
+            }
+
+        last_error: Optional[Exception] = None
+        for attempt in range(1, MCP_MAX_RETRIES + 1):
             try:
                 result = await asyncio.wait_for(
                     self._execute_tool_internal(tool_name, validated_params),
-                    timeout=self.timeout
+                    timeout=self.timeout,
                 )
-                
-                # Validate result
+
                 if not isinstance(result, dict):
-                    raise AgentException(f"Tool {tool_name} returned invalid result type")
-                
+                    raise AgentException(f"Tool {tool_name} returned invalid result type: {type(result)}")
+
                 if "success" not in result:
                     result["success"] = True
-                
-                logger.info(f"MCP tool {tool_name} executed successfully")
+
+                logger.info(f"MCP tool {tool_name} executed successfully (attempt {attempt})")
                 return result
-                
+
             except asyncio.TimeoutError:
-                logger.error(f"MCP tool {tool_name} timed out after {self.timeout}s")
-                return {
-                    "success": False,
-                    "error": f"Tool execution timed out after {self.timeout} seconds",
-                    "tool": tool_name
-                }
-        
-        except Exception as e:
-            # ✅ SAFETY FIRST: Catch ALL exceptions (including AgentException) and return graceful JSON
-            # NEVER raise exceptions that crash the server - workflow must continue
-            logger.error(f"Tool execution failed: {tool_name} - {e}", exc_info=True)
-            return {
-                "status": "error",
-                "success": False,
-                "message": "Tool execution failed, please ask user for more details",
-                "error": str(e)[:200],  # Truncate error message
-                "tool": tool_name
-            }
-    
+                logger.error(f"MCP tool {tool_name} timed out after {self.timeout}s (attempt {attempt})")
+                # Timeout is transient — retry
+                last_error = asyncio.TimeoutError(f"Tool execution timed out after {self.timeout} seconds")
+
+            except _NON_RETRYABLE as e:
+                # Validation / logic errors — do not retry
+                logger.warning(f"MCP tool {tool_name} non-retryable error: {e}")
+                return {"success": False, "error": str(e), "tool": tool_name}
+
+            except Exception as e:
+                logger.warning(f"MCP tool {tool_name} transient error (attempt {attempt}): {e}")
+                last_error = e
+
+            if attempt < MCP_MAX_RETRIES:
+                await asyncio.sleep(MCP_RETRY_DELAY * attempt)
+
+        logger.error(f"MCP tool {tool_name} failed after {MCP_MAX_RETRIES} attempts: {last_error}")
+        return {
+            "success": False,
+            "error": str(last_error)[:200] if last_error else "Unknown error",
+            "tool": tool_name,
+        }
+
     async def _execute_tool_internal(self, tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
-        """Internal tool execution: route to Amadeus MCP or Google Maps MCP."""
+        """Internal tool execution: route to the appropriate MCP sub-executor."""
         # Amadeus tools
         if tool_name == "search_flights":
             return await self.amadeus_mcp.search_flights(parameters)
@@ -209,45 +243,61 @@ class MCPToolExecutor:
         if tool_name == "get_destination_timezone":
             return await self.weather_mcp.get_destination_timezone(parameters)
         raise AgentException(f"Unknown tool: {tool_name}")
-    
+
     async def close(self):
-        """Cleanup resources (Amadeus MCP + Google Maps MCP)."""
+        """Cleanup resources. Orchestrator is shared — close only once via amadeus_mcp."""
         try:
             if hasattr(self, "amadeus_mcp") and self.amadeus_mcp:
                 await self.amadeus_mcp.close()
-            if hasattr(self, "google_maps_mcp") and self.google_maps_mcp:
-                await self.google_maps_mcp.close()
+            # GoogleMapsMCP shares the same orchestrator — skip its close() to avoid double-close
             if hasattr(self, "weather_mcp") and self.weather_mcp:
                 await self.weather_mcp.close()
             logger.info("MCPToolExecutor closed successfully")
         except Exception as e:
             logger.warning(f"Error closing MCPToolExecutor: {e}")
-    
+
     def health_check(self) -> Dict[str, Any]:
-        """
-        Health check for MCP service
-        
-        Returns:
-            Health status dictionary
-        """
+        """Health check for all MCP sub-services."""
         try:
-            # Check if orchestrator is initialized
-            has_orchestrator = hasattr(self, 'orchestrator') and self.orchestrator is not None
-            
+            has_orchestrator = bool(getattr(self, "orchestrator", None))
+            has_amadeus = bool(getattr(self, "amadeus_mcp", None))
+            has_gmaps = bool(getattr(self, "google_maps_mcp", None))
+            has_weather = bool(getattr(self, "weather_mcp", None))
+            all_healthy = all([has_orchestrator, has_amadeus, has_gmaps, has_weather])
             return {
-                "status": "healthy" if has_orchestrator else "degraded",
-                "orchestrator": "initialized" if has_orchestrator else "not_initialized",
+                "status": "healthy" if all_healthy else "degraded",
+                "orchestrator": "initialized" if has_orchestrator else "missing",
+                "amadeus_mcp": "initialized" if has_amadeus else "missing",
+                "google_maps_mcp": "initialized" if has_gmaps else "missing",
+                "weather_mcp": "initialized" if has_weather else "missing",
                 "tools_count": len(ALL_MCP_TOOLS),
                 "max_retries": self.max_retries,
-                "timeout": self.timeout
+                "timeout": self.timeout,
             }
         except Exception as e:
-            return {
-                "status": "unhealthy",
-                "error": str(e)
-            }
+            return {"status": "unhealthy", "error": str(e)}
 
 
-# Global instance
-mcp_executor = MCPToolExecutor()
+# Global instance — lazy to avoid import-time failures when config is missing
+_mcp_executor: Optional[MCPToolExecutor] = None
 
+
+def get_mcp_executor() -> MCPToolExecutor:
+    global _mcp_executor
+    if _mcp_executor is None:
+        _mcp_executor = MCPToolExecutor()
+    return _mcp_executor
+
+
+# Backward-compatible alias (instantiated lazily on first access)
+class _LazyMCPExecutor:
+    """Proxy that creates MCPToolExecutor on first use, not at import time."""
+    _instance: Optional[MCPToolExecutor] = None
+
+    def __getattr__(self, name: str):
+        if self._instance is None:
+            object.__setattr__(self, "_instance", MCPToolExecutor())
+        return getattr(self._instance, name)
+
+
+mcp_executor: Any = _LazyMCPExecutor()
