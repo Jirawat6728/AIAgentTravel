@@ -21,6 +21,7 @@ from app.api.monitoring import router as monitoring_router
 from app.api.options_cache import router as options_cache_router
 from app.api.notification import router as notification_router
 from app.api.diagnostics import router as diagnostics_router
+from app.api.trips import router as trips_router
 
 # Setup logging
 setup_logging("travel_agent", settings.log_level, settings.log_file)
@@ -84,8 +85,8 @@ async def lifespan(app: FastAPI):
             mongo_mgr = MongoConnectionManager.get_instance()
             db = mongo_mgr.get_database()
             
-            # Test connection
-            db.command('ping')
+            # Test connection (must await — Motor database is async)
+            await db.command('ping')
             logger.info("[OK] MongoDB connection verified")
             
             # Setup indexes
@@ -97,7 +98,13 @@ async def lifespan(app: FastAPI):
             break
             
         except Exception as e:
+            err_msg = str(e).lower()
             logger.error(f"[FAIL] MongoDB initialization failed (attempt {attempt + 1}): {e}")
+            if "auth" in err_msg or "authentication failed" in err_msg:
+                logger.critical(
+                    "MongoDB Atlas: authentication failed — ตรวจสอบ username/password ใน MONGO_URI "
+                    "และใน Atlas → Database Access (ตั้งรหัสผ่านใหม่ได้); รหัสผ่านมีอักขระพิเศษต้อง URL-encode"
+                )
             if attempt < max_retries - 1:
                 import asyncio
                 await asyncio.sleep(retry_delay)
@@ -132,6 +139,23 @@ async def lifespan(app: FastAPI):
             logger.info("[OK] Check-in reminder scheduler started")
         except Exception as e:
             logger.warning(f"Failed to start check-in reminder scheduler: {e}")
+
+        # Proactive Crisis Manager: periodic flight monitor (every 30 min)
+        async def _flight_monitor_loop():
+            await asyncio.sleep(5 * 60)  # initial delay: 5 min after startup
+            while True:
+                try:
+                    from app.services.flight_monitor import FlightMonitorService
+                    await FlightMonitorService().check_all_active_bookings()
+                except Exception as _fm_err:
+                    logger.warning(f"[FlightMonitor] Loop error: {_fm_err}")
+                await asyncio.sleep(30 * 60)
+
+        try:
+            asyncio.create_task(_flight_monitor_loop())
+            logger.info("[OK] Flight monitor (Crisis Manager) started — interval: 30 min")
+        except Exception as e:
+            logger.warning(f"Failed to start flight monitor: {e}")
     else:
         logger.critical("="*60)
         logger.critical("⚠️  Server started in DEGRADED MODE - MongoDB unavailable")
@@ -282,6 +306,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     """Middleware to enforce rate limits"""
 
     async def dispatch(self, request: Request, call_next):
+        # CORS preflight (OPTIONS) must never be rate-limited so browser can get 2xx and allow actual request
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         # Get client identifier
         client_ip = request.client.host if request.client else "unknown"
 
@@ -331,6 +359,7 @@ app.include_router(auth_router)
 app.include_router(travel_router)
 app.include_router(admin_router)
 app.include_router(diagnostics_router)
+app.include_router(trips_router)
 app.include_router(mcp_router)
 app.include_router(booking_router)
 app.include_router(amadeus_viewer_router)

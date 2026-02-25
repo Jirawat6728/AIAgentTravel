@@ -16,7 +16,7 @@ from app.core.exceptions import LLMException
 logger = get_logger(__name__)
 
 # โมเดล TTS ของ Gemini (รับข้อความ ส่งคืนเสียงเท่านั้น)
-DEFAULT_TTS_MODEL = "gemini-2.5-flash-preview-tts"
+DEFAULT_TTS_MODEL = "gemini-3.0-flash-preview-tts"
 # PCM จาก API: 24kHz, 16-bit, mono
 TTS_SAMPLE_RATE = 24000
 TTS_SAMPLE_WIDTH = 2  # 16-bit

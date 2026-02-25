@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import Swal from 'sweetalert2';
 import './AITravelChat.css';
 import AppHeader from '../../components/common/AppHeader';
@@ -79,6 +79,7 @@ import PlanChoiceCard from '../../components/bookings/PlanChoiceCard';
 import PlanChoiceCardFlights from '../../components/bookings/PlanChoiceCardFlights';
 import PlanChoiceCardHotels from '../../components/bookings/PlanChoiceCardHotels';
 import PlanChoiceCardTransfer from '../../components/bookings/PlanChoiceCardTransfer';
+import BookingProgressBar from '../../components/chat/BookingProgressBar';
 import {
   TripSummaryCard,
   UserInfoCard,
@@ -121,9 +122,10 @@ function shortDate(iso) {
   }
 }
 
+let _msgSeq = 0;
 function makeId(prefix = 'trip') {
-  // Generate random 8 digit number
-  return Math.floor(10000000 + Math.random() * 90000000).toString();
+  _msgSeq += 1;
+  return `${prefix}_${Date.now()}_${_msgSeq}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 // ✅ Helper function for silent telemetry (optional service - fail silently)
@@ -208,7 +210,9 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
         if (res.ok) {
           const data = await res.json();
           const backendSessions = data.sessions || [];
-          
+          if (data.require_login) {
+            console.log('ℹ️ Backend returned require_login — showing empty list');
+          }
           console.log(`✅ Fetched ${backendSessions.length} sessions from backend for user: ${user.id} (${user.email || 'no email'})`);
           
           // ✅ Convert backend sessions to trips format
@@ -239,56 +243,51 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
             return false;
           });
           
-          // ✅ Update trips state with backend data
-          if (validBackendTrips.length > 0) {
-            setTrips(prev => {
-              // ✅ Filter existing trips by current user
-              const userTrips = prev.filter(t => {
-                const tripUserId = t.userId || t.user_id;
-                const isMatch = !tripUserId || tripUserId === user.id;
-                if (!isMatch) {
-                  console.warn(`⚠️ Filtering out trip from different user: ${t.tripId || t.chatId} (user: ${tripUserId}, current: ${user.id})`);
-                }
-                return isMatch;
-              });
-              
-              // ✅ Merge: backend sessions + existing user trips (avoid duplicates)
-              // ✅ Prioritize backend data (backend is source of truth)
-              const existingChatIds = new Set(validBackendTrips.map(t => t.chatId));
-              const uniqueExistingTrips = userTrips.filter(t => {
-                const chatId = t.chatId || t.tripId;
-                return !existingChatIds.has(chatId);
-              });
-              
-              // ✅ Combine: backend trips first (with messages from localStorage if available), then unique existing trips
-              const mergedTrips = validBackendTrips.map(backendTrip => {
-                // ✅ Try to find existing trip with same chatId to preserve messages
-                const existingTrip = userTrips.find(t => {
-                  const chatId = t.chatId || t.tripId;
-                  return chatId === backendTrip.chatId;
-                });
-                
-                if (existingTrip && existingTrip.messages && existingTrip.messages.length > 0) {
-                  // ✅ Keep messages from localStorage (will be refreshed when chat is opened)
-                  return {
-                    ...backendTrip,
-                    messages: existingTrip.messages, // Preserve messages temporarily
-                    title: existingTrip.title || backendTrip.title, // Keep user's custom title
-                    pinned: existingTrip.pinned || false
-                  };
-                }
-                return backendTrip;
-              });
-              
-              const finalTrips = [...mergedTrips, ...uniqueExistingTrips];
-              console.log(`✅ Merged ${finalTrips.length} trips for user ${user.id} (${validBackendTrips.length} from backend, ${uniqueExistingTrips.length} from localStorage)`);
-              
-              // ✅ ไม่ save ที่นี่ — จะ save ตอนปิดแชทหรือ refresh หน้าเท่านั้น
-              return finalTrips;
+          // ✅ Backend is the SINGLE SOURCE OF TRUTH for trip list
+          setTrips(prev => {
+            const userTrips = prev.filter(t => {
+              const tripUserId = t.userId || t.user_id;
+              return !tripUserId || tripUserId === user.id;
             });
-          } else {
-            console.log(`ℹ️ No sessions found in backend for user: ${user.id}, keeping localStorage trips`);
-          }
+
+            if (validBackendTrips.length > 0) {
+              // Enrich backend trips with cached messages/pinned from state → historyCache → []
+              const mergedTrips = validBackendTrips.map(backendTrip => {
+                const cid = backendTrip.chatId || backendTrip.tripId;
+                const existingTrip = userTrips.find(t => {
+                  const tid = t.chatId || t.tripId;
+                  return tid === backendTrip.chatId || tid === backendTrip.tripId;
+                });
+
+                // ✅ Priority: trips state > historyCache > []
+                const stateMessages = existingTrip?.messages?.length > 0 ? existingTrip.messages : null;
+                const cacheMessages = historyCache.current?.get(cid);
+                const bestMessages = stateMessages || (cacheMessages?.length > 0 ? cacheMessages : []);
+
+                return {
+                  ...backendTrip,
+                  messages: bestMessages,
+                  pinned: existingTrip?.pinned || false,
+                };
+              });
+
+              console.log(`✅ Synced ${mergedTrips.length} trips from backend for user ${user.id}`);
+              localStorage.setItem(LS_TRIPS_KEY, JSON.stringify(mergedTrips));
+              // ✅ เฉพาะ loadedTripsRef clear เพื่อให้ lazy-load re-apply cache → trips
+              // ❌ ห้าม clear historyCache — ข้อความที่โหลดมาแล้วต้องอยู่จนกว่าจะปิดหน้า
+              try { loadedTripsRef.current?.clear(); bulkFetchedRef.current = false; } catch (_) {}
+              return mergedTrips;
+            }
+
+            // No sessions in backend — start fresh
+            console.log(`ℹ️ No sessions in backend for user: ${user.id}, creating new trip`);
+            const displayName = user?.first_name || user?.name || "คุณ";
+            const newTrip = createNewTrip('ทริปใหม่', displayName);
+            newTrip.userId = user.id;
+            const fresh = [newTrip];
+            localStorage.setItem(LS_TRIPS_KEY, JSON.stringify(fresh));
+            return fresh;
+          });
         }
       } catch (error) {
         console.error('❌ Error fetching sessions from backend:', error);
@@ -299,6 +298,118 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     
     fetchSessions();
   }, [user?.id]); // ✅ Re-fetch when user changes
+
+  // ===== userTrips: trip entities from /api/trips (independent from chats) =====
+  const [userTrips, setUserTrips] = useState([]);
+  const [isLoadingUserTrips, setIsLoadingUserTrips] = useState(false);
+  const [tripSelectorOpen, setTripSelectorOpen] = useState(false);
+  const tripSelectorRef = useRef(null);
+
+  const fetchUserTrips = async () => {
+    if (!user?.id) return;
+    setIsLoadingUserTrips(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/trips`, {
+        credentials: 'include',
+        headers: { 'X-User-ID': user?.user_id || user?.id || '' },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setUserTrips(data.trips || []);
+      }
+    } catch (err) {
+      console.error('fetchUserTrips error:', err);
+    } finally {
+      setIsLoadingUserTrips(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchUserTrips();
+  }, [user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Close trip selector on outside click
+  useEffect(() => {
+    const handler = (e) => {
+      if (tripSelectorRef.current && !tripSelectorRef.current.contains(e.target)) {
+        setTripSelectorOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  // Register trip on backend when a new chat is created (idempotent)
+  const ensureTripRegistered = async (tripId, title) => {
+    if (!tripId || !user?.id) return;
+    try {
+      await fetch(`${API_BASE_URL}/api/trips`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': user?.user_id || user?.id || '',
+        },
+        body: JSON.stringify({ trip_id: tripId, title: title || 'ทริปใหม่' }),
+      });
+    } catch (err) {
+      console.warn('ensureTripRegistered failed (non-fatal):', err);
+    }
+  };
+
+  // Link current chat to a different trip
+  const linkChatToTrip = async (tripId) => {
+    const currentChat = trips.find(t => (t.chatId || t.tripId) === activeTripId);
+    if (!currentChat || !tripId) return;
+    const chatId = currentChat.chatId || currentChat.tripId;
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/trips/${tripId}/link-chat`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': user?.user_id || user?.id || '',
+        },
+        body: JSON.stringify({ chat_id: chatId }),
+      });
+      if (res.ok) {
+        // Update local state: set tripId on the active chat
+        setTrips(prev => prev.map(t =>
+          (t.chatId || t.tripId) === activeTripId
+            ? { ...t, tripId }
+            : t
+        ));
+        await fetchUserTrips();
+        console.log(`✅ Linked chat ${chatId} to trip ${tripId}`);
+      }
+    } catch (err) {
+      console.error('linkChatToTrip error:', err);
+    }
+    setTripSelectorOpen(false);
+  };
+
+  // Create new trip entity and link current chat to it
+  const handleCreateAndLinkTrip = async () => {
+    if (!user?.id) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/trips`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-ID': user?.user_id || user?.id || '',
+        },
+        body: JSON.stringify({ title: 'ทริปใหม่' }),
+      });
+      if (res.ok) {
+        const newTrip = await res.json();
+        await linkChatToTrip(newTrip.trip_id);
+        await fetchUserTrips();
+      }
+    } catch (err) {
+      console.error('handleCreateAndLinkTrip error:', err);
+    }
+  };
 
   // ✅ Active tab state for navigation (switch/tab indicator)
   const [activeTab, setActiveTab] = useState('flights'); // Default to 'flights'
@@ -432,17 +543,98 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
   const isRefreshingRef = useRef(false);
   // Track ว่าโหลด history แล้วหรือยัง (per chatId) เพื่อป้องกันโหลดซ้ำ
   const loadedTripsRef = useRef(new Set());
+  // ✅ In-memory cache: chatId → messages[] (เก็บตลอด session)
+  const historyCache = useRef(new Map());
+  // ✅ Flag กัน bulk fetch ซ้ำ
+  const bulkFetchedRef = useRef(false);
   // Abort controller สำหรับยกเลิก fetch ที่เก่า
   const historyAbortControllerRef = useRef(null);
   // ป้องกัน StrictMode double-invoke
   const isFetchingHistoryRef = useRef(false);
+
+  // ===== Bulk fetch ALL histories once after sessions are ready =====
+  // ดึงทุกแชทพร้อมกันครั้งเดียว แล้วเก็บใน historyCache **เท่านั้น** (ไม่ setTrips)
+  // เมื่อผู้ใช้คลิกเปลี่ยนแชท → lazy-load effect จะอ่านจาก cache แล้วแสดงทันที
+  const bulkFetchAllHistories = useCallback(async (tripList) => {
+    if (!user?.id) return;
+    if (bulkFetchedRef.current) return;
+    const chatIds = tripList
+      .map(t => t.chatId || t.tripId)
+      .filter(Boolean);
+    if (chatIds.length === 0) return;
+
+    bulkFetchedRef.current = true;
+    try {
+      const userIdToSend = user?.user_id || user?.id;
+      const res = await fetch(
+        `${API_BASE_URL}/api/chat/histories?chat_ids=${chatIds.join(',')}`,
+        {
+          credentials: 'include',
+          headers: { 'X-User-ID': userIdToSend || '', 'Content-Type': 'application/json' },
+        }
+      );
+      if (!res.ok) { bulkFetchedRef.current = false; return; }
+      const data = await res.json();
+      const rawHistories = data.histories || {};
+
+      for (const cid of chatIds) {
+        const rawMsgs = rawHistories[cid];
+        if (!rawMsgs || rawMsgs.length === 0) {
+          historyCache.current.set(cid, []);
+          continue;
+        }
+        const seen = new Set();
+        const messages = rawMsgs.filter(m => {
+          const key = m.id || `${m.type}_${m.text}_${m.timestamp || ''}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        historyCache.current.set(cid, messages);
+      }
+
+      console.log(`✅ Bulk histories cached: ${Object.keys(rawHistories).length}/${chatIds.length} chats (cache only, no render)`);
+
+      // Active chat: apply ทันทีถ้ายังไม่มี messages
+      if (activeTripId) {
+        const activeCid = activeChat?.chatId || activeTripId;
+        const activeCached = historyCache.current.get(activeCid);
+        if (activeCached && activeCached.length > 0) {
+          loadedTripsRef.current.add(activeCid);
+          setTrips(prev => {
+            const idx = prev.findIndex(t => t.chatId === activeCid || t.tripId === activeCid);
+            if (idx === -1) return prev;
+            if (prev[idx].messages && prev[idx].messages.length > 0) return prev;
+            const next = [...prev];
+            next[idx] = { ...next[idx], messages: activeCached };
+            return next;
+          });
+        }
+      }
+    } catch (err) {
+      bulkFetchedRef.current = false;
+      console.warn('⚠️ bulkFetchAllHistories error:', err);
+    }
+  }, [user?.id, user?.user_id, activeTripId, activeChat]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Trigger bulk fetch once trips list is stable
+  useEffect(() => {
+    if (isLoadingSessions) return;
+    if (bulkFetchedRef.current) return;
+    const tripList = trips.filter(t => {
+      const uid = t.userId || t.user_id;
+      return !uid || uid === (user?.id);
+    });
+    if (tripList.length === 0) return;
+    bulkFetchAllHistories(tripList);
+  }, [isLoadingSessions, trips.length, user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ===== Helper: แปลง history จาก backend เป็น messages format =====
   const mapHistoryToMessages = (data) => {
     if (!data.history || data.history.length === 0) return null;
     return data.history.map((m, idx) => ({
       ...m,
-      id: m.id || `restored_${idx}_${Date.now()}`,
+      id: m.id || `restored_${idx}_${makeId('hist')}`,
       type: m.role === 'assistant' ? 'bot' : (m.role || m.type),
       planChoices: m.planChoices || m.plan_choices || [],
       slotChoices: m.slotChoices || m.slot_choices || [],
@@ -462,12 +654,15 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     }));
   };
 
-  // ===== Lazy load history เมื่อ activeTripId เปลี่ยน (Gemini-style) =====
-  // โหลดเฉพาะแชทที่กำลังดูอยู่ ไม่ preload ทั้งหมด
+  // ===== Lazy load history เมื่อ activeTripId เปลี่ยน =====
+  // ✅ Cache-first: ตรวจ historyCache ก่อน → แสดงทันทีไม่มี spinner / ไม่ fetch
+  // ✅ Cache miss (bulk fetch ยังไม่เสร็จ): fallback fetch ทีละแชท แล้วเก็บเข้า cache
   useEffect(() => {
     if (!activeTripId) return;
 
-    // ยกเลิก fetch ที่เก่า (ถ้ามี)
+    // ✅ Reset TripSummary เมื่อเปลี่ยนแชท
+    setShowTripSummary(false);
+
     if (historyAbortControllerRef.current) {
       historyAbortControllerRef.current.abort();
     }
@@ -475,12 +670,35 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     const chatId = activeChat?.chatId || activeTripId;
     const tripId = activeChat?.tripId || activeTripId;
 
-    // ถ้าโหลดไปแล้วและมี messages อยู่แล้ว → skip (ไม่โหลดซ้ำ)
-    if (loadedTripsRef.current.has(chatId)) {
+    // --- ✅ CACHE HIT: อ่านจาก historyCache หรือ trips state ทันที — ไม่ fetch, ไม่ spinner ---
+    const cached = historyCache.current.get(chatId);
+    if (cached !== undefined || loadedTripsRef.current.has(chatId)) {
+      loadedTripsRef.current.add(chatId);
+      const msgsToApply = cached && cached.length > 0 ? cached : null;
+      if (msgsToApply) {
+        setTrips(prev => {
+          const idx = prev.findIndex(t => t.chatId === chatId || t.tripId === chatId);
+          if (idx === -1) return prev;
+          // ✅ ใช้ cache ที่มี messages มากกว่า (ป้องกัน fetchSessions reset เป็น [])
+          const existing = prev[idx].messages || [];
+          if (existing.length >= msgsToApply.length) return prev;
+          const next = [...prev];
+          next[idx] = { ...next[idx], messages: msgsToApply, _loadError: false };
+          return next;
+        });
+        // Restore plan/slots state
+        const latestBotWithData = msgsToApply.slice().reverse().find(m => m.type === 'bot' && (m.planChoices?.length || m.currentPlan || m.travelSlots));
+        if (latestBotWithData) {
+          if (latestBotWithData.planChoices?.length) setLatestPlanChoices(latestBotWithData.planChoices);
+          if (latestBotWithData.currentPlan) setSelectedPlan(latestBotWithData.currentPlan);
+          if (latestBotWithData.travelSlots) setSelectedTravelSlots(latestBotWithData.travelSlots);
+          setLatestBotMessage(latestBotWithData);
+        }
+      }
       return;
     }
 
-    // ป้องกัน StrictMode double-invoke
+    // --- CACHE MISS: fallback fetch ทีละแชท (bulk fetch อาจยังไม่เสร็จ) ---
     if (isFetchingHistoryRef.current) return;
     isFetchingHistoryRef.current = true;
 
@@ -501,23 +719,39 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
           signal: historyAbortControllerRef.current.signal,
         });
 
+        const findTripIndex = (list) => list.findIndex(t => t.chatId === chatId || t.tripId === chatId);
+
         if (!res.ok) {
           console.error(`❌ Failed to fetch history: ${res.status}`);
+          historyCache.current.set(chatId, []);
+          loadedTripsRef.current.add(chatId);
+          setTrips(prev => {
+            const idx = findTripIndex(prev);
+            if (idx === -1) return prev;
+            const next = [...prev];
+            next[idx] = { ...next[idx], messages: [], _loadError: true };
+            return next;
+          });
           return;
         }
 
         const data = await res.json();
         const restoredMessages = mapHistoryToMessages(data);
 
-        // Mark as loaded
         loadedTripsRef.current.add(chatId);
 
+        const currentUserId = user?.id || userId;
         if (!restoredMessages || restoredMessages.length === 0) {
-          console.log(`ℹ️ No history for chat: ${chatId}`);
+          historyCache.current.set(chatId, []);
+          setTrips(prev => {
+            const idx = findTripIndex(prev);
+            if (idx === -1) return prev;
+            const next = [...prev];
+            next[idx] = { ...next[idx], messages: [], updatedAt: next[idx].updatedAt, userId: next[idx].userId || currentUserId, _loadError: false };
+            return next;
+          });
           return;
         }
-
-        console.log(`✅ Loaded ${restoredMessages.length} messages for chat: ${chatId}`);
 
         // Deduplicate
         const seen = new Set();
@@ -528,12 +762,14 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
           return true;
         });
 
-        const currentUserId = user?.id || userId;
+        // ✅ เก็บเข้า cache เพื่อครั้งหน้าจะไม่ต้อง fetch อีก
+        historyCache.current.set(chatId, uniqueMessages);
+
         setTrips(prev => {
-          const idx = prev.findIndex(t => (t.chatId || t.tripId) === chatId);
+          const idx = findTripIndex(prev);
           if (idx === -1) return prev;
           const newTrips = [...prev];
-          newTrips[idx] = { ...newTrips[idx], messages: uniqueMessages, updatedAt: nowISO(), userId: newTrips[idx].userId || currentUserId };
+          newTrips[idx] = { ...newTrips[idx], messages: uniqueMessages, updatedAt: nowISO(), userId: newTrips[idx].userId || currentUserId, _loadError: false };
           return newTrips;
         });
 
@@ -566,6 +802,8 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
 
   const [inputText, setInputText] = useState('');
   const [processingTripId, setProcessingTripId] = useState(null);
+  // ✅ แสดง TripSummary เมื่อผู้ใช้พิมพ์ข้อความที่มีคำว่า "จองเลย"
+  const [showTripSummary, setShowTripSummary] = useState(false);
   // ✅ แก้ไข isTyping ให้ตรวจสอบทั้ง tripId และ chatId
   const isTyping = processingTripId !== null && activeChat && 
                    (processingTripId === activeTripId ||
@@ -776,10 +1014,18 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
         const current = tripsRef.current;
         if (!current?.length) return;
         const currentUserId = user?.id || userId;
-        const userTrips = current.map(trip => ({
-          ...trip,
-          userId: currentUserId
-        }));
+        // ✅ Merge messages จาก historyCache เข้า trips ก่อน save
+        const userTrips = current.map(trip => {
+          const cid = trip.chatId || trip.tripId;
+          const cached = historyCache.current?.get(cid);
+          const stateMs = trip.messages || [];
+          const bestMs = stateMs.length > 0 ? stateMs : (cached?.length > 0 ? cached : []);
+          return {
+            ...trip,
+            messages: bestMs.slice(-100),
+            userId: currentUserId,
+          };
+        });
         localStorage.setItem(LS_TRIPS_KEY, JSON.stringify(userTrips));
       } catch (_) {}
     };
@@ -992,29 +1238,34 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       return;
     }
     setTrips(prev => {
-      // ✅ SECURITY: Filter by user_id and update
       const currentUserId = user?.id || userId;
       return prev.map(t => {
         const tripUserId = t.userId || t.user_id;
         if (tripUserId && tripUserId !== currentUserId) return t;
-        // ✅ Match by tripId or chatId (activeTripId may be either)
         if (t.tripId !== tripId && t.chatId !== tripId) return t;
         const currentMessages = Array.isArray(t.messages) ? t.messages : [];
-        // ✅ แก้บั๊กแชทซ้อน: ถ้า msg เป็น bot และข้อความล่าสุดก็เป็น bot ที่มี planChoices/slotChoices เหมือนกัน → แทนที่ข้อความล่าสุดแทนการเพิ่ม
+
+        // Zero-Duplicate Guard: check if exact same message ID already exists
+        if (msg.id && currentMessages.some(m => m.id === msg.id)) {
+          return t;
+        }
+
+        // Content-based dedup: if bot msg with identical text arrived within 2s, replace
         if (msg.type === 'bot' && currentMessages.length > 0) {
           const last = currentMessages[currentMessages.length - 1];
-          if (last.type === 'bot') {
-            const lastChoicesLen = (Array.isArray(last.planChoices) ? last.planChoices.length : 0) + (Array.isArray(last.slotChoices) ? last.slotChoices.length : 0);
-            const msgChoicesLen = (Array.isArray(msg.planChoices) ? msg.planChoices.length : 0) + (Array.isArray(msg.slotChoices) ? msg.slotChoices.length : 0);
-            const sameText = (last.text || '') === (msg.text || '');
-            const sameChoicesCount = lastChoicesLen > 0 && lastChoicesLen === msgChoicesLen;
-            if (sameText && sameChoicesCount) {
-              const nextMessages = [...currentMessages.slice(0, -1), msg];
-              return { ...t, messages: nextMessages, updatedAt: nowISO() };
-            }
+          if (last.type === 'bot' && (last.text || '') === (msg.text || '')) {
+            const nextMessages = [...currentMessages.slice(0, -1), msg];
+            // ✅ Sync to in-memory cache
+            const cid = t.chatId || t.tripId;
+            historyCache.current.set(cid, nextMessages);
+            return { ...t, messages: nextMessages, updatedAt: nowISO() };
           }
         }
+
         const nextMessages = [...currentMessages, msg];
+        // ✅ Sync to in-memory cache whenever a message is appended
+        const cid = t.chatId || t.tripId;
+        historyCache.current.set(cid, nextMessages);
         return { ...t, messages: nextMessages, updatedAt: nowISO() };
       });
     });
@@ -1226,7 +1477,10 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       nt.userId = currentUserId;
       
       console.log('✅ New trip created:', { tripId: nt.tripId, chatId: nt.chatId, userId: currentUserId });
-      
+
+      // Register trip on backend (idempotent)
+      ensureTripRegistered(nt.tripId, 'ทริปใหม่').then(() => fetchUserTrips());
+
       setTrips(prev => {
         // ✅ SECURITY: Filter out trips from other users before adding new trip
         const userTrips = prev.filter(t => {
@@ -1293,58 +1547,65 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       return !tripUserId || tripUserId === currentUserId;
     });
 
-    // หา chatId ของ trip ที่จะลบ
-    const tripToDelete = userTrips.find(t => t.tripId === tripId);
-    const chatIdToDelete = tripToDelete?.chatId || tripId;
+    const tripToDelete = userTrips.find(t => t.tripId === tripId || t.chatId === tripId);
+    const chatIdToDelete = tripToDelete?.chatId || tripToDelete?.tripId || tripId;
 
-    // ลบออกจาก loaded cache
     loadedTripsRef.current.delete(chatIdToDelete);
+    loadedTripsRef.current.delete(tripId);
+    historyCache.current.delete(chatIdToDelete);
+    historyCache.current.delete(tripId);
 
-    // ลบออกจาก UI ก่อน (optimistic update)
+    // ลบจาก backend ก่อน แล้วค่อย sync UI + localStorage
+    let backendOk = false;
+    if (chatIdToDelete) {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/chat/sessions/${chatIdToDelete}`, {
+          method: 'DELETE',
+          credentials: 'include',
+          headers: { 'X-User-ID': currentUserId || '' },
+        });
+        backendOk = res.ok;
+        if (!res.ok) console.warn(`⚠️ Backend delete failed: ${res.status}`);
+      } catch (err) {
+        console.error('❌ Backend delete error:', err);
+      }
+    }
+
+    // อัปเดต UI + localStorage พร้อมกัน
     setTrips(prev => {
       const filtered = prev.filter(t => {
         const tUserId = t.userId || t.user_id;
-        if (tUserId && tUserId !== currentUserId) return true; // keep other users' trips
+        if (tUserId && tUserId !== currentUserId) return true;
         return t.tripId !== tripId;
       });
-      if (filtered.filter(t => {
+      const remaining = filtered.filter(t => {
         const tUserId = t.userId || t.user_id;
         return !tUserId || tUserId === currentUserId;
-      }).length === 0) {
+      });
+      let nextTrips;
+      if (remaining.length === 0) {
         const displayName = user?.first_name || user?.name || "คุณ";
         const newTrip = createNewTrip('ทริปใหม่', displayName);
         newTrip.userId = currentUserId;
-        return [newTrip, ...filtered.filter(t => {
-          const tUserId = t.userId || t.user_id;
-          return tUserId && tUserId !== currentUserId;
-        })];
+        nextTrips = [newTrip];
+      } else {
+        nextTrips = filtered;
       }
-      return filtered;
+      localStorage.setItem(LS_TRIPS_KEY, JSON.stringify(nextTrips));
+      return nextTrips;
     });
 
     // Switch active trip ถ้าลบ trip ที่กำลังดูอยู่
-    const isActiveTrip = userTrips.some(t => (t.tripId === tripId && activeTripId === t.tripId) || (t.chatId === activeTripId && t.tripId === tripId));
+    const isActiveTrip = userTrips.some(t =>
+      (t.tripId === tripId && activeTripId === t.tripId) ||
+      (t.chatId === activeTripId && t.tripId === tripId)
+    );
     if (isActiveTrip) {
       const remaining = userTrips.filter(t => t.tripId !== tripId);
       setActiveTripId(remaining[0]?.chatId || remaining[0]?.tripId || null);
     }
 
-    // ลบจาก backend (ไม่ block UI)
-    if (chatIdToDelete) {
-      fetch(`${API_BASE_URL}/api/chat/sessions/${chatIdToDelete}`, {
-        method: 'DELETE',
-        credentials: 'include',
-        headers: { 'X-User-ID': currentUserId || '' },
-      }).then(res => {
-        if (res.ok) {
-          console.log(`✅ Deleted chat from backend: ${chatIdToDelete}`);
-        } else {
-          console.warn(`⚠️ Backend delete failed: ${res.status}`);
-        }
-      }).catch(err => {
-        console.error('❌ Backend delete error:', err);
-      });
-    }
+    if (backendOk) console.log(`✅ Deleted chat from backend + localStorage: ${chatIdToDelete}`);
   };
 
   // ===== Edit trip name =====
@@ -1457,6 +1718,11 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     const trimmed = String(textToSend || '').trim();
     if (!trimmed) return;
 
+    // ✅ ตรวจจับคำว่า "จองเลย" ในข้อความ → เปิด TripSummary
+    if (trimmed.includes('จองเลย')) {
+      setShowTripSummary(true);
+    }
+
     // ✅ ป้องกัน double send (double-click / StrictMode)
     if (sendInProgressRef.current) {
       console.warn('⚠️ sendMessage: already in progress, skipping duplicate send');
@@ -1498,7 +1764,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     }
 
     const userMessage = {
-      id: Date.now(),
+      id: makeId('msg_user'),
       type: 'user',
       text: trimmed
     };
@@ -1633,7 +1899,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
 
                 // ✅ Safe null checks for all fields
                 const botMessage = {
-                  id: Date.now() + 1,
+                  id: makeId('msg_bot'),
                   type: 'bot',
                   text: responseText,
                   debug: finalData?.debug || null,
@@ -3861,9 +4127,9 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                       fontWeight: chatMode === 'normal' ? '600' : '400',
                       transition: 'all 0.2s'
                     }}
-                    title={isEditMode ? 'โหมดแก้ไขใช้ได้เฉพาะ Normal' : 'โหมดปกติ - คุณเลือกช้อยส์เอง'}
+                    title={isEditMode ? 'โหมดแก้ไขใช้ได้เฉพาะโหมดปกติ' : 'โหมดปกติ - คุณเลือกช้อยส์เอง'}
                   >
-                    📋 Normal
+                    📋 โหมดปกติ
                   </button>
                   <button
                     onClick={() => {
@@ -3883,9 +4149,9 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                       transition: 'all 0.2s',
                       opacity: isEditMode ? 0.6 : 1
                     }}
-                    title={isEditMode ? 'โหมดแก้ไขใช้ได้เฉพาะ Normal Mode' : 'โหมด Agent - AI ดำเนินการเองทั้งหมด'}
+                    title={isEditMode ? 'โหมดแก้ไขใช้ได้เฉพาะโหมดปกติ' : 'โหมด Agent - AI ดำเนินการเองทั้งหมด'}
                   >
-                    🤖 Agent
+                    🤖 โหมด Agent
                   </button>
                 </div>
                 
@@ -3894,10 +4160,10 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                   <button
                     className="chat-mode-dropdown-button"
                     onClick={() => !isEditMode && setIsChatModeDropdownOpen(!isChatModeDropdownOpen)}
-                    title={isEditMode ? 'โหมดแก้ไขใช้ได้เฉพาะ Normal' : (chatMode === 'normal' ? 'โหมดปกติ' : 'โหมด Agent')}
+                    title={isEditMode ? 'โหมดแก้ไขใช้ได้เฉพาะโหมดปกติ' : (chatMode === 'normal' ? 'โหมดปกติ' : 'โหมด Agent')}
                     style={isEditMode ? { cursor: 'default' } : {}}
                   >
-                    <span>{chatMode === 'normal' ? '📋 Normal' : '🤖 Agent'}</span>
+                    <span>{chatMode === 'normal' ? '📋 โหมดปกติ' : '🤖 โหมด Agent'}</span>
                     {!isEditMode && (
                       <svg className="chat-mode-dropdown-icon" fill="currentColor" viewBox="0 0 24 24">
                         <path d="M7 10l5 5 5-5z"/>
@@ -3915,7 +4181,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                           setIsChatModeDropdownOpen(false);
                         }}
                       >
-                        <span>📋 Normal</span>
+                        <span>📋 โหมดปกติ</span>
                         {chatMode === 'normal' && <span className="chat-mode-check">✓</span>}
                       </button>
                       <button
@@ -3926,7 +4192,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                           setIsChatModeDropdownOpen(false);
                         }}
                       >
-                        <span>🤖 Agent</span>
+                        <span>🤖 โหมด Agent</span>
                         {chatMode === 'agent' && <span className="chat-mode-check">✓</span>}
                       </button>
                     </div>
@@ -3935,6 +4201,13 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
               </div>
             </div>
           </div>
+
+          {/* Booking Progress Bar — shown in Normal Mode when funnel is active */}
+          {chatMode !== 'agent' && (
+            <BookingProgressBar
+              funnelState={latestBotMessage?.agentState?.booking_funnel_state || 'idle'}
+            />
+          )}
 
           {/* Messages Area */}
           <div className="messages-area">
@@ -3954,7 +4227,16 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                   </div>
                 </div>
               )}
-              {!isLoadingHistory && messages.map((message, msgIdx) => (
+              {!isLoadingHistory && activeTrip?._loadError && (
+                <div className="message-wrapper message-left">
+                  <div className="message-content-wrapper">
+                    <div className="message-bubble message-bot message-error" style={{ maxWidth: '85%' }}>
+                      <p className="message-text">โหลดประวัติแชทไม่สำเร็จ (เซิร์ฟเวอร์หรือการเชื่อมต่อขัดข้อง) กรุณาลองใหม่หรือเริ่มแชทใหม่</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {!isLoadingHistory && !activeTrip?._loadError && messages.map((message, msgIdx) => (
                 <div
                   key={message.id != null && message.id !== '' ? `msg-${message.id}-${msgIdx}` : `msg-idx-${msgIdx}`}
                   className={`message-wrapper ${message.type === 'user' ? 'message-right' : 'message-left'}`}
@@ -4173,7 +4455,8 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                                                   // ✅ Agent mode: แสดงเมื่อ core ready แม้ workflow step ไม่ตรง
                                                   (isAgentModeMsg && isCoreReady);
                             
-                            const shouldShow = message.type === 'bot' &&
+                            const shouldShow = showTripSummary &&
+                                   message.type === 'bot' &&
                                    hasPlan &&
                                    isCoreReady &&
                                    canShowSummary &&
@@ -4531,10 +4814,11 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                             'call_search': '🔍 กำลังค้นหา...',
                             'select_option': '✅ กำลังบันทึกตัวเลือก...',
                             
-                            // Searching
-                            'searching': '🔍 กำลังค้นหาเที่ยวบินและที่พัก...',
-                            'searching_flights': '✈️ กำลังค้นหาเที่ยวบิน...',
-                            'searching_hotels': '🏨 กำลังค้นหาที่พัก...',
+                            // Broker-style searching messages
+                            'searching': '🔍 นายหน้ากำลังตรวจสอบตัวเลือกให้คุณ...',
+                            'searching_flights': '✈️ นายหน้ากำลังตรวจสอบเที่ยวบินที่เหมาะสม...',
+                            'searching_hotels': '🏨 นายหน้ากำลังคัดเลือกที่พักที่เหมาะกับคุณ...',
+                            'call_search_done': '✅ ค้นหาเสร็จแล้ว กำลังคัดตัวเลือกที่ดีที่สุด...',
                             
                             // Agent Mode - Auto Selection & Booking
                             'agent_auto_select': '🤖 กำลังเลือกช้อยส์ที่ดีที่สุด...',
@@ -4555,10 +4839,14 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                             'confirming': '✅ กำลังยืนยันข้อมูล...',
                             'booking': '💳 กำลังจองทริป...',
                             
+                            // Broker-specific steps
+                            'confirming_search': '📋 นายหน้ากำลังยืนยันรายละเอียดทริปก่อนค้นหา...',
+                            'agent_auto_book_success': '🎉 จองสำเร็จแล้ว! ดูรายละเอียดใน My Bookings',
+
                             // Responding
                             'acting': '⚙️ กำลังดำเนินการ...',
-                            'speaking': '💬 กำลังสรุปคำตอบ...',
-                            'responder_start': '💬 กำลังสรุปคำตอบ...',
+                            'speaking': '💬 นายหน้ากำลังสรุปคำแนะนำ...',
+                            'responder_start': '💬 นายหน้ากำลังสรุปคำแนะนำ...',
                           };
                           const statusMap = {
                             'thinking': '🤔 กำลังคิด...',

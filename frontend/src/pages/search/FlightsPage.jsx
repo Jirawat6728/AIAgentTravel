@@ -13,6 +13,7 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
   const [origin, setOrigin] = useState('');
   const [destination, setDestination] = useState('');
   const [date, setDate] = useState('');
+  const [returnDate, setReturnDate] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [flights, setFlights] = useState([]);
@@ -45,6 +46,10 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
       alert("กรุณาเลือกวันที่เดินทางเป็นวันนี้หรือวันถัดไป (ไม่สามารถเลือกวันที่ผ่านมาแล้ว)");
       return;
     }
+    if (returnDate && returnDate < date) {
+      alert("วันกลับต้องไม่ก่อนวันเดินทาง");
+      return;
+    }
     setIsLoading(true);
     setError(null);
 
@@ -52,6 +57,7 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
       const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
       // Backend รองรับชื่อเมือง (เช่น กรุงเทพ โตเกียว) และรหัส IATA (BKK, NRT) — จะแปลงชื่อเมืองเป็นรหัสให้
       const params = new URLSearchParams({ origin: originTrim, destination: destTrim, departure_date: date });
+      if (returnDate) params.set('return_date', returnDate);
       
       const response = await fetch(`${baseUrl}/api/mcp/search/flights?${params.toString()}`, {
         method: 'POST',
@@ -256,10 +262,26 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
               <input
                 type="date"
                 value={date}
-                onChange={(e) => setDate(e.target.value)}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setDate(next);
+                  if (returnDate && next && returnDate < next) setReturnDate('');
+                }}
                 min={todayStr}
                 aria-label={t('flights.date')}
                 title={t('flights.date')}
+              />
+              <span className="flights-calendar-icon" aria-hidden="true">📅</span>
+            </div>
+            <div className="flights-input-date-wrap" aria-label={t('flights.returnDate')}>
+              <input
+                type="date"
+                value={returnDate}
+                onChange={(e) => setReturnDate(e.target.value)}
+                min={date || todayStr}
+                placeholder={t('flights.returnDate')}
+                aria-label={t('flights.returnDate')}
+                title={t('flights.returnDate')}
               />
               <span className="flights-calendar-icon" aria-hidden="true">📅</span>
             </div>

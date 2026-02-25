@@ -1,9 +1,10 @@
 """
-Endpoint API วินิจฉัย สำหรับแก้ปัญหาในการค้นหา
+Endpoint API วินิจฉัย สำหรับแก้ปัญหาในการค้นหา และตรวจสอบ MongoDB/Atlas
 """
 from fastapi import APIRouter, HTTPException
 from typing import Dict, Any
 import asyncio
+import os
 
 from app.core.logging import get_logger
 from app.core.config import settings
@@ -12,6 +13,67 @@ from app.services.mcp_server import MCPToolExecutor
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/diagnostics", tags=["diagnostics"])
+
+
+@router.get("/mongodb")
+async def check_mongodb_connection() -> Dict[str, Any]:
+    """
+    ตรวจสอบการเชื่อมต่อ MongoDB/Atlas และคืนข้อความ error จริง (สำหรับดีบัก)
+    เปิดในเบราว์เซอร์: http://localhost:8000/api/diagnostics/mongodb
+    """
+    uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI", "")
+    db_name = os.getenv("MONGO_DB_NAME") or os.getenv("MONGODB_DATABASE", "travel_agent")
+    # ไม่ส่ง URI เต็มกลับ (มีรหัสผ่าน) — แค่บอกว่าใช้หรือไม่
+    uri_set = bool(uri and uri.strip())
+    is_atlas = "mongodb+srv://" in (uri or "")
+
+    result = {
+        "ok": False,
+        "mongodb_configured": uri_set,
+        "database_name": db_name,
+        "is_atlas": is_atlas,
+        "error": None,
+        "error_type": None,
+        "hint": None,
+    }
+
+    if not uri_set:
+        result["error"] = "MONGO_URI (or MONGODB_URI) is not set in .env"
+        result["hint"] = "Set MONGO_URI in backend/.env (e.g. mongodb://localhost:27017 or mongodb+srv://... for Atlas)"
+        return result
+
+    try:
+        from motor.motor_asyncio import AsyncIOMotorClient
+
+        client = AsyncIOMotorClient(
+            uri,
+            serverSelectionTimeoutMS=15000,
+            connectTimeoutMS=20000,
+        )
+        db = client[db_name]
+        await asyncio.wait_for(db.command("ping"), timeout=10.0)
+        client.close()
+        result["ok"] = True
+        result["message"] = "MongoDB connection OK"
+        return result
+    except asyncio.TimeoutError as e:
+        result["error"] = "Connection timeout (MongoDB ไม่ตอบภายในเวลาที่กำหนด)"
+        result["error_type"] = "TimeoutError"
+        result["hint"] = "ตรวจสอบ Network Access ใน Atlas ว่าเพิ่ม IP ของคุณแล้ว หรือลอง 0.0.0.0/0 (dev)"
+        return result
+    except Exception as e:
+        err_msg = str(e).strip()
+        result["error"] = err_msg
+        result["error_type"] = type(e).__name__
+        if "Authentication failed" in err_msg or "auth" in err_msg.lower():
+            result["hint"] = "รหัสผ่านหรือ username ใน MONGO_URI ผิด หรือรหัสผ่านมีอักขระพิเศษต้อง URL-encode"
+        elif "getaddrinfo" in err_msg or "nodename" in err_msg or "resolution" in err_msg.lower():
+            result["hint"] = "DNS แก้ชื่อ cluster ไม่ได้ — ตรวจสอบ URI และการเชื่อมต่ออินเทอร์เน็ต"
+        elif "timed out" in err_msg.lower() or "timeout" in err_msg.lower():
+            result["hint"] = "เชื่อมต่อไม่ถึง Atlas — ตรวจสอบ Network Access (เพิ่ม IP หรือ 0.0.0.0/0)"
+        elif is_atlas:
+            result["hint"] = "ใน MongoDB Atlas: Network Access เพิ่ม IP, Database Access ตรวจสอบ user/password"
+        return result
 
 
 @router.get("/search-status")

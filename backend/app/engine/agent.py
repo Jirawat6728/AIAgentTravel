@@ -87,6 +87,181 @@ def _strip_options_pool_for_controller(state: dict) -> dict:
     return s
 
 
+def _build_resume_context(session) -> str:
+    """
+    State Resumer: Build a formatted context string summarising the pending booking state.
+    Injected into the controller prompt so the LLM can warmly greet the returning user.
+    """
+    try:
+        funnel = getattr(session, "booking_funnel_state", "idle") or "idle"
+        state_labels = {
+            "confirming_search": "กำลังรอการยืนยันการค้นหา",
+            "searching": "กำลังค้นหาตัวเลือก",
+            "selecting": "กำลังรอการเลือกตัวเลือก",
+            "confirming_booking": "กำลังรอการยืนยันการจอง",
+            "booking": "กำลังดำเนินการจอง",
+        }
+        state_th = state_labels.get(funnel, funnel)
+
+        lines = [
+            "=== RESUME BOOKING CONTEXT ===",
+            f"ผู้ใช้กลับมาต่อการจองที่ค้างไว้ สถานะปัจจุบัน: {state_th} ({funnel})",
+        ]
+
+        trip = getattr(session, "trip_plan", None)
+        if trip:
+            # Flights
+            flights = []
+            try:
+                for seg in (trip.travel.flights.outbound + trip.travel.flights.inbound):
+                    if seg.selected_option:
+                        o = seg.selected_option
+                        flights.append(f"{o.get('airline','?')} {o.get('flight_number','')} ({seg.origin}→{seg.destination})")
+                    elif seg.origin and seg.destination:
+                        flights.append(f"{seg.origin}→{seg.destination} (ยังไม่ได้เลือก)")
+            except Exception:
+                pass
+            if flights:
+                lines.append(f"เที่ยวบิน: {' | '.join(flights)}")
+
+            # Hotel
+            try:
+                for acc_seg in trip.accommodation.segments:
+                    if acc_seg.selected_option:
+                        h = acc_seg.selected_option
+                        lines.append(f"ที่พัก: {h.get('name', '?')} (เลือกแล้ว)")
+                    elif acc_seg.options_pool:
+                        lines.append(f"ที่พัก: มี {len(acc_seg.options_pool)} ตัวเลือก รอเลือก")
+            except Exception:
+                pass
+
+        pending_steps = {
+            "confirming_search": "รอผู้ใช้ยืนยัน/แก้ไขเงื่อนไขการค้นหา",
+            "searching": "กำลังค้นหา กรุณารอสักครู่",
+            "selecting": "รอผู้ใช้เลือกตัวเลือกที่ต้องการ",
+            "confirming_booking": "รอผู้ใช้ยืนยันการจอง",
+            "booking": "กำลังดำเนินการจอง",
+        }
+        lines.append(f"ขั้นตอนถัดไป: {pending_steps.get(funnel, 'ไม่ทราบ')}")
+        lines.append("INSTRUCTION: เริ่มต้นด้วย ASK_USER พร้อมข้อความต้อนรับผู้ใช้กลับและสรุปสถานะการจองที่ค้างไว้อย่างกระชับ")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"=== RESUME BOOKING CONTEXT ===\nUser returning mid-booking (state={getattr(session, 'booking_funnel_state', 'unknown')})\n"
+
+
+def _build_curated_comparison_context(session, travel_prefs: dict) -> str:
+    """
+    Curated Comparison: deterministically rank options_pool into
+    'cheapest' and 'best fit for user profile' categories.
+    Returns a formatted context block injected into the responder prompt.
+    """
+    try:
+        all_segments = (
+            session.trip_plan.travel.flights.outbound
+            + session.trip_plan.travel.flights.inbound
+            + session.trip_plan.accommodation.segments
+            + session.trip_plan.travel.ground_transport
+        )
+        lines = []
+
+        for seg in all_segments:
+            pool = getattr(seg, "options_pool", None) or []
+            if len(pool) < 2 or getattr(seg, "selected_option", None):
+                continue  # nothing to curate
+
+            seg_label = getattr(seg, "segment_type", "") or (
+                "เที่ยวบิน" if hasattr(seg, "flight_number") else "ที่พัก"
+            )
+
+            # --- Cheapest option ---
+            def _price(opt):
+                p = opt.get("price") or opt.get("total_price") or {}
+                if isinstance(p, dict):
+                    try:
+                        return float(p.get("total") or p.get("amount") or 999_999)
+                    except (TypeError, ValueError):
+                        return 999_999.0
+                try:
+                    return float(p)
+                except (TypeError, ValueError):
+                    return 999_999.0
+
+            cheapest_idx = min(range(len(pool)), key=lambda i: _price(pool[i]))
+            cheapest = pool[cheapest_idx]
+            cheapest_price = _price(cheapest)
+            cheapest_label = cheapest.get("airline") or cheapest.get("name") or f"ตัวเลือกที่ {cheapest_idx + 1}"
+
+            # --- Best-fit option (family / budget / style) ---
+            bestfit_idx = cheapest_idx  # default fallback
+            bestfit_reason = "ราคาดีที่สุด"
+
+            budget_level = (travel_prefs or {}).get("budget_level", "mid")
+            has_children = (travel_prefs or {}).get("has_children", False)
+
+            if budget_level == "high":
+                # Prefer business/first-class or highest rated hotel
+                for i, opt in enumerate(pool):
+                    cabin = (opt.get("cabin_class") or opt.get("cabin") or "").lower()
+                    rating = opt.get("rating") or 0
+                    if "business" in cabin or "first" in cabin or float(rating or 0) >= 4.5:
+                        bestfit_idx = i
+                        bestfit_reason = f"เหมาะกับผู้เดินทางระดับพรีเมียม ({'Business Class' if 'business' in cabin else f'Rating {rating}⭐'})"
+                        break
+            elif has_children:
+                # Prefer direct flights (fewer stops) or family-friendly hotels
+                best_stops = 99
+                for i, opt in enumerate(pool):
+                    stops = len(opt.get("stops") or opt.get("segments") or [])
+                    amenities = " ".join(str(a) for a in (opt.get("amenities") or [])).lower()
+                    if stops < best_stops or "family" in amenities or "kid" in amenities:
+                        best_stops = stops
+                        bestfit_idx = i
+                        bestfit_reason = "เที่ยวบินตรง ไม่ต้องต่อเครื่อง เหมาะสำหรับครอบครัวที่มีเด็ก" if stops == 0 else "เหมาะสำหรับครอบครัว"
+            elif budget_level == "low":
+                # Just reinforce cheapest
+                bestfit_reason = "ประหยัดสุดคุ้มค่า"
+            else:
+                # Mid: prefer best value (price-to-quality ratio)
+                best_score = -1.0
+                for i, opt in enumerate(pool):
+                    rating = float(opt.get("rating") or opt.get("stars") or 3)
+                    price = _price(opt)
+                    if price > 0:
+                        score = rating / price * 10_000
+                        if score > best_score:
+                            best_score = score
+                            bestfit_idx = i
+                            bestfit_reason = f"คุ้มค่าที่สุด (Rating {rating}⭐ / ราคา {int(price):,})"
+
+            bestfit = pool[bestfit_idx]
+            bestfit_label = bestfit.get("airline") or bestfit.get("name") or f"ตัวเลือกที่ {bestfit_idx + 1}"
+            bestfit_price = _price(bestfit)
+
+            if cheapest_idx == bestfit_idx:
+                # Only one recommendation needed
+                lines.append(
+                    f"\n=== CURATED COMPARISON ({seg_label}) ===\n"
+                    f"ตัวเลือกแนะนำ (ดีที่สุดและประหยัดที่สุด): ตัวเลือกที่ {cheapest_idx + 1} — {cheapest_label} "
+                    f"({int(cheapest_price):,} บาท)\n"
+                    f"INSTRUCTION: แนะนำ ตัวเลือกที่ {cheapest_idx + 1} เพราะเป็นทั้งราคาถูกและเหมาะสมที่สุด\n"
+                )
+            else:
+                lines.append(
+                    f"\n=== CURATED COMPARISON ({seg_label}) ===\n"
+                    f"ตัวเลือกที่ประหยัดที่สุด: ตัวเลือกที่ {cheapest_idx + 1} — {cheapest_label} ({int(cheapest_price):,} บาท)\n"
+                    f"ตัวเลือกที่เหมาะกับผู้ใช้: ตัวเลือกที่ {bestfit_idx + 1} — {bestfit_label} ({int(bestfit_price):,} บาท) เพราะ {bestfit_reason}\n"
+                    f"INSTRUCTION: นำเสนอทั้งสองตัวเลือกนี้แบบเปรียบเทียบ แล้วแนะนำ ตัวเลือกที่ {bestfit_idx + 1} เป็นหลัก\n"
+                    f"FORMAT: '1. ประหยัดสุด — {cheapest_label}: {int(cheapest_price):,} บาท [ข้อเสีย]\n"
+                    f"         2. เหมาะกับคุณ — {bestfit_label}: {int(bestfit_price):,} บาท เพราะ {bestfit_reason}'\n"
+                )
+
+        return "\n".join(lines) if lines else ""
+    except Exception as e:
+        logger.debug(f"_build_curated_comparison_context error: {e}")
+        return ""
+
+
 class TravelAgent:
     """
     Production-Grade Travel Agent with Two-Pass ReAct Loop
@@ -171,7 +346,8 @@ class TravelAgent:
         session_id: str,
         user_input: str,
         status_callback: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
-        mode: str = "normal"  # ✅ 'normal' = ผู้ใช้เลือกช้อยส์เอง, 'agent' = AI ดำเนินการเอง
+        mode: str = "normal",  # ✅ 'normal' = ผู้ใช้เลือกช้อยส์เอง, 'agent' = AI ดำเนินการเอง
+        travel_preferences: Optional[Dict[str, Any]] = None,  # Broker preferences from user profile
     ) -> str:
         """
         Run one turn of conversation (main entry point)
@@ -202,13 +378,35 @@ class TravelAgent:
             # ✅ Store last known data for fallback
             last_known_data = session.trip_plan.model_dump() if session.trip_plan else {}
             agent_monitor.log_activity(session_id, user_id, "start", f"Processing message: {user_input[:50]}...")
-            
-            # Phase 0: Recall (Brain Memory) & Get User Profile
+
+            # Broker: merge travel_preferences from caller into session (caller-supplied takes precedence)
+            if travel_preferences:
+                existing_prefs = getattr(session, "travel_preferences", {}) or {}
+                merged = {**existing_prefs, **travel_preferences}
+                session.travel_preferences = merged
+
+            # State Resumer: detect if user is returning mid-booking
+            _funnel = getattr(session, "booking_funnel_state", "idle") or "idle"
+            _resume_context = ""
+            if _funnel not in ("idle", "completed") and mode == "normal":
+                _resume_context = _build_resume_context(session)
+
+            # Phase 0: Recall (Brain Memory) + Sliding Window + User Profile
             if status_callback:
                 await status_callback("thinking", "🤖 Agent กำลังระลึกความจำ...", "recall_start")
             
             user_memories = await self.memory.recall(session.user_id)
             memory_context = self.memory.format_memories_for_prompt(user_memories)
+            
+            # Sliding Window: build token-aware conversation context
+            conversation_context = ""
+            try:
+                conversation_context = await self.memory.build_conversation_context(
+                    session_id=session_id,
+                    current_input=user_input,
+                )
+            except Exception as ctx_err:
+                logger.warning(f"Failed to build conversation context: {ctx_err}")
             
             # Get user profile for personalized context
             user_profile_context = await self._get_user_profile_context(user_id)
@@ -218,7 +416,7 @@ class TravelAgent:
                 mode_text = "โหมด Agent" if mode == "agent" else "โหมดปกติ"
                 await status_callback("thinking", f"กำลังวางแผนทริป ({mode_text})...", "controller_start")
 
-            if getattr(settings, "enable_langgraph_full_workflow", False):
+            if getattr(settings, "enable_langgraph_full_workflow", True):
                 # ✅ LangGraph จัดการ workflow ทั้งหมดแทน agent.run_controller
                 try:
                     from app.orchestration.full_workflow_graph import run_full_workflow
@@ -232,10 +430,11 @@ class TravelAgent:
                         status_callback=status_callback,
                         memory_context=memory_context,
                         user_profile_context=user_profile_context,
+                        conversation_context=conversation_context,
                     )
                 except Exception as lgf_err:
                     logger.warning(f"LangGraph full workflow failed, falling back to agent loop: {lgf_err}")
-                    action_log = await self.run_controller(session, user_input, status_callback, memory_context, user_profile_context, mode=mode)
+                    action_log = await self.run_controller(session, user_input, status_callback, memory_context, user_profile_context, mode=mode, conversation_context=conversation_context)
                     await self.storage.save_session(session)
                     if status_callback:
                         await status_callback("speaking", "🤖 Agent กำลังสรุปคำตอบ...", "responder_start")
@@ -266,7 +465,7 @@ class TravelAgent:
                             await self._run_agent_mode_auto_complete(session, action_log, status_callback)
                             await self.storage.save_session(session)
             else:
-                action_log = await self.run_controller(session, user_input, status_callback, memory_context, user_profile_context, mode=mode)
+                action_log = await self.run_controller(session, user_input, status_callback, memory_context, user_profile_context, mode=mode, conversation_context=conversation_context)
                 # Save state after Phase 1
                 await self.storage.save_session(session)
                 # Phase 2: Responder (Speak)
@@ -400,12 +599,43 @@ class TravelAgent:
             
             if email:
                 context_parts.append(f"📧 Email: {email}")
+
+            # --- Personal Tailor: Family composition ---
+            family = user_doc.get("family") or []
+            if family:
+                children = [m for m in family if (m.get("type") or "").lower() == "child"]
+                adults = len(family) - len(children)
+                family_desc = f"{1 + adults} ผู้ใหญ่"
+                if children:
+                    ages = [str(c.get("age", "?")) for c in children if c.get("age")]
+                    age_str = f" (อายุ {', '.join(ages)} ปี)" if ages else ""
+                    family_desc += f" + {len(children)} เด็ก{age_str}"
+                context_parts.append(f"👨‍👩‍👧‍👦 ครอบครัว: {family_desc}")
             
             # Add preferences if available
             if preferences:
                 learned_prefs = preferences.get("memory_summaries", [])
                 if learned_prefs:
-                    context_parts.append(f"💡 ความชอบที่เรียนรู้มา: {', '.join(learned_prefs[-3:])}")  # Last 3 preferences
+                    # Personal Tailor: highlight dietary restrictions separately
+                    dietary_keywords = ["ไม่เผ็ด", "มังสวิรัติ", "vegan", "halal", "ฮาลาล", "non-spicy", "vegetarian", "gluten"]
+                    dietary = [s for s in learned_prefs if any(k.lower() in s.lower() for k in dietary_keywords)]
+                    if dietary:
+                        context_parts.append(f"🥗 อาหาร/ข้อจำกัด: {dietary[-1]}")
+                    other_prefs = [s for s in learned_prefs[-3:] if s not in dietary]
+                    if other_prefs:
+                        context_parts.append(f"💡 ความชอบที่เรียนรู้มา: {', '.join(other_prefs)}")
+            
+            # --- Personal Tailor: session travel_preferences (broker profile) ---
+            travel_prefs = preferences.get("travelPreferences") or {} if preferences else {}
+            if travel_prefs:
+                tp_parts = []
+                if travel_prefs.get("budget_level"):
+                    labels = {"high": "สูง (Business/Luxury)", "mid": "กลาง", "low": "ประหยัด"}
+                    tp_parts.append(f"งบ: {labels.get(travel_prefs['budget_level'], travel_prefs['budget_level'])}")
+                if travel_prefs.get("travel_style"):
+                    tp_parts.append(f"สไตล์: {travel_prefs['travel_style']}")
+                if tp_parts:
+                    context_parts.append(f"✈️ ความชอบการเดินทาง: {' | '.join(tp_parts)}")
             
             # 🛂 Visa section (for flight/transfer search and planning - filter/plan by visa)
             visa_type = user_doc.get("visa_type") or ""
@@ -455,7 +685,8 @@ class TravelAgent:
         status_callback: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
         memory_context: str = "",
         user_profile_context: str = "",
-        mode: str = "normal"  # ✅ 'normal' = ผู้ใช้เลือกช้อยส์เอง, 'agent' = AI ดำเนินการเอง
+        mode: str = "normal",
+        conversation_context: str = "",
     ) -> ActionLog:
         """
         Phase 1: Controller Loop
@@ -555,6 +786,9 @@ class TravelAgent:
                         workflow_validation=workflow_state,
                         ml_intent_hint=ml_intent_hint,
                         ml_validation_result=ml_validation_result,
+                        conversation_context=conversation_context,
+                        travel_preferences=getattr(session, "travel_preferences", {}) or {},
+                        resume_context=_resume_context,
                     )
                 except Exception as e:
                     logger.error(f"Failed to call controller LLM: {e}", exc_info=True)
@@ -663,6 +897,27 @@ class TravelAgent:
                         if mode == "normal":
                             has_ask_user = True
                             logger.info(f"Normal Mode: ASK_USER action - waiting for user input")
+                            # Broker funnel state: detect whether this is a pre-search confirmation
+                            _has_pending_search = any(
+                                act2.action_type in ("CALL_SEARCH", "BATCH")
+                                for act2 in action_log.actions
+                            )
+                            if not _has_pending_search and not any(
+                                s.options_pool for s in (
+                                    session.trip_plan.travel.flights.outbound
+                                    + session.trip_plan.travel.flights.inbound
+                                    + session.trip_plan.accommodation.segments
+                                    + session.trip_plan.travel.ground_transport
+                                )
+                            ):
+                                session.booking_funnel_state = "confirming_search"
+                            elif all(
+                                s.options_pool and s.selected_option for s in (
+                                    session.trip_plan.travel.flights.outbound
+                                    + session.trip_plan.accommodation.segments
+                                ) if s.options_pool
+                            ):
+                                session.booking_funnel_state = "confirming_booking"
                         # ✅ Agent Mode: NEVER ASK_USER - always infer intelligently
                         else:
                             logger.info(f"Agent Mode: Controller suggested ASK_USER, but Agent Mode NEVER asks - inferring intelligently instead")
@@ -734,6 +989,8 @@ class TravelAgent:
                             )
                             has_ask_user = True
                             continue
+                        # Broker funnel: transition to searching
+                        session.booking_funnel_state = "searching"
                         # Collect search tasks for parallel execution
                         search_tasks.append(self._execute_call_search(session, payload, action_log))
                     
@@ -742,6 +999,9 @@ class TravelAgent:
                             await status_callback("selecting", "🤖 Agent กำลังบันทึกตัวเลือก...", "select_option")
                         try:
                             await self._execute_select_option(session, payload, action_log)
+                            # Broker funnel: transition to selecting after first selection
+                            if session.booking_funnel_state in ("idle", "searching"):
+                                session.booking_funnel_state = "selecting"
                         except Exception as e:
                             logger.error(f"Error executing SELECT_OPTION: {e}", exc_info=True)
 
@@ -749,24 +1009,22 @@ class TravelAgent:
                 if search_tasks:
                     if status_callback:
                         await status_callback("searching", "🤖 Agent กำลังค้นหาเที่ยวบินและที่พัก...", "call_search")
+                    search_task_objects = [asyncio.ensure_future(coro) for coro in search_tasks]
                     try:
-                        # ✅ Set timeout for parallel searches: 35 seconds max (leaving time for LLM calls and other operations within 1.5-minute target)
                         results = await asyncio.wait_for(
-                            asyncio.gather(*search_tasks, return_exceptions=True),
-                            timeout=35.0  # ✅ Optimized for 1.5-minute completion
+                            asyncio.gather(*search_task_objects, return_exceptions=True),
+                            timeout=35.0
                         )
                     except asyncio.TimeoutError:
-                        logger.warning(f"⚠️ Search tasks timed out after 35s - {len(search_tasks)} tasks")
-                        # Cancel remaining tasks
-                        for task in search_tasks:
-                            if not task.done():
-                                task.cancel()
-                        # Return partial results if any completed
+                        logger.warning(f"⚠️ Search tasks timed out after 35s - {len(search_task_objects)} tasks")
+                        for t in search_task_objects:
+                            if not t.done():
+                                t.cancel()
                         results = []
-                        for task in search_tasks:
+                        for t in search_task_objects:
                             try:
-                                if task.done():
-                                    results.append(task.result())
+                                if t.done():
+                                    results.append(t.result())
                                 else:
                                     results.append(Exception("Search timed out"))
                             except Exception as e:
@@ -793,6 +1051,10 @@ class TravelAgent:
                     # ✅ Validate segment states after search
                     for slot_name, segment, idx in self.slot_manager.get_all_segments(session.trip_plan):
                         self.slot_manager.ensure_segment_state(segment, slot_name)
+
+                    # Broker funnel: after search completes, transition to selecting
+                    if session.booking_funnel_state == "searching":
+                        session.booking_funnel_state = "selecting"
                     
                     # ✅ CRUD STABILITY: Agent Mode: Auto-select and auto-book immediately after search completes
                     if mode == "agent":
@@ -1120,12 +1382,13 @@ class TravelAgent:
         action_log: ActionLog,
         memory_context: str = "",
         user_profile_context: str = "",
-        mode: str = "normal",  # ✅ Pass mode to LLM
-        session_id: str = "unknown",  # 🆕 For cost tracking
-        user_id: str = "unknown",  # 🆕 For cost tracking
-        workflow_validation: Optional[Dict[str, Any]] = None,  # ✅ สำหรับตรวจ workflow และ validate
-        ml_intent_hint: Optional[Dict[str, Any]] = None,  # ✅ ML keyword decode สำหรับวางแผนแม่นยำ ~90% ใน 1 นาที
-        ml_validation_result: Optional[Dict[str, Any]] = None,  # ✅ ML validate_extracted_data สำหรับวันที่/คน/งบประมาณ
+        mode: str = "normal",
+        session_id: str = "unknown",
+        user_id: str = "unknown",
+        workflow_validation: Optional[Dict[str, Any]] = None,
+        ml_intent_hint: Optional[Dict[str, Any]] = None,
+        ml_validation_result: Optional[Dict[str, Any]] = None,
+        **kwargs,
     ) -> Optional[ControllerAction]:
         """
         Call Controller LLM to get next action
@@ -1145,15 +1408,23 @@ class TravelAgent:
             current_date = datetime.now().strftime("%Y-%m-%d")
             system_prompt_with_date = CONTROLLER_SYSTEM_PROMPT.replace("{{CURRENT_DATE}}", current_date)
             
+            # Build conversation context via sliding window (injected by caller)
+            _conv_ctx = kwargs.get("conversation_context", "")
+
             prompt_parts = [
                 user_profile_context if user_profile_context else "",
                 "=== USER LONG-TERM MEMORY (BRAIN) ===\n",
                 memory_context,
+            ]
+            if _conv_ctx:
+                prompt_parts.append("\n=== CONVERSATION HISTORY (SLIDING WINDOW) ===\n")
+                prompt_parts.append(_conv_ctx)
+            prompt_parts.extend([
                 "\n=== CURRENT STATE (TRIP PLAN) ===\n",
                 state_json,
                 "\n=== LATEST USER INPUT ===\n",
                 user_input,
-            ]
+            ])
             # ✅ ML KEYWORD DECODE: ใช้สำหรับวางแผนให้แม่นยำ ~90% และรวดเร็วใน 1 นาที
             if ml_intent_hint and isinstance(ml_intent_hint, dict) and ml_intent_hint.get("confidence", 0) >= 0.5:
                 conf = ml_intent_hint.get("confidence", 0)
@@ -1196,6 +1467,38 @@ class TravelAgent:
                     json.dumps([a.model_dump() for a in action_log.actions[-3:]], ensure_ascii=False, indent=2)
                 ])
             
+            # ✅ BROKER: Inject travel_preferences context for Normal Mode
+            travel_prefs = kwargs.get("travel_preferences", {})
+            if travel_prefs and mode == "normal":
+                prompt_parts.append("\n=== BROKER PROFILE — USER TRAVEL PREFERENCES ===\n")
+                prompt_parts.append("Apply these preferences when recommending and filtering options:\n")
+                if travel_prefs.get("dietary_restrictions"):
+                    prompt_parts.append(f"- Dietary: {travel_prefs['dietary_restrictions']}")
+                if travel_prefs.get("budget_level"):
+                    prompt_parts.append(f"- Budget Level: {travel_prefs['budget_level']} (low/mid/high)")
+                if travel_prefs.get("travel_style"):
+                    prompt_parts.append(f"- Travel Style: {travel_prefs['travel_style']}")
+                if travel_prefs.get("family_friendly"):
+                    prompt_parts.append(f"- Family Friendly: {travel_prefs['family_friendly']} (has children)")
+                if travel_prefs.get("preferred_cabin"):
+                    prompt_parts.append(f"- Preferred Cabin: {travel_prefs['preferred_cabin']}")
+                if travel_prefs.get("special_needs"):
+                    prompt_parts.append(f"- Special Needs: {travel_prefs['special_needs']}")
+                if travel_prefs.get("preferred_airlines"):
+                    prompt_parts.append(f"- Preferred Airlines: {travel_prefs['preferred_airlines']}")
+                extra_raw = {k: v for k, v in travel_prefs.items() if k not in (
+                    "dietary_restrictions", "budget_level", "travel_style", "family_friendly",
+                    "preferred_cabin", "special_needs", "preferred_airlines"
+                )}
+                if extra_raw:
+                    prompt_parts.append(f"- Other: {json.dumps(extra_raw, ensure_ascii=False)}")
+                prompt_parts.append("Reference these preferences explicitly when issuing ASK_USER confirmations and recommendations.\n")
+
+            # State Resumer: inject pending booking context so LLM greets returning user
+            resume_ctx = kwargs.get("resume_context", "")
+            if resume_ctx and mode == "normal":
+                prompt_parts.append(f"\n{resume_ctx}\n")
+
             # ✅ Add mode-specific instructions for GENIUS AUTONOMOUS mode
             if mode == "agent":
                 prompt_parts.append(f"\n=== 🤖 AGENT MODE (100% GENIUS AUTONOMOUS) - CRITICAL RULES ===\n")
@@ -1280,15 +1583,16 @@ class TravelAgent:
                 prompt_parts.append("7. Use 'batch_actions' to do CREATE + UPDATE + SEARCH in one turn if possible.")
                 prompt_parts.append("8. After CALL_SEARCH, auto-select and auto-book will happen automatically (you don't need to do it).")
             else:
-                prompt_parts.append("📋 NORMAL MODE - USER SELECTS:")
+                prompt_parts.append("📋 NORMAL MODE - USER SELECTS (โหมดปกติ ผู้ใช้เลือกช้อยส์เอง):")
                 prompt_parts.append("1. EXTRACT ALL information from User Input (dates, locations, guests, preferences).")
                 prompt_parts.append("2. OPTIMIZE SPEED: Use 'batch_actions' to perform multiple updates/searches in one turn.")
                 prompt_parts.append("3. If user provides details for multiple slots, UPDATE ALL of them.")
                 prompt_parts.append("4. If requirements are COMPLETE, CALL_SEARCH immediately.")
-                prompt_parts.append("5. ❌ NEVER auto-select options - set status to SELECTING and wait for user to choose.")
-                prompt_parts.append("6. ❌ NEVER auto-book - user must click booking button themselves.")
-                prompt_parts.append("7. If user asks to select/book, use ASK_USER to clarify (but usually they'll select via UI).")
-            prompt_parts.append("8. Output VALID JSON ONLY.")
+                prompt_parts.append("5. After CALL_SEARCH returns options, use ASK_USER so the user sees options and selects themselves.")
+                prompt_parts.append("6. ❌ NEVER auto-select options - wait for user to choose from the list.")
+                prompt_parts.append("7. ❌ NEVER auto-book - user must click booking button themselves.")
+                prompt_parts.append("8. If user asks to select/book, use ASK_USER to clarify (usually they select via UI).")
+            prompt_parts.append("9. Output VALID JSON ONLY.")
             
             prompt = "\n".join(prompt_parts)
             
@@ -1356,10 +1660,9 @@ class TravelAgent:
                 logger.error(f"Invalid response from Controller LLM: {data}")
                 # 🧠 Error Recovery: Return safe default action based on mode
                 if mode == "agent":
-                    # Agent Mode: Never ask, create itinerary with defaults
                     return ControllerAction(
                         thought="LLM returned invalid JSON, Agent Mode: creating itinerary with intelligent defaults",
-                        action="CREATE_ITINERARY",
+                        action=ActionType.CREATE_ITINERARY,
                         payload={
                             "destination": user_input or "Bangkok",
                             "start_date": (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d"),
@@ -1371,10 +1674,9 @@ class TravelAgent:
                         }
                     )
                 else:
-                    # Normal Mode: Ask user
                     return ControllerAction(
                         thought="LLM returned invalid JSON, asking user for clarification",
-                        action="ASK_USER",
+                        action=ActionType.ASK_USER,
                         payload={"missing_fields": ["all"]}
                     )
             
@@ -1462,10 +1764,9 @@ class TravelAgent:
                         "trip_type": "round_trip"
                     }
                 )
-            # Normal Mode: Ask user
             return ControllerAction(
                 thought=f"LLM service error: {str(e)[:100]}. Asking user to retry or rephrase.",
-                action="ASK_USER",
+                action=ActionType.ASK_USER,
                 payload={"error": "llm_service_error", "message": "กรุณาลองใหม่อีกครั้งหรือพูดใหม่อีกรอบ"}
             )
         except Exception as e:
@@ -1474,7 +1775,7 @@ class TravelAgent:
             if mode == "agent":
                 return ControllerAction(
                     thought=f"Error but Agent Mode: attempting to create itinerary with defaults",
-                    action="CREATE_ITINERARY",
+                    action=ActionType.CREATE_ITINERARY,
                     payload={
                         "destination": user_input,
                         "start_date": "tomorrow",
@@ -1482,10 +1783,9 @@ class TravelAgent:
                         "origin": "Bangkok"
                     }
                 )
-            # Normal Mode: Ask user
             return ControllerAction(
                 thought=f"Unexpected error: {str(e)[:100]}. Asking user for help.",
-                action="ASK_USER",
+                action=ActionType.ASK_USER,
                 payload={"error": "unexpected_error", "message": "เกิดข้อผิดพลาด กรุณาลองอธิบายอีกครั้ง"}
             )
     
@@ -2915,6 +3215,32 @@ class TravelAgent:
                 f"Searched {slot_name}[{segment_index}] via Aggregator, found {len(standardized_results)} options"
             )
             session.update_timestamp()
+
+            # Broker: save tool_call + tool_output messages for chain-of-thought audit trail
+            try:
+                _tool_call_content = json.dumps({
+                    "tool": "search_" + ("flights" if "flight" in slot_name else "hotels" if "accommodation" in slot_name else "transfers"),
+                    "slot": slot_name,
+                    "params": {k: v for k, v in segment.requirements.items() if not k.startswith("_")},
+                }, ensure_ascii=False)
+                _tool_output_content = json.dumps({
+                    "tool": "search_" + ("flights" if "flight" in slot_name else "hotels" if "accommodation" in slot_name else "transfers"),
+                    "slot": slot_name,
+                    "result_count": len(standardized_results),
+                    "success": True,
+                }, ensure_ascii=False)
+                await self.storage.save_message(session.session_id, {
+                    "role": "tool_call",
+                    "content": _tool_call_content,
+                    "metadata": {"slot": slot_name, "segment_index": segment_index},
+                })
+                await self.storage.save_message(session.session_id, {
+                    "role": "tool_output",
+                    "content": _tool_output_content,
+                    "metadata": {"slot": slot_name, "result_count": len(standardized_results)},
+                })
+            except Exception as _tc_err:
+                logger.debug(f"tool_call/tool_output message save skipped: {_tc_err}")
         
         except Exception as e:
             logger.error(f"Error in CALL_SEARCH via Aggregator: {e}", exc_info=True)
@@ -3726,6 +4052,8 @@ Output JSON with your analysis and selection:
                             status_text = "✅ จองสำเร็จแล้ว!" if booking_status == "confirmed" else "✅ สร้างการจองสำเร็จแล้ว (รอชำระเงิน)"
                             await status_callback("booking", f"{status_text} ราคารวม {int(total_price):,} บาท - Booking ID: {booking_id[:8]}...", "agent_auto_book_success")
                         
+                        # Broker funnel: booking completed
+                        session.booking_funnel_state = "completed"
                         action_log.add_action(
                             "AUTO_BOOK",
                             {
@@ -3794,6 +4122,23 @@ Output JSON with your analysis and selection:
             Response message in Thai with proactive suggestions
         """
         try:
+            # ✅ Normal Mode: use "broker" if user has travel_preferences set, else "agency"
+            _normal_personality = (
+                "broker"
+                if (getattr(session, "travel_preferences", None) or {})
+                else "agency"
+            )
+            _effective_system_prompt = (
+                get_responder_system_prompt(
+                    _normal_personality,
+                    response_style=self.response_style,
+                    detail_level=self.detail_level,
+                    chat_language=self.chat_language,
+                )
+                if mode == "normal"
+                else self.responder_system_prompt
+            )
+
             # 🧠 Intelligence Layer: Generate Proactive Suggestions
             suggestions = []
             
@@ -3950,6 +4295,24 @@ Output JSON with your analysis and selection:
                 city_names_context += "✅ CORRECT: 'กรุงเทพฯ - เชียงใหม่' (complete)\n"
                 city_names_context += "❌ WRONG: 'กรุงเทพฯ - เชียง' (incomplete - NEVER do this)\n\n"
             
+            # Build broker preferences context for responder
+            _travel_prefs = getattr(session, "travel_preferences", {}) or {}
+            _funnel_state = getattr(session, "booking_funnel_state", "idle") or "idle"
+            broker_context = ""
+            if _travel_prefs and mode == "normal":
+                broker_context = "\n=== BROKER PROFILE — USER TRAVEL PREFERENCES ===\n"
+                broker_context += f"booking_funnel_state: {_funnel_state}\n"
+                for k, v in _travel_prefs.items():
+                    broker_context += f"- {k}: {v}\n"
+                broker_context += "Reference these preferences explicitly in your recommendation.\n"
+            elif mode == "normal":
+                broker_context = f"\n=== BROKER FUNNEL STATE ===\nbooking_funnel_state: {_funnel_state}\n"
+
+            # Curated Comparison: pre-process options_pool for ranked recommendation
+            curated_context = ""
+            if mode == "normal":
+                curated_context = _build_curated_comparison_context(session, _travel_prefs)
+
             prompt = f"""{user_profile_context if user_profile_context else ""}
 
 === USER LONG-TERM MEMORY ===
@@ -3963,7 +4326,8 @@ Output JSON with your analysis and selection:
 {intelligence_context}
 {agent_mode_context}
 {city_names_context}
-
+{broker_context}
+{curated_context}
 === INSTRUCTIONS ===
 Generate a response message in Thai:
 1. **CRITICAL: ALWAYS USE COMPLETE CITY NAMES** - Never truncate or abbreviate:
@@ -3975,12 +4339,19 @@ Generate a response message in Thai:
 
 2. Summarize what was done (from action_log)
 
-3. If NORMAL MODE (mode='normal'):
-   - ✅ If options_pool exists, say: "พบ X ตัวเลือก - กรุณาเลือกตัวเลือกที่ต้องการจากรายการด้านล่างค่ะ"
-   - ✅ If user selects option, say: "ได้เลือก [item] แล้ว - สามารถแก้ไขได้หากต้องการ"
-   - ✅ If all options selected, say: "พร้อมจองแล้ว - กรุณากดปุ่ม 'Confirm Booking' เพื่อดำเนินการจอง"
-   - ✅ Always remind: "สามารถแก้ไขตัวเลือกได้ตลอดเวลาค่ะ"
-   - ❌ NEVER say Agent did something - user selects manually
+3. If NORMAL MODE (mode='normal') — AGENCY SALES STYLE (นายหน้าขายตรง):
+   You are a PROACTIVE SALES AGENT. NEVER passive. ALWAYS push toward booking.
+   - ✅ When options_pool found: ACTIVELY RECOMMEND the best one with reason:
+     "เยี่ยมเลยค่ะ! พบ X ตัวเลือกแล้วค่ะ — ดิฉันแนะนำตัวเลือกที่ [N] เลยนะคะ เพราะ [เหตุผลสั้นๆ] 👇 เลือกได้เลยค่ะ!"
+   - ✅ When user selects option: CELEBRATE + push next step:
+     "เยี่ยมมากเลยค่ะ! เลือก [item] ได้ดีมาก [ชมสั้นๆ]! เหลืออีกแค่ [slot ที่เหลือ] — เลือกแล้วจองได้เลยค่ะ!"
+   - ✅ When all options selected: URGENCY + close the deal:
+     "สมบูรณ์แบบมากเลยค่ะ! ทริปพร้อมแล้ว — กด Confirm Booking ได้เลยนะคะ อย่ารอนานไม่งั้นราคาอาจเปลี่ยน ⚡"
+   - ✅ Create natural urgency: "ช่วงนี้ซีซั่น ที่นั่งเต็มเร็วมากค่ะ", "ราคานี้ดีมาก ไม่แน่ว่าจะอยู่ถึงพรุ่งนี้ได้ไหม"
+   - ✅ Upsell naturally: แนะนำ transfer / activity เพิ่มเติมถ้าเหมาะสม
+   - ❌ NEVER use passive language like "กรุณาเลือก..." or "สามารถแก้ไขได้..."
+   - ❌ NEVER list options without recommending a specific one
+   - ❌ NEVER end without a clear call-to-action
 
 4. If AGENT MODE (mode='agent') was used:
    - ✅ Explain what AI did autonomously (selected, booked, etc.)
@@ -3992,12 +4363,12 @@ Generate a response message in Thai:
 5. If AUTO_BOOK succeeded, celebrate and say "✅ จองเสร็จแล้วนะ ไปจ่ายตังด้วย! รายละเอียดอยู่ใน My Bookings"
 
 6. If options_pool exists but no selected_option yet:
-   - 📋 NORMAL MODE: Say "พบ X ตัวเลือก - กรุณาเลือกตัวเลือกที่ต้องการจากรายการด้านล่างค่ะ"
+   - 📋 NORMAL MODE (AGENCY): "เยี่ยมเลยค่ะ! พบ X ตัวเลือกแล้วค่ะ — ดิฉันแนะนำตัวเลือกที่ [N] เลยนะคะ เพราะ [เหตุผล] เลือกได้เลยค่ะ 👇"
    - 🤖 AGENT MODE: Say "พบ X options - กำลังเลือกตัวเลือกที่ดีที่สุดให้อัตโนมัติ..."
-   - ❌ DON'T say "กรุณาเลือก" in Agent Mode
+   - ❌ DON'T say passive "กรุณาเลือก" in both modes
 
 7. If selected_option exists:
-   - 📋 NORMAL MODE: Say "ได้เลือก [item] แล้ว - สามารถแก้ไขได้หากต้องการ"
+   - 📋 NORMAL MODE (AGENCY): "เยี่ยมมากเลยค่ะ! เลือก [item] ได้ดีมาก [ชมสั้นๆ]! เหลืออีกแค่ [slot ที่เหลือ] — รีบเลือกแล้วจองเลยนะคะ ⚡"
    - 🤖 AGENT MODE: Say "ได้เลือก [item] แล้ว" (already done, don't ask)
    - ❌ DON'T ask for confirmation in Agent Mode
 
@@ -4008,7 +4379,7 @@ Generate a response message in Thai:
 11. In Agent Mode: Focus on WHAT WAS DONE, not what needs user action
 12. In Normal Mode: Guide user to select options and book manually
 
-Tone: Professional, helpful, proactive, friendly, confident. In Agent Mode: AUTONOMOUS. In Normal Mode: GUIDING (help user select and book).
+Tone: In Agent Mode: AUTONOMOUS — act, don't ask. In Normal Mode: AGENCY SALES — proactive, enthusiastic, recommend with confidence, create urgency, push toward booking closure. NEVER passive. ALWAYS end with clear call-to-action.
 Respond in Thai text only (no JSON, no markdown)."""
             
             # ✅ CRITICAL: Initialize response_text to avoid UnboundLocalError
@@ -4034,7 +4405,7 @@ Respond in Thai text only (no JSON, no markdown)."""
                     # Note: We'll need to pass user_input - for now use action_log context
                     intent_result = await self.intent_llm.analyze_intent_and_respond(
                         user_input=f"Based on actions: {action_log_json}",
-                        system_prompt=self.responder_system_prompt,
+                        system_prompt=_effective_system_prompt,
                         max_tool_calls=3,
                         temperature=settings.responder_temperature
                     )
@@ -4070,7 +4441,7 @@ Respond in Thai text only (no JSON, no markdown)."""
                         logger.info(f"Calling production_llm.responder_generate: complexity={complexity}, prompt_length={len(prompt)}")
                         response_text = await self.production_llm.responder_generate(
                             prompt=prompt,
-                            system_prompt=self.responder_system_prompt,
+                            system_prompt=_effective_system_prompt,
                             complexity=complexity
                         )
                         logger.info(f"Production LLM response generated: length={len(response_text) if response_text else 0}, is_none={response_text is None}, is_empty={not response_text.strip() if response_text else True}")
@@ -4112,9 +4483,9 @@ Respond in Thai text only (no JSON, no markdown)."""
                     try:
                         response_text = await self.llm.generate_content(
                             prompt=prompt,
-                            system_prompt=self.responder_system_prompt,
+                            system_prompt=_effective_system_prompt,
                             temperature=settings.responder_temperature,
-                            max_tokens=2500,  # ✅ Increased from 2000 to 2500 to ensure complete city names are included
+                            max_tokens=2500,
                             auto_select_model=True,
                             context="responder"
                         )
@@ -4133,9 +4504,9 @@ Respond in Thai text only (no JSON, no markdown)."""
                                 logger.info("Retrying after quota wait period...")
                                 response_text = await self.llm.generate_content(
                                     prompt=prompt,
-                                    system_prompt=self.responder_system_prompt,
+                                    system_prompt=_effective_system_prompt,
                                     temperature=settings.responder_temperature,
-                                    max_tokens=2500,  # ✅ Increased from 2000 to 2500 to ensure complete city names are included
+                                    max_tokens=2500,
                                     auto_select_model=True,
                                     context="responder"
                                 )

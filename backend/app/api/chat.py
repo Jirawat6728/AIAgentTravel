@@ -18,7 +18,7 @@ from app.core.constants import FALLBACK_RESPONSE_EMPTY
 from app.services.llm import LLMServiceWithMCP
 from app.services.llm import IntentBasedLLM
 from app.services.title import generate_chat_title
-from app.storage.hybrid_storage import HybridStorage
+from app.storage.mongodb_storage import MongoStorage
 from app.core.logging import get_logger, set_logging_context, clear_logging_context
 from app.core.exceptions import AgentException, StorageException, LLMException
 from app.core.config import settings
@@ -513,14 +513,66 @@ async def _get_user_visa_profile(storage, user_id: str) -> Dict[str, Any]:
         return {}
 
 
+def _extract_broker_profile_from_user(user_data: dict) -> dict:
+    """
+    Personal Tailor: Extract structured travel_preferences from the user's profile document.
+    Merges family composition, dietary restrictions (from memory_summaries), and trip style.
+    """
+    if not user_data:
+        return {}
+    profile: dict = {}
+
+    # Family composition from FamilyMember array
+    family = user_data.get("family") or []
+    if family:
+        children = [m for m in family if (m.get("type") or "").lower() == "child"]
+        profile["family_friendly"] = True
+        profile["family_size"] = 1 + len(family)
+        profile["has_children"] = len(children) > 0
+        profile["children_count"] = len(children)
+        # Format for broker display
+        adults = len(family) - len(children)
+        profile["family_summary"] = f"{1 + adults} ผู้ใหญ่{f' + {len(children)} เด็ก' if children else ''}"
+
+    # Dietary / lifestyle from learned memory_summaries
+    memory_summaries: list = user_data.get("preferences", {}).get("memory_summaries", [])
+    dietary_keywords = ["ไม่เผ็ด", "มังสวิรัติ", "vegan", "halal", "ฮาลาล", "non-spicy", "vegetarian", "gluten"]
+    dietary_hints = [s for s in memory_summaries if any(k.lower() in s.lower() for k in dietary_keywords)]
+    if dietary_hints:
+        profile["dietary_restrictions"] = dietary_hints[-1]  # most recent
+
+    # Budget level hint from memories
+    budget_keywords_high = ["บิสซิเนส", "business class", "ชั้นธุรกิจ", "โรงแรม 5 ดาว", "luxury"]
+    budget_keywords_low = ["ประหยัด", "budget", "ราคาถูก", "low cost"]
+    all_mem = " ".join(memory_summaries).lower()
+    if any(k.lower() in all_mem for k in budget_keywords_high):
+        profile["budget_level"] = "high"
+    elif any(k.lower() in all_mem for k in budget_keywords_low):
+        profile["budget_level"] = "low"
+    else:
+        profile.setdefault("budget_level", "mid")
+
+    # Travel style hints
+    style_keywords = {"adventure": ["ผจญภัย", "trekking", "เดินป่า"], "relaxation": ["พักผ่อน", "spa", "ชายหาด", "beach"]}
+    for style, keywords in style_keywords.items():
+        if any(k.lower() in all_mem for k in keywords):
+            profile["travel_style"] = style
+            break
+
+    return profile
+
+
 async def _load_user_agent_preferences(storage, user_id: str) -> dict:
-    """Load all AI Agent preferences for a user from MongoDB. Returns defaults if not found."""
+    """Load all AI Agent preferences for a user from MongoDB. Returns defaults if not found.
+    Personal Tailor: Also auto-populates travelPreferences from family, memories, and profile.
+    """
     defaults = {
-        "agentPersonality": "friendly",
+        "agentPersonality": "agency",
         "responseStyle": "balanced",
         "detailLevel": "medium",
         "chatLanguage": "th",
         "reinforcementLearning": True,
+        "travelPreferences": {},
     }
     try:
         users_collection = None
@@ -530,14 +582,20 @@ async def _load_user_agent_preferences(storage, user_id: str) -> dict:
             users_collection = storage.users_collection
         if users_collection is not None:
             user_data = await users_collection.find_one({"user_id": user_id})
-            if user_data and user_data.get("preferences"):
-                prefs = user_data["preferences"]
+            if user_data:
+                prefs = user_data.get("preferences") or {}
+                # Personal Tailor: derive broker profile from user document
+                broker_profile = _extract_broker_profile_from_user(user_data)
+                # Explicit user-saved travelPreferences take precedence over auto-derived
+                explicit_prefs = prefs.get("travelPreferences") or {}
+                merged_travel_prefs = {**broker_profile, **explicit_prefs}
                 return {
                     "agentPersonality": prefs.get("agentPersonality", defaults["agentPersonality"]),
                     "responseStyle": prefs.get("responseStyle", defaults["responseStyle"]),
                     "detailLevel": prefs.get("detailLevel", defaults["detailLevel"]),
                     "chatLanguage": prefs.get("chatLanguage", defaults["chatLanguage"]),
                     "reinforcementLearning": prefs.get("reinforcementLearning", defaults["reinforcementLearning"]),
+                    "travelPreferences": merged_travel_prefs,
                 }
     except Exception as e:
         logger.warning(f"Failed to load agent preferences for user {user_id}: {e}")
@@ -561,7 +619,7 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
     plan = session.trip_plan
     # 🛂 Fetch user visa profile for flight/transfer visa_warning personalization
     user_id = (session.session_id or "").split("::")[0] if getattr(session, "session_id", None) else ""
-    storage = HybridStorage()
+    storage = MongoStorage()
     user_visa_profile = await _get_user_visa_profile(storage, user_id) if user_id else {}
     
     # 1. Map Current Status of all Slots
@@ -971,6 +1029,7 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
             "mode": mode,
             "step": workflow_step,
             "slot_workflow": {"current_slot": slot_intent or ("summary" if should_show_summary else None)},
+            "booking_funnel_state": getattr(session, "booking_funnel_state", "idle") or "idle",
         },
         "travel_slots": travel_slots,
         "current_plan": current_plan,
@@ -1039,7 +1098,7 @@ async def chat_stream(
         
         set_logging_context(session_id=session_id, user_id=user_id)
         try:
-            storage = HybridStorage()
+            storage = MongoStorage()
             
             # ✅ SECURITY: Verify session belongs to this user before processing
             # ✅ CRITICAL: Validate session_id format matches user_id
@@ -1144,6 +1203,18 @@ async def chat_stream(
             mode = request.mode or "normal"
             logger.info(f"Chat mode: {mode} for session {session_id}")
             
+            # ✅ REALTIME: Save user message to DB IMMEDIATELY before processing starts
+            try:
+                _user_msg_realtime = {
+                    "role": "user",
+                    "content": request.message,
+                    "timestamp": datetime.utcnow()
+                }
+                await storage.save_message(session_id, _user_msg_realtime)
+                logger.info(f"[Realtime] User message saved to DB before processing: session={session_id}")
+            except Exception as _save_err:
+                logger.warning(f"[Realtime] Failed to save user message before processing (will not retry): {_save_err}")
+            
             # Start agent in background task
             try:
                 logger.info(f"Creating agent task: session={session_id}, message_length={len(request.message)}, mode={mode}")
@@ -1165,7 +1236,8 @@ async def chat_stream(
                     session_id=session_id,
                     user_input=request.message,
                     status_callback=status_callback,
-                    mode=mode  # ✅ Pass mode to agent
+                    mode=mode,
+                    travel_preferences=_prefs.get("travelPreferences") or {},
                 ))
                 logger.info(f"Agent task created successfully for session {session_id}")
                 
@@ -1383,6 +1455,19 @@ async def chat_stream(
                 "workflow_validation": None
             }
             
+            # ✅ REALTIME: Save bot message to DB IMMEDIATELY after response is available (with metadata)
+            try:
+                _bot_msg_realtime = {
+                    "role": "assistant",
+                    "content": response_text,
+                    "timestamp": datetime.utcnow(),
+                    "metadata": metadata
+                }
+                await storage.save_message(session_id, _bot_msg_realtime)
+                logger.info(f"[Realtime] Bot message saved to DB after response: session={session_id}, length={len(response_text)}")
+            except Exception as _save_err:
+                logger.warning(f"[Realtime] Failed to save bot message realtime: {_save_err}")
+            
             # 5. Send completion data
             # ✅ CRITICAL: Ensure response_text is never None or empty
             if not response_text or not response_text.strip():
@@ -1456,30 +1541,10 @@ async def chat_stream(
                 else:
                     logger.info(f"Session saved with trip_plan after SSE stream: session_id={session_id}")
             
-            # ✅ Save messages to database (MongoDB) - CRITICAL for persistence
-            # Save user message
-            user_msg = {
-                "role": "user",
-                "content": request.message,
-                "timestamp": datetime.utcnow()
-            }
-            user_msg_saved = await storage.save_message(session_id, user_msg)
-            if not user_msg_saved:
-                logger.error(f"Failed to save user message to database for session {session_id}")
-            
-            # Save bot response
-            bot_msg = {
-                "role": "assistant",
-                "content": response_text,
-                "timestamp": datetime.utcnow(),
-                "metadata": metadata
-            }
-            bot_msg_saved = await storage.save_message(session_id, bot_msg)
-            if not bot_msg_saved:
-                logger.error(f"Failed to save bot message to database for session {session_id}")
-            
-            if user_msg_saved and bot_msg_saved:
-                logger.info(f"Both messages saved successfully to database for session {session_id}")
+            # ✅ Messages were already saved REALTIME above:
+            # - User message: saved BEFORE agent task creation
+            # - Bot message: saved AFTER response + metadata were ready, BEFORE completion event
+            logger.info(f"[Realtime] Both messages already saved to DB for session {session_id}")
             
             # 6. Background tasks (Title generation)
             if updated_session and updated_session.title is None:
@@ -1555,7 +1620,7 @@ async def chat(
         logger.info(f"Processing chat request: message_length={len(request.message)}")
         
         # Instantiate storage and agent (with MCP support)
-        storage = HybridStorage()
+        storage = MongoStorage()
         llm_with_mcp = LLMServiceWithMCP()
         
         # ✅ Get user preferences for agent (personality, style, language, RL)
@@ -1598,6 +1663,18 @@ async def chat(
         # ✅ Get mode from request (default to 'normal')
         mode = request.mode or "normal"
         logger.info(f"Chat mode: {mode} for session {session_id}")
+        
+        # ✅ REALTIME: Save user message to DB IMMEDIATELY before processing starts
+        try:
+            _user_msg_now = {
+                "role": "user",
+                "content": request.message,
+                "timestamp": datetime.utcnow()
+            }
+            await storage.save_message(session_id, _user_msg_now)
+            logger.info(f"[Realtime] User message saved to DB before agent run: session={session_id}")
+        except Exception as _save_err:
+            logger.warning(f"[Realtime] Failed to save user message realtime: {_save_err}")
         
         # Run agent turn (this returns the response text)
         # Note: TravelAgent.run_turn should handle internal state updates
@@ -1642,33 +1719,19 @@ async def chat(
                 response_text
             )
         
-        # Save chat history (User + Bot)
-        # 1. User Message
-        # ✅ Save user message to database (MongoDB)
-        user_msg = {
-            "role": "user",
-            "content": request.message,
-            "timestamp": datetime.utcnow()
-        }
-        user_msg_saved = await storage.save_message(session_id, user_msg)
-        if not user_msg_saved:
-            logger.error(f"Failed to save user message to database for session {session_id}")
-            # Continue anyway - don't fail the request, but log the error
-        
-        # ✅ Save bot response to database (MongoDB)
+        # ✅ User message was already saved REALTIME before agent run above
+        # ✅ Save bot response to database (MongoDB) - REALTIME after response
         bot_msg = {
-            "role": "assistant", # or 'bot'
+            "role": "assistant",
             "content": response_text,
             "timestamp": datetime.utcnow(),
-            "metadata": metadata # Store card data with message
+            "metadata": metadata
         }
         bot_msg_saved = await storage.save_message(session_id, bot_msg)
         if not bot_msg_saved:
             logger.error(f"Failed to save bot message to database for session {session_id}")
-            # Continue anyway - don't fail the request, but log the error
-        
-        if user_msg_saved and bot_msg_saved:
-            logger.info(f"Both messages saved successfully to database for session {session_id}")
+        else:
+            logger.info(f"[Realtime] Bot message saved to DB after agent run: session={session_id}")
         
         logger.info("Chat request completed successfully")
         
@@ -1696,11 +1759,15 @@ async def chat(
         })
         # #endregion
         
+        # ✅ FIX: metadata already contains current_plan from get_agent_metadata()
+        # Use current_plan_data as fallback if metadata doesn't have it
+        if current_plan_data and not metadata.get("current_plan"):
+            metadata["current_plan"] = current_plan_data
+        
         return ChatResponse(
             response=response_text,
             session_id=session_id,
             trip_title=updated_session.title if updated_session else None,
-            current_plan=current_plan_data,
             **metadata
         )
     
@@ -1721,36 +1788,41 @@ async def get_history(
     client_trip_id: str,
     fastapi_request: Request,
     limit: int = 50,
-    x_trip_id: Optional[str] = Header(None, alias="X-Trip-ID", description="Trip ID for session lookup")
+    x_trip_id: Optional[str] = Header(None, alias="X-Trip-ID", description="Trip ID for session lookup"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID", description="User ID for session lookup (ต้องตรงกับตอนส่งข้อความ)"),
 ):
     """
     Get chat history for a chat/trip
     Supports both chat_id (primary) and trip_id (backward compatibility)
-    Uses same user_id as /sessions and /stream (X-User-ID or cookie) for consistency.
+    ใช้ user_id จาก X-User-ID (ถ้ามี) ก่อน cookie เพื่อให้ตรงกับ frontend ที่ส่ง header ตอนโหลดประวัติ
     """
     from app.core.security import extract_user_id_from_request
-    user_id = extract_user_id_from_request(fastapi_request) or "guest"
+    # ✅ ใช้ X-User-ID จาก frontend ก่อน เพื่อให้ตรงกับ user ที่แสดงในรายการแชท (ป้องกัน no history เมื่อ cookie กับ list ไม่ตรง)
+    user_id = x_user_id or extract_user_id_from_request(fastapi_request) or "guest"
     
     # ✅ ใช้ client_trip_id เป็น chat_id (frontend ส่ง chatId มา)
-    # ✅ รองรับ X-Trip-ID header สำหรับ backward compatibility
-    chat_id = client_trip_id  # Frontend sends chatId here
-    trip_id = x_trip_id  # Optional trip_id from header
+    chat_id = client_trip_id
+    trip_id = x_trip_id
     
-    # ✅ session_id ใช้ chat_id เหมือนกับ chat endpoint (แต่ละ chat = 1 session)
+    # ✅ session_id ใช้รูปแบบเดียวกับ chat endpoint: user_id::chat_id
     session_id = f"{user_id}::{chat_id}"
     
     logger.info(f"Fetching history for session_id={session_id}, chat_id={chat_id}, trip_id={trip_id}, user_id={user_id}")
     
-    storage = HybridStorage()
+    storage = MongoStorage()
     
-    # Try to get history using chat_id (primary)
+    # Try to get history using session_id (user_id::chat_id)
     history = await storage.get_chat_history(session_id, limit)
     
-    # ✅ If no history found with chat_id, try with trip_id (backward compatibility)
+    # ✅ Fallback 1: ลองใช้ trip_id เป็น session_id (กรณี frontend ใช้ tripId แทน chatId)
     if not history and trip_id and trip_id != chat_id:
         fallback_session_id = f"{user_id}::{trip_id}"
-        logger.info(f"No history found with chat_id, trying trip_id: {fallback_session_id}")
+        logger.info(f"No history with chat_id, trying trip_id: {fallback_session_id}")
         history = await storage.get_chat_history(fallback_session_id, limit)
+    
+    # ✅ Fallback 2: รูปแบบเก่าใน Mongo ที่ session_id เก็บแค่ chat_id (ไม่มี user_id::)
+    if not history:
+        history = await storage.get_chat_history_by_chat_id(chat_id, user_id, limit)
     
     # ✅ SECURITY: Do NOT try alternative user_ids - this could cause data leakage
     # Each user should only access their own data based on their session cookie
@@ -1771,33 +1843,128 @@ async def get_history(
     return {"history": mapped_history}
 
 
+@router.get("/histories")
+async def get_all_histories(
+    fastapi_request: Request,
+    chat_ids: str = "",
+    limit: int = 50,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+):
+    """
+    Bulk fetch all chat histories in ONE MongoDB query using $in operator.
+    เรียกครั้งเดียวตอนเปิดแชท แทนการดึงแยกทีละแชท (cache-first architecture)
+    Returns: {"histories": {"chatId": [messages...]}}
+    """
+    from app.core.security import extract_user_id_from_request
+    user_id = x_user_id or extract_user_id_from_request(fastapi_request) or "guest"
+
+    chat_id_list = [c.strip() for c in (chat_ids or "").split(",") if c.strip()]
+    if not chat_id_list:
+        return {"histories": {}}
+
+    # Cap at 100 chats to prevent overloading
+    chat_id_list = chat_id_list[:100]
+
+    try:
+        storage = MongoStorage()
+        if not storage.db:
+            await storage.connect()
+        conversations_col = storage.db["conversations"]
+
+        # ✅ Build all session_ids: user_id::chat_id
+        session_ids = [f"{user_id}::{cid}" for cid in chat_id_list]
+
+        # ✅ Single $in query — fetch ALL conversations at once (no N+1)
+        cursor = conversations_col.find(
+            {"session_id": {"$in": session_ids}, "user_id": user_id},
+            {"session_id": 1, "messages": 1}
+        )
+
+        # Map session_id → chat_id
+        session_to_chat = {f"{user_id}::{cid}": cid for cid in chat_id_list}
+
+        histories: dict = {}
+        async for doc in cursor:
+            sid = doc.get("session_id", "")
+            cid = session_to_chat.get(sid) or (sid.split("::")[-1] if "::" in sid else sid)
+            raw_msgs = (doc.get("messages") or [])[-limit:]
+            mapped = []
+            for msg in raw_msgs:
+                role = msg.get("role", "")
+                if role in ("tool_call", "tool_output"):
+                    continue  # skip internal tool messages
+                mapped.append({
+                    "id": str(msg.get("_id") or msg.get("id") or f"{cid}_{len(mapped)}"),
+                    "type": "bot" if role == "assistant" else "user",
+                    "text": msg.get("content"),
+                    "timestamp": msg.get("timestamp"),
+                    **(msg.get("metadata") or {}),
+                })
+            if mapped:
+                histories[cid] = mapped
+
+        # Fallback: try $regex query for chats stored with legacy session_id format
+        missing = [cid for cid in chat_id_list if cid not in histories]
+        for cid in missing[:20]:
+            doc = await conversations_col.find_one(
+                {"session_id": {"$regex": f"::{cid}$"}, "user_id": user_id},
+                {"session_id": 1, "messages": 1},
+            )
+            if not doc:
+                doc = await conversations_col.find_one(
+                    {"session_id": cid, "user_id": user_id},
+                    {"session_id": 1, "messages": 1},
+                )
+            if doc:
+                raw_msgs = (doc.get("messages") or [])[-limit:]
+                mapped = []
+                for msg in raw_msgs:
+                    role = msg.get("role", "")
+                    if role in ("tool_call", "tool_output"):
+                        continue
+                    mapped.append({
+                        "id": str(msg.get("_id") or msg.get("id") or f"{cid}_{len(mapped)}"),
+                        "type": "bot" if role == "assistant" else "user",
+                        "text": msg.get("content"),
+                        "timestamp": msg.get("timestamp"),
+                        **(msg.get("metadata") or {}),
+                    })
+                if mapped:
+                    histories[cid] = mapped
+
+        logger.info(f"Bulk histories: returned {len(histories)}/{len(chat_id_list)} chats for user={user_id}")
+        return {"histories": histories}
+
+    except Exception as e:
+        logger.error(f"get_all_histories error: {e}", exc_info=True)
+        return {"histories": {}, "error": str(e)}
+
+
 @router.get("/sessions")
 async def get_user_sessions(
     fastapi_request: Request,
-    limit: int = 50
+    limit: int = 50,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID", description="User ID (ให้ตรงกับตอนส่งข้อความ)"),
 ):
     """
     Get all sessions/chats for the current user
-    Returns list of sessions with titles and last updated times
-    ✅ SECURITY: Only returns sessions for the authenticated user
+    ใช้ X-User-ID (ถ้ามี) ก่อน cookie เพื่อให้ตรงกับ frontend
     """
-    # ✅ SECURITY: Use security helper to extract user_id (prioritizes cookie, then header)
     from app.core.security import extract_user_id_from_request
-    user_id = extract_user_id_from_request(fastapi_request)
+    user_id = x_user_id or extract_user_id_from_request(fastapi_request)
     
-    # ✅ SECURITY: Log authentication details for debugging
     cookie_user_id = fastapi_request.cookies.get(settings.session_cookie_name)
     header_user_id = fastapi_request.headers.get("X-User-ID")
-    logger.info(f"🔍 /api/chat/sessions request - Cookie user_id: {cookie_user_id}, Header user_id: {header_user_id}, Final user_id: {user_id}")
+    logger.info(f"🔍 /api/chat/sessions - Cookie: {cookie_user_id}, Header: {header_user_id}, Final user_id: {user_id}")
     
-    # ✅ SECURITY: Validate user_id is not empty
+    # ✅ ไม่บังคับ login — ถ้าไม่มี user_id คืนรายการว่าง เพื่อให้หน้าแชทโหลดได้ (แสดง "กรุณาเข้าสู่ระบบ" ได้)
     if not user_id:
-        logger.error("❌ No user_id found in request (no cookie or header)")
-        raise HTTPException(status_code=401, detail="Authentication required")
+        logger.warning("No user_id in request, returning empty sessions so chat page can load")
+        return {"sessions": [], "require_login": True}
     
     logger.info(f"Fetching all sessions for user_id={user_id}, limit={limit}")
     
-    storage = HybridStorage()
+    storage = MongoStorage()
     
     try:
         # Get MongoDB database
@@ -1911,7 +2078,7 @@ async def select_choice(request: dict, fastapi_request: Request):
     set_logging_context(session_id=session_id, user_id=user_id)
     
     try:
-        storage = HybridStorage()
+        storage = MongoStorage()
         
         # ✅ SECURITY: Verify session belongs to this user before proceeding
         existing_session = await storage.get_session(session_id)
@@ -2261,14 +2428,19 @@ async def live_audio_conversation(websocket: WebSocket):
 
 
 @router.delete("/sessions/{chat_id}")
-async def delete_chat_session(chat_id: str, fastapi_request: Request):
+async def delete_chat_session(
+    chat_id: str,
+    fastapi_request: Request,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+):
     """
     Delete a chat session and its conversation history permanently.
     Removes both the session document and conversation messages from MongoDB.
     ✅ SECURITY: Only allows deletion for authenticated user's own session.
+    ใช้ X-User-ID (ถ้ามี) ก่อน cookie เพื่อให้ตรงกับ frontend
     """
     from app.core.security import extract_user_id_from_request
-    user_id = extract_user_id_from_request(fastapi_request)
+    user_id = x_user_id or extract_user_id_from_request(fastapi_request)
 
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -2328,7 +2500,7 @@ async def reset_chat(request: dict, fastapi_request: Request):
     session_id = f"{user_id}::{chat_id}"
     
     try:
-        storage = HybridStorage()
+        storage = MongoStorage()
         
         # ✅ SECURITY: Verify session belongs to this user before clearing
         existing_session = await storage.get_session(session_id)
@@ -2366,7 +2538,7 @@ async def run_title_generator(session_id: str, user_input: str, bot_response: st
         title = await generate_chat_title(user_input, bot_response)
         
         # Update session title
-        storage = HybridStorage()
+        storage = MongoStorage()
         await storage.update_title(session_id, title)
         
         logger.info(f"Title generated and saved for session {session_id}: {title}")

@@ -132,6 +132,7 @@ const th = {
     origin: 'ต้นทาง',
     destination: 'ปลายทาง',
     date: 'วันที่เดินทาง',
+    returnDate: 'วันกลับ (ถ้ามี)',
     search: 'ค้นหา',
     searching: 'กำลังค้นหา...',
     bookNow: 'จองตอนนี้',

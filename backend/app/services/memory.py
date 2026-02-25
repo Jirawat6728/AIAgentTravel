@@ -1,6 +1,7 @@
 """
 เซอร์วิสสมองและความจำของ AI Agent
 จัดการความจำระยะยาว (Recall และ Consolidate)
+รองรับ Sliding Window + Context Compaction สำหรับ Gemini 3
 """
 
 from __future__ import annotations
@@ -15,25 +16,24 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+MAX_CONTEXT_CHARS = 12_000
+MAX_HISTORY_MESSAGES = 20
+COMPACTION_TRIGGER_CHARS = 10_000
+
+
 class MemoryService:
     """
-    Memory Service: The Brain of the Agent
-    - Recall: Get relevant memories for a user
-    - Consolidate: Extract new facts from conversation and store them
+    Production Memory Service with Sliding Window + Context Compaction.
+    - Recall: ranked long-term memories per user
+    - Consolidate: extract new facts from conversation
+    - build_conversation_context: sliding-window history + auto-compaction
     """
     
     def __init__(self, llm_service: Optional[LLMService] = None):
         self.llm = llm_service or LLMService()
         self.db = MongoConnectionManager.get_instance().get_database()
         self.collection = self.db.get_collection("memories")
-        
-        # ✅ SECURITY: Ensure indexes are created (user_id index for data isolation)
-        # Indexes are created in MongoStorage.connect(), but we ensure they exist here too
-        try:
-            # This will be called when MongoStorage.connect() is called, but we log it here
-            logger.debug("MemoryService initialized - user_id indexes ensure data isolation")
-        except Exception as e:
-            logger.warning(f"MemoryService initialization warning: {e}")
+        logger.debug("MemoryService initialized with sliding-window + context compaction")
 
     async def recall(self, user_id: str, limit: int = 10) -> List[Memory]:
         """
@@ -275,17 +275,95 @@ If no new information, return an empty list. Output JSON ONLY."""
             # Don't fail memory consolidation if preference update fails
     
     def format_memories_for_prompt(self, memories: List[Memory]) -> str:
-        """
-        Convert memories to a string format for LLM context
-        ✅ SECURITY: Only formats memories provided (already filtered by user_id)
-        """
+        """Convert memories to a string format for LLM context."""
         if not memories:
             return "No previous memories of this user."
-            
         lines = []
         for i, m in enumerate(memories):
-            # ✅ SECURITY: Only format memories that were already filtered by user_id
             lines.append(f"{i+1}. [{m.category}] {m.content}")
-            
         return "\n".join(lines)
+
+    # =====================================================================
+    # Sliding Window + Context Compaction (Production Gemini 3 Standards)
+    # =====================================================================
+
+    async def build_conversation_context(
+        self,
+        session_id: str,
+        current_input: str,
+        max_messages: int = MAX_HISTORY_MESSAGES,
+        max_chars: int = MAX_CONTEXT_CHARS,
+    ) -> str:
+        """
+        Build a token-aware conversation context using sliding window.
+        When the raw history exceeds *max_chars* the oldest messages are
+        compacted into a short summary so the LLM never loses critical
+        context while staying within the token budget.
+
+        Returns a ready-to-inject context string.
+        """
+        conversations = self.db["conversations"]
+        doc = await conversations.find_one({"session_id": session_id})
+        if not doc or "messages" not in doc:
+            return ""
+
+        all_msgs: list = doc["messages"]
+        if not all_msgs:
+            return ""
+
+        recent = all_msgs[-max_messages:]
+
+        context_lines = []
+        total_chars = 0
+        for msg in recent:
+            role = "User" if msg.get("role") == "user" else "AI"
+            content = (msg.get("content") or "")[:2000]
+            line = f"{role}: {content}"
+            total_chars += len(line)
+            context_lines.append(line)
+
+        if total_chars <= max_chars:
+            return "\n".join(context_lines)
+
+        # --- Context Compaction: summarise older half ---
+        mid = len(context_lines) // 2
+        older_block = "\n".join(context_lines[:mid])
+        recent_block = "\n".join(context_lines[mid:])
+
+        try:
+            summary = await self._compact_context(older_block)
+        except Exception as e:
+            logger.warning(f"Context compaction failed, truncating instead: {e}")
+            summary = older_block[:800] + "..."
+
+        return f"[Conversation Summary]\n{summary}\n\n[Recent Messages]\n{recent_block}"
+
+    async def _compact_context(self, text: str) -> str:
+        """Use LLM to create a concise summary of older conversation."""
+        prompt = (
+            "Summarize the following conversation history into 3-5 bullet points "
+            "in the SAME language the user used. Keep travel details "
+            "(dates, destinations, preferences). Output bullets only.\n\n"
+            f"{text[:6000]}"
+        )
+        summary = await self.llm.generate_content(
+            prompt=prompt,
+            temperature=0.2,
+            max_tokens=400,
+            auto_select_model=True,
+            context="memory",
+        )
+        return summary.strip() if summary else text[:800]
+
+    async def get_sliding_window_messages(
+        self,
+        session_id: str,
+        window_size: int = MAX_HISTORY_MESSAGES,
+    ) -> List[Dict[str, Any]]:
+        """Return the last *window_size* messages for a session."""
+        conversations = self.db["conversations"]
+        doc = await conversations.find_one({"session_id": session_id})
+        if not doc or "messages" not in doc:
+            return []
+        return doc["messages"][-window_size:]
 

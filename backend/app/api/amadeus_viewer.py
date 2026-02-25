@@ -44,10 +44,8 @@ class ExtractTravelInfoResponse(BaseModel):
 async def extract_travel_info(request: Request, extract_request: ExtractTravelInfoRequest):
     """
     Extract travel information from natural language using LLM
-    Admin-only endpoint
     """
-    # Check admin access
-    await require_admin(request)
+    await require_login(request)
     
     try:
         # Initialize LLM service with explicit model name to avoid selection issues
@@ -169,39 +167,17 @@ def _fallback_extract_info(query: str) -> ExtractTravelInfoResponse:
     )
 
 
-async def require_admin(request: Request) -> bool:
-    """Check if user is admin (is_admin flag or email matches ADMIN_EMAIL)."""
+async def require_login(request: Request) -> bool:
+    """Check if user is logged in (any authenticated user can use Amadeus Viewer)."""
     from app.core.config import settings
-    from app.storage.mongodb_storage import MongoStorage
-    from app.models.database import User
 
-    user_id = request.cookies.get(settings.session_cookie_name)
+    user_id = (
+        request.headers.get("X-User-ID")
+        or request.cookies.get(settings.session_cookie_name)
+    )
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
-
-    try:
-        storage = MongoStorage()
-        await storage.connect()
-        users_collection = storage.db["users"]
-        user_data = await users_collection.find_one({"user_id": user_id})
-
-        if not user_data:
-            raise HTTPException(status_code=401, detail="User not found")
-
-        user = User(**user_data)
-        is_admin = getattr(user, "is_admin", False)
-        admin_email = getattr(settings, "admin_email", "admin@example.com") or "admin@example.com"
-        is_admin_email = (user.email or "").strip().lower() == (admin_email or "").strip().lower()
-
-        if not (is_admin or is_admin_email):
-            raise HTTPException(status_code=403, detail="Access denied. Admin only.")
-
-        return True
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error checking admin status: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+    return True
 
 
 async def search_flights_task(origin: str, destination: str, departure_date: str, adults: int) -> List[Dict[str, Any]]:
@@ -484,12 +460,10 @@ async def search_places_along_route_task(origin_geo: Dict[str, Any], dest_geo: D
 @router.post("/search")
 async def search_amadeus(request: Request, search: AmadeusSearchRequest):
     """
-    Search Amadeus for flights, hotels, and transfers
-    Admin-only endpoint
-    Based on amadeus_data_viewer.py logic with concurrent fetching
+    Search Amadeus for flights, hotels, and transfers.
+    Based on amadeus_data_viewer.py logic with concurrent fetching.
     """
-    # Check admin access
-    await require_admin(request)
+    await require_login(request)
     
     try:
         # Parse dates (from amadeus_data_viewer.py)

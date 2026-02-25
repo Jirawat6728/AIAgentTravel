@@ -114,7 +114,7 @@ export default function SettingsPage({
     responseStyle: 'balanced',
     detailLevel: 'medium',
     reinforcementLearning: true,
-    agentPersonality: 'friendly',
+    agentPersonality: 'agency',
     
     // Booking Preferences
     defaultPaymentMethod: user?.payment_method || '',
@@ -779,6 +779,7 @@ export default function SettingsPage({
   };
 
   const agentPersonalityTemplates = {
+    agency: { name: '🏆 นายหน้าขายตรง (แนะนำ)', description: 'กระตือรือร้น แนะนำตัวเลือกที่ดีที่สุด สร้าง urgency ปิดดีลเก่ง' },
     friendly: { name: 'เป็นมิตร', description: 'พูดคุยแบบเป็นกันเอง อบอุ่น' },
     professional: { name: 'มืออาชีพ', description: 'เป็นทางการ ชัดเจน ตรงไปตรงมา' },
     casual: { name: 'สบายๆ', description: 'พูดคุยแบบไม่เป็นทางการ สนุกสนาน' },

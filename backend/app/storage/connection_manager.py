@@ -59,25 +59,32 @@ class ConnectionManager:
         return self.get_mongo_database()
 
     def _init_mongo_connection(self):
-        """Initialize MongoDB connection pool"""
+        """Initialize MongoDB connection pool (supports local and MongoDB Atlas)."""
         connection_string = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI", "mongodb://localhost:27017")
         self.mongo_database_name = os.getenv("MONGO_DB_NAME") or os.getenv("MONGODB_DATABASE", "travel_agent")
 
+        is_atlas = "mongodb+srv://" in connection_string
+        server_timeout = 15000 if is_atlas else 5000
+        connect_timeout = 20000 if is_atlas else 10000
+
         self._mongo_client = AsyncIOMotorClient(
             connection_string,
-            serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=10000,
-            socketTimeoutMS=20000,
+            serverSelectionTimeoutMS=server_timeout,
+            connectTimeoutMS=connect_timeout,
+            socketTimeoutMS=30000,
             heartbeatFrequencyMS=10000,
             retryWrites=True,
             retryReads=True,
             maxPoolSize=50,
-            minPoolSize=5,
+            minPoolSize=1,
             maxIdleTimeMS=30000,
-            waitQueueTimeoutMS=10000,
+            waitQueueTimeoutMS=15000,
         )
         self._mongo_db = self._mongo_client[self.mongo_database_name]
-        logger.info(f"MongoDB Connection Pool initialized: database={self.mongo_database_name}")
+        logger.info(
+            f"MongoDB Connection Pool initialized: database={self.mongo_database_name}"
+            + (" (Atlas)" if is_atlas else " (local)")
+        )
 
     @property
     def mongo_client(self) -> AsyncIOMotorClient:

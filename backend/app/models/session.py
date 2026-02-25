@@ -50,6 +50,16 @@ class UserSession(BaseModel):
         default=None,
         description="Popular destinations list when user searches 'all' in destination"
     )
+    # Broker agent preferences — ความชอบส่วนตัวของผู้ใช้ในการวางแผนทริป
+    travel_preferences: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Broker preferences captured during conversation: dietary_restrictions, budget_level, travel_style, family_friendly, special_needs, preferred_airlines, preferred_hotel_chains, etc."
+    )
+    # สถานะของ booking funnel ในขณะนี้
+    booking_funnel_state: str = Field(
+        default="idle",
+        description="Current stage in booking funnel: idle | confirming_search | searching | selecting | confirming_booking | completed"
+    )
     
     @field_validator('session_id', 'user_id', 'trip_id', 'chat_id')
     @classmethod

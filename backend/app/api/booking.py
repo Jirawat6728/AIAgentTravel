@@ -2207,3 +2207,39 @@ async def delete_saved_card(fastapi_request: Request, card_id: str):
     except Exception as e:
         logger.error(f"Failed to delete saved card: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete saved card: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Proactive Crisis Manager — manual flight status check (local dev trigger)
+# ---------------------------------------------------------------------------
+
+@router.post("/{booking_id}/check-flight", summary="Manual flight status check (Crisis Manager trigger)")
+async def trigger_flight_check(booking_id: str, fastapi_request: Request):
+    """
+    Manually trigger the FlightMonitorService for a specific booking.
+    Useful for local dev testing without waiting for the 30-min background loop.
+    """
+    user_id = fastapi_request.headers.get("X-User-ID") or fastapi_request.cookies.get(settings.session_cookie_name)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    storage = MongoStorage()
+    await storage.connect()
+    booking_doc = await storage.db["bookings"].find_one({"booking_id": booking_id, "user_id": user_id})
+    if not booking_doc:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    try:
+        from app.services.flight_monitor import FlightMonitorService
+        monitor = FlightMonitorService(db=storage.db)
+        await monitor.check_booking(booking_id, user_id, booking_doc)
+        updated = await storage.db["bookings"].find_one({"booking_id": booking_id}, {"flight_status": 1, "delay_minutes": 1})
+        return {
+            "booking_id": booking_id,
+            "flight_status": (updated or {}).get("flight_status", "unknown"),
+            "delay_minutes": (updated or {}).get("delay_minutes", 0),
+            "checked_at": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"[FlightMonitor] Manual check failed for {booking_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Flight check failed: {str(e)}")

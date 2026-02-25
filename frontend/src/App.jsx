@@ -1257,8 +1257,14 @@ function App() {
       
       let userMessage = `Google login ไม่สำเร็จ: ${errorMessage}`;
       
-      // Add helpful tips based on error type
-      if (errorMessage.includes("not loaded") || errorMessage.includes("failed to load")) {
+      // FedCM disabled (third-party sign-in blocked by browser)
+      if (errorMessage.toLowerCase().includes("fedcm") || errorMessage.includes("third-party sign-in") || errorMessage.includes("site settings")) {
+        userMessage = "Google login ใช้ไม่ได้เพราะเบราว์เซอร์ปิดการลงชื่อด้วยบัญชีบุคคลที่สาม (FedCM)\n\n";
+        userMessage += "วิธีแก้:\n";
+        userMessage += "1. คลิกไอคอนทางซ้ายของแถบที่อยู่ (URL) → เปิด \"Allow third-party sign-in\" หรือ \"อนุญาตการลงชื่อด้วยบัญชีบุคคลที่สาม\"\n";
+        userMessage += "2. หรือไปที่ การตั้งค่าไซต์ (Site settings) ของไซต์นี้ แล้วเปิดการลงชื่อด้วยบัญชีบุคคลที่สาม\n";
+        userMessage += "3. จากนั้นรีเฟรชหน้า (F5) แล้วลองเข้าสู่ระบบด้วย Google อีกครั้ง";
+      } else if (errorMessage.includes("not loaded") || errorMessage.includes("failed to load")) {
         userMessage += "\n\nทิป:\n";
         userMessage += "1. ตรวจสอบว่าเปิด third-party cookies ในเบราว์เซอร์\n";
         userMessage += "2. ลองปิด adblock ชั่วคราว\n";

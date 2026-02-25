@@ -12,6 +12,7 @@ import json
 import asyncio
 import os
 import httpx
+import random
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.core.config import settings
@@ -172,26 +173,24 @@ class LLMService:
         
         # ✅ FIX: Ensure model name is valid
         if not selected_model or selected_model.strip() == "":
-            selected_model = "gemini-2.5-flash"  # Default fallback - use 2.5 version
+            selected_model = "gemini-2.5-flash"  # Default fallback
             logger.warning(f"Model name was empty, using fallback: {selected_model}")
         
-        # ✅ FIX: Convert deprecated model names to stable 2.5 versions
-        # gemini-1.5-flash is deprecated, use gemini-2.5-flash instead
+        # ✅ FIX: Convert deprecated model names to stable versions
         model_name_mapping = {
-            "gemini-1.5-flash": "gemini-2.5-flash",  # Deprecated -> stable 2.5
-            "gemini-1.5-flash-001": "gemini-2.5-flash",  # Old versioned name -> 2.5
-            "gemini-1.5-flash-002": "gemini-2.5-flash",  # Old versioned name -> 2.5
-            "gemini-1.5-pro": "gemini-2.5-pro",      # Deprecated -> stable 2.5
-            "gemini-1.5-pro-001": "gemini-2.5-pro",  # Old versioned name -> 2.5
+            "gemini-1.5-flash": "gemini-2.5-flash",
+            "gemini-1.5-flash-001": "gemini-2.5-flash",
+            "gemini-1.5-flash-002": "gemini-2.5-flash",
+            "gemini-1.5-pro": "gemini-2.5-pro",
+            "gemini-1.5-pro-001": "gemini-2.5-pro",
         }
         if selected_model in model_name_mapping:
             mapped_model = model_name_mapping[selected_model]
             logger.info(f"Mapping deprecated model name to stable version: {selected_model} -> {mapped_model}")
             selected_model = mapped_model
-        # Also check if model name contains "1.5" and replace with "2.5"
         elif "1.5" in selected_model:
             selected_model = selected_model.replace("1.5", "2.5")
-            logger.info(f"Auto-updated deprecated 1.5 model to 2.5: {selected_model}")
+            logger.info(f"Auto-updated deprecated model to 2.5: {selected_model}")
 
         # Fallback model chain: primary → flash → flash-8b
         _FALLBACK_CHAIN = [selected_model, "gemini-2.5-flash", "gemini-2.0-flash-lite"]
@@ -259,11 +258,21 @@ class LLMService:
                         )
                         text = self._extract_text(raw)
 
-                    text = self._extract_text(raw) if not _use_new_sdk else text
                     if not text or not text.strip():
                         logger.warning(f"Gemini returned empty text. model={current_model}")
                         last_exc = LLMException(f"Gemini returned empty text (model={current_model})")
-                        break  # Try next fallback model
+                        break
+
+                    # Log token usage from Gemini response metadata
+                    try:
+                        usage = getattr(raw, "usage_metadata", None)
+                        if usage:
+                            in_tok = getattr(usage, "prompt_token_count", 0) or 0
+                            out_tok = getattr(usage, "candidates_token_count", 0) or 0
+                            logger.info(f"[TokenUsage] model={current_model} input={in_tok} output={out_tok} total={in_tok+out_tok}")
+                    except Exception:
+                        pass
+
                     return text
 
                 except asyncio.TimeoutError:
@@ -279,11 +288,12 @@ class LLMService:
                     is_server_err = "500" in error_str or "503" in error_str or "502" in error_str
 
                     if is_quota or is_server_err:
-                        # Transient: sleep with exponential backoff then retry
-                        wait = 2.0 * (2 ** retry_attempt)  # 2s, 4s, 8s
-                        logger.warning(f"Gemini transient error ({('quota' if is_quota else 'server')}): model={current_model} retry={retry_attempt+1}/3 wait={wait:.0f}s")
+                        base_wait = 2.0 * (2 ** retry_attempt)  # 2s, 4s, 8s
+                        jitter = random.uniform(0, base_wait * 0.3)
+                        wait = base_wait + jitter
+                        logger.warning(f"Gemini transient error ({('quota' if is_quota else 'server')}): model={current_model} retry={retry_attempt+1}/3 wait={wait:.1f}s")
                         await asyncio.sleep(wait)
-                        continue  # retry same model
+                        continue
                     else:
                         # Permanent error (404, 403, API key) → try next model
                         logger.warning(f"Gemini permanent error: model={current_model} → trying fallback. err={str(llm_err)[:100]}")
@@ -294,8 +304,10 @@ class LLMService:
                     error_str = str(e).lower()
                     is_transient = any(x in error_str for x in ["429", "quota", "500", "503", "502", "exceeded", "resource exhausted"])
                     if is_transient:
-                        wait = 2.0 * (2 ** retry_attempt)
-                        logger.warning(f"Gemini transient exception: model={current_model} retry={retry_attempt+1}/3 wait={wait:.0f}s err={str(e)[:100]}")
+                        base_wait = 2.0 * (2 ** retry_attempt)
+                        jitter = random.uniform(0, base_wait * 0.3)
+                        wait = base_wait + jitter
+                        logger.warning(f"Gemini transient exception: model={current_model} retry={retry_attempt+1}/3 wait={wait:.1f}s err={str(e)[:100]}")
                         await asyncio.sleep(wait)
                         continue
                     else:
@@ -1039,8 +1051,8 @@ Remember: Automatically use tools when user asks for something. Don't just expla
 
 class ModelType(str, Enum):
     """Gemini model types (Flash and Pro only)"""
-    FLASH = "flash"      # Fast, cost-effective (gemini-2.5-flash)
-    PRO = "pro"          # Balanced (gemini-2.5-pro)
+    FLASH = "flash"      # Fast, cost-effective (gemini-3.0-flash)
+    PRO = "pro"          # Balanced (gemini-3.0-pro)
 
 
 class BrainType(str, Enum):

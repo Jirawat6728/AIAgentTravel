@@ -99,7 +99,7 @@ def get_admin_dashboard_html() -> str:
         <div class="bg-white rounded-lg shadow mb-6">
             <div class="px-6 py-4 border-b">
                 <h2 class="text-lg font-bold text-gray-900">Amadeus Data Viewer</h2>
-                <p class="text-sm text-gray-500 mt-1">ทดสอบค้นหาเที่ยวบิน/ที่พัก ผ่าน Amadeus API (ต้องเข้าสู่ระบบเป็น Admin)</p>
+                <p class="text-sm text-gray-500 mt-1">ทดสอบค้นหาเที่ยวบิน/ที่พัก ผ่าน Amadeus API (ใช้ได้ทุกบัญชีที่เข้าสู่ระบบ)</p>
                 <p id="amadeusCurrentUser" class="text-sm text-gray-600 mt-1">กำลังโหลด...</p>
             </div>
             <div class="p-6">
@@ -233,7 +233,6 @@ def get_admin_dashboard_html() -> str:
         const API = window.location.origin;
         const opts = { credentials: 'include' };
         let currentUserEmail = '';
-        let currentUserIsAdmin = false;
 
         async function loadCurrentUser() {
             const el = document.getElementById('amadeusCurrentUser');
@@ -243,11 +242,9 @@ def get_admin_dashboard_html() -> str:
                     const d = await r.json();
                     const user = d.user || d;
                     currentUserEmail = user.email || '';
-                    currentUserIsAdmin = user.is_admin === true;
                     el.textContent = currentUserEmail ? ('กำลังเข้าสู่ระบบด้วย ' + currentUserEmail) : 'ยังไม่ได้เข้าสู่ระบบ';
                 } else {
                     currentUserEmail = '';
-                    currentUserIsAdmin = false;
                     el.textContent = 'ยังไม่ได้เข้าสู่ระบบ';
                 }
             } catch (e) {
@@ -257,8 +254,9 @@ def get_admin_dashboard_html() -> str:
         }
 
         function getAmadeusErrorMsg() {
-            const who = currentUserEmail ? ('กำลังเข้าสู่ระบบด้วย ' + currentUserEmail + ' — ') : '';
-            return who + 'กรุณาเข้าสู่ระบบเป็น Admin เพื่อใช้ Amadeus Data Viewer';
+            return currentUserEmail
+                ? 'ไม่สามารถใช้ Amadeus Data Viewer ได้ในขณะนี้ กรุณาลองใหม่อีกครั้งหรือตรวจสอบการเข้าสู่ระบบ'
+                : 'กรุณาเข้าสู่ระบบเพื่อใช้ Amadeus Data Viewer';
         }
 
         function showErr(msg) {

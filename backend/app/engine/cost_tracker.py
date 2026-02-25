@@ -130,7 +130,7 @@ class CostTracker:
         Args:
             session_id: Session identifier
             user_id: User identifier
-            model: Model name (e.g., "gemini-2.5-flash")
+            model: Model name (e.g., "gemini-3.0-flash")
             brain_type: Type of brain (controller, responder, etc.)
             input_tokens: Number of input tokens
             output_tokens: Number of output tokens

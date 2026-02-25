@@ -53,10 +53,10 @@ class RLService:
     """
     Reinforcement Learning Service ที่เก็บ Q-values ใน MongoDB per-user.
 
-    Q-table schema (collection: rl_qtable):
+    Q-table schema (collection: user_preference_scores):
       user_id, slot_name, option_key, q_value, visit_count, last_updated
 
-    Reward history schema (collection: rl_rewards):
+    Reward history schema (collection: user_feedback_history):
       user_id, action_type, slot_name, option_key, reward, context, created_at
     """
 
@@ -115,7 +115,7 @@ class RLService:
 
         try:
             # 1. บันทึก reward history
-            rewards_col = db["rl_rewards"]
+            rewards_col = db["user_feedback_history"]
             await rewards_col.insert_one({
                 "user_id": user_id,
                 "action_type": action_type,
@@ -141,7 +141,7 @@ class RLService:
             #    Q(s,a) ← Q(s,a) + α * (r + γ * max_Q_next - Q(s,a))
             #    เนื่องจาก travel booking เป็น episodic ไม่มี next state ที่ชัดเจน
             #    ใช้ simplified: Q ← Q + α * (r - Q)
-            qtable_col = db["rl_qtable"]
+            qtable_col = db["user_preference_scores"]
             existing = await qtable_col.find_one({
                 "user_id": user_id,
                 "slot_name": slot_name,
@@ -205,7 +205,7 @@ class RLService:
 
         try:
             keys = [self._option_key(slot_name, opt) for opt in options]
-            qtable_col = db["rl_qtable"]
+            qtable_col = db["user_preference_scores"]
             docs = await qtable_col.find(
                 {"user_id": user_id, "slot_name": slot_name, "option_key": {"$in": keys}}
             ).to_list(length=len(keys))
@@ -262,8 +262,8 @@ class RLService:
         if db is None:
             return {}
         try:
-            rewards_col = db["rl_rewards"]
-            qtable_col = db["rl_qtable"]
+            rewards_col = db["user_feedback_history"]
+            qtable_col = db["user_preference_scores"]
             total_rewards = await rewards_col.count_documents({"user_id": user_id})
             qtable_entries = await qtable_col.count_documents({"user_id": user_id})
             recent = await rewards_col.find(

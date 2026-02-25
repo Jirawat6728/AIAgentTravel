@@ -132,6 +132,7 @@ const en = {
     origin: 'Origin',
     destination: 'Destination',
     date: 'Travel Date',
+    returnDate: 'Return date (optional)',
     search: 'Search',
     searching: 'Searching...',
     bookNow: 'Book Now',

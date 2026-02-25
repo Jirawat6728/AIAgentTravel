@@ -88,11 +88,17 @@ async def _get_redis_checkpointer():
         return _redis_checkpointer
     if not _has_redis_checkpoint:
         return None
+    import os
     from app.core.config import settings
     if not getattr(settings, "enable_langgraph_checkpointer", True):
         return None
+    redis_url = getattr(settings, "redis_url", None) or os.getenv("REDIS_URL", "")
+    if not redis_url:
+        logger.debug("Redis checkpointer skipped: no REDIS_URL configured")
+        _checkpointer_unavailable = True
+        return None
     try:
-        saver = AsyncRedisSaver.from_conn_string(settings.redis_url)
+        saver = AsyncRedisSaver.from_conn_string(redis_url)
         await saver.asetup()
         _redis_checkpointer = saver
         logger.info("Redis checkpointer initialized for Agent Mode (resume enabled)")

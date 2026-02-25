@@ -10,16 +10,18 @@ from app.storage.connection_manager import MongoConnectionManager
 from app.storage.interface import StorageInterface
 from app.models.session import UserSession
 from app.models.database import (
-    SessionDocument, 
-    SESSION_INDEXES, 
-    USER_INDEXES, 
-    MEMORY_INDEXES, 
-    BOOKING_INDEXES, 
+    SessionDocument,
+    TripDocument,
+    SESSION_INDEXES,
+    USER_INDEXES,
+    MEMORY_INDEXES,
+    BOOKING_INDEXES,
     CONVERSATION_INDEXES,
     SAVED_CARDS_INDEXES,
     WORKFLOW_HISTORY_INDEXES,
     RL_QTABLE_INDEXES,
     RL_REWARDS_INDEXES,
+    TRIP_INDEXES,
 )
 from app.core.config import settings
 from app.core.exceptions import StorageException
@@ -67,6 +69,7 @@ class MongoStorage(StorageInterface):
             self.bookings_collection = self.db["bookings"]
             self.conversations_collection = self.db["conversations"]
             self.saved_cards_collection = self.db["user_saved_cards"]
+            self.trips_collection = self.db["trips"]
         else:
             self.sessions_collection = None
             self.users_collection = None
@@ -74,6 +77,7 @@ class MongoStorage(StorageInterface):
             self.bookings_collection = None
             self.conversations_collection = None
             self.saved_cards_collection = None
+            self.trips_collection = None
         
         logger.info(f"MongoStorage initialized with shared connection: database={self.database_name}")
     
@@ -101,6 +105,7 @@ class MongoStorage(StorageInterface):
             self.bookings_collection = self.db["bookings"]
             self.conversations_collection = self.db["conversations"]
             self.saved_cards_collection = self.db["user_saved_cards"]
+            self.trips_collection = self.db["trips"]
         
         try:
             # Create indexes for all collections
@@ -134,10 +139,12 @@ class MongoStorage(StorageInterface):
                 await create_indexes_safe(self.saved_cards_collection, SAVED_CARDS_INDEXES, "user_saved_cards")
             workflow_history_coll = self.db["workflow_history"]
             await create_indexes_safe(workflow_history_coll, WORKFLOW_HISTORY_INDEXES, "workflow_history")
-            rl_qtable_coll = self.db["rl_qtable"]
-            await create_indexes_safe(rl_qtable_coll, RL_QTABLE_INDEXES, "rl_qtable")
-            rl_rewards_coll = self.db["rl_rewards"]
-            await create_indexes_safe(rl_rewards_coll, RL_REWARDS_INDEXES, "rl_rewards")
+            pref_scores_coll = self.db["user_preference_scores"]
+            await create_indexes_safe(pref_scores_coll, RL_QTABLE_INDEXES, "user_preference_scores")
+            feedback_coll = self.db["user_feedback_history"]
+            await create_indexes_safe(feedback_coll, RL_REWARDS_INDEXES, "user_feedback_history")
+            trips_coll = self.db["trips"]
+            await create_indexes_safe(trips_coll, TRIP_INDEXES, "trips")
 
             logger.info("MongoDB indexes verified via shared connection (including user_id indexes for data isolation)")
         except Exception as e:
@@ -207,7 +214,18 @@ class MongoStorage(StorageInterface):
             # Convert document to UserSession
             session_doc = SessionDocument(**doc)
             session = session_doc.to_user_session()
-            
+
+            # ✅ Load trip_plan from trips collection (single source of truth)
+            if session.trip_id:
+                try:
+                    from app.models.trip_plan import TripPlan
+                    trip_doc = await self.get_trip(session.trip_id, session.user_id)
+                    if trip_doc and trip_doc.get("trip_plan"):
+                        session.trip_plan = TripPlan(**trip_doc["trip_plan"])
+                        logger.debug(f"Loaded trip_plan from trips collection: trip_id={session.trip_id}")
+                except Exception as trip_load_err:
+                    logger.warning(f"Could not load trip_plan from trips collection, using embedded: {trip_load_err}")
+
             logger.debug(f"Loaded session {session_id} from MongoDB")
             return session
         
@@ -314,7 +332,19 @@ class MongoStorage(StorageInterface):
                 {"$set": doc_dict},
                 upsert=True
             )
-            
+
+            # ✅ Sync trip_plan to trips collection (source of truth for shared trips)
+            if session.trip_id and trip_plan_dict:
+                try:
+                    await self.save_trip(
+                        trip_id=session.trip_id,
+                        user_id=expected_user_id,
+                        trip_plan=trip_plan_dict,
+                        title=session.title,
+                    )
+                except Exception as trip_sync_err:
+                    logger.warning(f"Could not sync trip_plan to trips collection: {trip_sync_err}")
+
             if result.upserted_id or result.modified_count > 0:
                 logger.debug(f"Saved session {session.session_id} to MongoDB with user_id={expected_user_id}, trip_plan included")
             else:
@@ -372,45 +402,46 @@ class MongoStorage(StorageInterface):
 
     async def save_message(self, session_id: str, message: dict) -> bool:
         """
-        Save a chat message to conversation history
-        ✅ SECURITY: Ensures user_id is correctly set and matches session_id
+        Save a chat message to conversation history (idempotent).
+        Uses content+role fingerprint to prevent duplicate messages from
+        being pushed when the same request is retried or SSE reconnects.
         """
         if self.sessions_collection is None:
             await self.connect()
             
         try:
-            # Add timestamps if missing
             if "timestamp" not in message:
                 message["timestamp"] = datetime.utcnow()
                 
-            # Use conversation collection (create if not exists)
             conversations = self.db["conversations"]
-            
-            # ✅ SECURITY: Extract user_id from session_id (format: user_id::chat_id)
             user_id = session_id.split("::")[0] if "::" in session_id else session_id
             
-            # ✅ SECURITY: Verify existing conversation belongs to this user if it exists
             existing_conv = await conversations.find_one({"session_id": session_id})
             if existing_conv:
                 existing_user_id = existing_conv.get("user_id")
                 if existing_user_id and existing_user_id != user_id:
-                    logger.warning(f"Attempted to save message to conversation with mismatched user_id: session_id={session_id}, expected={user_id}, found={existing_user_id}")
-                    return False  # Prevent data leakage
+                    logger.warning(f"Attempted to save message to conversation with mismatched user_id: session_id={session_id}")
+                    return False
+
+                # Idempotent guard: skip if an identical message was pushed recently
+                existing_msgs = existing_conv.get("messages") or []
+                if existing_msgs:
+                    last = existing_msgs[-1]
+                    same_role = last.get("role") == message.get("role")
+                    same_text = (last.get("content") or "")[:200] == (message.get("content") or "")[:200]
+                    if same_role and same_text:
+                        logger.debug(f"Idempotent skip: duplicate message for session_id={session_id}")
+                        return True
             
-            # Push message to array
-            # ✅ FIX: Don't set user_id in $set if it's already in $setOnInsert to avoid conflict
-            # user_id should only be set on insert, not updated (it shouldn't change)
             update_op = {
                 "$push": {"messages": message},
                 "$setOnInsert": {
-                    "session_id": session_id,  # ✅ Ensure session_id is set on insert
-                    "user_id": user_id,  # ✅ Set user_id on insert only
+                    "session_id": session_id,
+                    "user_id": user_id,
                     "created_at": datetime.utcnow()
                 },
                 "$set": {
                     "updated_at": datetime.utcnow()
-                    # ✅ Removed user_id from $set to avoid conflict with $setOnInsert
-                    # user_id should not change after document creation
                 }
             }
             
@@ -420,11 +451,8 @@ class MongoStorage(StorageInterface):
                 upsert=True
             )
             
-            # Log success for debugging
             if result.upserted_id or result.modified_count > 0:
                 logger.debug(f"Message saved to MongoDB: session_id={session_id}, user_id={user_id}")
-            else:
-                logger.warning(f"Message save may have failed: session_id={session_id}, matched={result.matched_count}, modified={result.modified_count}")
             
             return True
         except Exception as e:
@@ -466,6 +494,32 @@ class MongoStorage(StorageInterface):
             return messages[-limit:]
         except Exception as e:
             logger.error(f"Error getting history for {session_id}: {e}", exc_info=True)
+            return []
+
+    async def get_chat_history_by_chat_id(self, chat_id: str, user_id: str, limit: int = 50) -> list:
+        """
+        Fallback: ดึงประวัติจาก conversation ที่ session_id เก็บเป็นแค่ chat_id (รูปแบบเก่า)
+        หรือ session_id จบด้วย ::chat_id — ใช้เมื่อ get_chat_history(session_id) ไม่เจอ
+        """
+        if self.sessions_collection is None:
+            await self.connect()
+        try:
+            conversations = self.db["conversations"]
+            # รูปแบบเก่า: session_id = chat_id อย่างเดียว และ user_id ตรง
+            doc = await conversations.find_one({"session_id": chat_id, "user_id": user_id})
+            if doc and doc.get("messages"):
+                return doc["messages"][-limit:]
+            # หรือ session_id จบด้วย ::chat_id (กรณีมี prefix อื่น)
+            import re
+            safe_chat_id = re.escape(chat_id)
+            doc = await conversations.find_one(
+                {"session_id": {"$regex": f"::{safe_chat_id}$"}, "user_id": user_id}
+            )
+            if doc and doc.get("messages"):
+                return doc["messages"][-limit:]
+            return []
+        except Exception as e:
+            logger.error(f"Error get_chat_history_by_chat_id chat_id={chat_id}: {e}", exc_info=True)
             return []
 
     async def clear_session_data(self, session_id: str) -> bool:
@@ -537,3 +591,145 @@ class MongoStorage(StorageInterface):
                 "collections": []
             }
 
+    # =========================================================================
+    # Trip CRUD — trips are the single source of truth for TripPlan
+    # Multiple chats can share a trip by referencing the same trip_id.
+    # =========================================================================
+
+    async def _ensure_trips_collection(self):
+        if self.trips_collection is None:
+            if self.db is None:
+                self.db = self.connection_manager.get_database()
+            self.trips_collection = self.db["trips"]
+
+    async def get_trip(self, trip_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        """Load a trip document.  Returns the raw dict (with trip_plan) or None."""
+        await self._ensure_trips_collection()
+        try:
+            doc = await self.trips_collection.find_one({"trip_id": trip_id, "user_id": user_id})
+            return doc
+        except Exception as e:
+            logger.error(f"get_trip error trip_id={trip_id}: {e}", exc_info=True)
+            return None
+
+    async def save_trip(
+        self,
+        trip_id: str,
+        user_id: str,
+        trip_plan: Dict[str, Any],
+        title: Optional[str] = None,
+        status: Optional[str] = None,
+        booking_ids: Optional[list] = None,
+    ) -> bool:
+        """Upsert a trip document.  Creates if not present."""
+        await self._ensure_trips_collection()
+        try:
+            now = datetime.utcnow()
+            update: Dict[str, Any] = {
+                "trip_id": trip_id,
+                "user_id": user_id,
+                "trip_plan": trip_plan,
+                "last_updated": now,
+            }
+            if title is not None:
+                update["title"] = title
+            if status is not None:
+                update["status"] = status
+            if booking_ids is not None:
+                update["booking_ids"] = booking_ids
+
+            await self.trips_collection.update_one(
+                {"trip_id": trip_id, "user_id": user_id},
+                {"$set": update, "$setOnInsert": {"created_at": now}},
+                upsert=True,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"save_trip error trip_id={trip_id}: {e}", exc_info=True)
+            return False
+
+    async def create_trip(self, user_id: str, title: str = "ทริปใหม่") -> str:
+        """Create a brand-new trip entity.  Returns the new trip_id."""
+        import uuid
+        trip_id = f"trip_{uuid.uuid4().hex[:16]}"
+        await self.save_trip(trip_id, user_id, trip_plan={}, title=title, status="planning")
+        return trip_id
+
+    async def list_trips(self, user_id: str, limit: int = 50) -> list:
+        """Return all trips for a user, sorted by last_updated desc.
+        Falls back to sessions collection if trips collection is empty (migration path).
+        """
+        await self._ensure_trips_collection()
+        try:
+            cursor = self.trips_collection.find(
+                {"user_id": user_id}
+            ).sort("last_updated", -1).limit(limit)
+            docs = await cursor.to_list(length=limit)
+            # Migration fallback: if no trips yet, synthesise from sessions
+            if not docs:
+                docs = await self._synthesise_trips_from_sessions(user_id, limit)
+            return docs
+        except Exception as e:
+            logger.error(f"list_trips error user_id={user_id}: {e}", exc_info=True)
+            return []
+
+    async def _synthesise_trips_from_sessions(self, user_id: str, limit: int) -> list:
+        """One-time migration helper: build trip records from existing session data."""
+        try:
+            if self.sessions_collection is None:
+                return []
+            cursor = self.sessions_collection.find(
+                {"user_id": user_id}
+            ).sort("last_updated", -1).limit(limit)
+            session_docs = await cursor.to_list(length=limit)
+            trips = []
+            for doc in session_docs:
+                trip_id = doc.get("trip_id") or doc.get("chat_id") or doc.get("session_id", "").split("::")[-1]
+                if not trip_id:
+                    continue
+                trips.append({
+                    "trip_id": trip_id,
+                    "user_id": user_id,
+                    "title": doc.get("title") or "ทริปใหม่",
+                    "status": "planning",
+                    "booking_ids": [],
+                    "trip_plan": doc.get("trip_plan", {}),
+                    "created_at": doc.get("created_at"),
+                    "last_updated": doc.get("last_updated"),
+                    "_from_session": True,
+                })
+            return trips
+        except Exception as e:
+            logger.warning(f"_synthesise_trips_from_sessions: {e}")
+            return []
+
+    async def delete_trip(self, trip_id: str, user_id: str) -> bool:
+        """Delete trip document.  Sessions that linked to it retain their history
+        but their trip_id is cleared so they become independent."""
+        await self._ensure_trips_collection()
+        try:
+            result = await self.trips_collection.delete_one({"trip_id": trip_id, "user_id": user_id})
+            # Unlink sessions that were pointing at this trip
+            if self.sessions_collection is not None:
+                await self.sessions_collection.update_many(
+                    {"trip_id": trip_id, "user_id": user_id},
+                    {"$set": {"trip_id": None}},
+                )
+            return result.deleted_count > 0
+        except Exception as e:
+            logger.error(f"delete_trip error trip_id={trip_id}: {e}", exc_info=True)
+            return False
+
+    async def link_chat_to_trip(self, session_id: str, trip_id: str, user_id: str) -> bool:
+        """Link an existing chat session to a different trip."""
+        if self.sessions_collection is None:
+            await self.connect()
+        try:
+            result = await self.sessions_collection.update_one(
+                {"session_id": session_id, "user_id": user_id},
+                {"$set": {"trip_id": trip_id}},
+            )
+            return result.matched_count > 0
+        except Exception as e:
+            logger.error(f"link_chat_to_trip error: {e}", exc_info=True)
+            return False

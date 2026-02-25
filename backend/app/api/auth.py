@@ -31,6 +31,8 @@ from app.core.security import (
     verify_password_from_client_hash,
 )
 from app.storage.mongodb_storage import MongoStorage
+from app.core.exceptions import StorageException
+from pymongo.errors import ServerSelectionTimeoutError, AutoReconnect, NetworkTimeout
 from app.models.database import User, SessionDocument, FamilyMember
 from app.services.email_service import get_email_service
 
@@ -165,10 +167,19 @@ async def login(request: LoginRequest, response: Response, raw_request: Request)
 
         client_sends_sha256 = (raw_request.headers.get("X-Password-Encoding") or "").strip().lower() == "sha256"
 
-        # Initialize storage and collection
-        storage = MongoStorage()
-        await storage.connect()
-        users_collection = storage.db["users"]
+        # Initialize storage and collection (catch MongoDB/Atlas connection errors)
+        try:
+            storage = MongoStorage()
+            await storage.connect()
+            if storage.db is None:
+                raise RuntimeError("MongoDB database is None")
+            users_collection = storage.db["users"]
+        except Exception as db_err:
+            logger.error(f"MongoDB connection failed on login: {db_err}", exc_info=True)
+            raise HTTPException(
+                status_code=503,
+                detail="ไม่สามารถเชื่อมต่อฐานข้อมูล (MongoDB/Atlas) ได้ กรุณาตรวจสอบ MONGO_URI ใน .env และ Network Access ใน MongoDB Atlas"
+            )
         
         # ✅ Normalize email for consistent checking (lowercase, trimmed)
         normalized_email = request.email.lower().strip()
@@ -334,6 +345,12 @@ async def login(request: LoginRequest, response: Response, raw_request: Request)
 
     except HTTPException:
         raise
+    except (StorageException, ServerSelectionTimeoutError, AutoReconnect, NetworkTimeout) as db_err:
+        logger.error(f"Login failed (DB/Atlas): {db_err}", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="ไม่สามารถเชื่อมต่อฐานข้อมูล (MongoDB/Atlas) ได้ กรุณาตรวจสอบ MONGO_URI และ Network Access ใน Atlas"
+        )
     except Exception as e:
         logger.error(f"Login error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")

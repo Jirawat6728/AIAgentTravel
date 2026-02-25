@@ -35,6 +35,7 @@ class FullWorkflowState(TypedDict, total=False):
     status_callback: Optional[Any]
     memory_context: str
     user_profile_context: str
+    conversation_context: str
     current_action: Optional[Any]
     has_ask_user: bool
     iteration: int
@@ -98,7 +99,12 @@ async def _controller_node(state: FullWorkflowState) -> Dict[str, Any]:
     out["ml_intent_hint"] = ml_intent_hint
     out["ml_validation_result"] = ml_validation_result
 
-    state_json = json.dumps(session.trip_plan.model_dump(), ensure_ascii=False, indent=2)
+    from app.engine.agent import _strip_options_pool_for_controller
+    stripped_state = _strip_options_pool_for_controller(session.trip_plan.model_dump())
+    state_json = json.dumps(stripped_state, ensure_ascii=False, indent=2)
+
+    conversation_context = state.get("conversation_context", "")
+
     action = await agent._call_controller_llm(
         state_json,
         user_input,
@@ -111,6 +117,7 @@ async def _controller_node(state: FullWorkflowState) -> Dict[str, Any]:
         workflow_validation=workflow_state,
         ml_intent_hint=ml_intent_hint,
         ml_validation_result=ml_validation_result,
+        conversation_context=conversation_context,
     )
 
     if not action:
@@ -253,6 +260,7 @@ async def run_full_workflow(
     status_callback: Optional[Any] = None,
     memory_context: str = "",
     user_profile_context: str = "",
+    conversation_context: str = "",
 ) -> str:
     """
     รัน full workflow ผ่าน LangGraph (controller -> execute -> ... -> responder).
@@ -273,6 +281,7 @@ async def run_full_workflow(
         "status_callback": status_callback,
         "memory_context": memory_context,
         "user_profile_context": user_profile_context,
+        "conversation_context": conversation_context,
         "current_action": None,
         "has_ask_user": False,
         "iteration": 0,

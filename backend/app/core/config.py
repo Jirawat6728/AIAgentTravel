@@ -24,12 +24,11 @@ class Settings:
         
         # LLM Configuration - Gemini (Primary)
         self.gemini_api_key: str = os.getenv("GEMINI_API_KEY", "").strip()
-        # Model names: ใช้จาก .env หรือ default gemini-2.5-flash เพื่อให้แอปรันได้แม้ .env จะไม่ครบ
-        # Note: gemini-1.5-flash is deprecated, use gemini-2.5-flash instead
+        # Model names: ใช้จาก .env หรือ default gemini-2.5-flash
         default_model = (os.getenv("GEMINI_MODEL_NAME", "") or "gemini-2.5-flash").strip()
         if not default_model:
             default_model = "gemini-2.5-flash"
-        # Auto-update deprecated 1.5 models to 2.5
+        # Auto-update deprecated 1.5 models only
         if "1.5" in default_model:
             default_model = default_model.replace("1.5", "2.5")
             logger.warning(f"Auto-updated deprecated model name to: {default_model}")

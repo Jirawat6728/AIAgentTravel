@@ -22,8 +22,8 @@ class TaskComplexity(str, Enum):
 
 class ModelTier(str, Enum):
     """Gemini model tiers (Flash and Pro only)"""
-    FLASH = "flash"   # Fast, cost-effective (gemini-2.5-flash)
-    PRO = "pro"       # Balanced performance (gemini-2.5-pro)
+    FLASH = "flash"   # Fast, cost-effective (gemini-3.0-flash)
+    PRO = "pro"       # Balanced performance (gemini-3.0-pro)
 
 
 class ModelSelector:

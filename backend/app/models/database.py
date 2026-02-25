@@ -188,6 +188,8 @@ class SessionDocument(BaseModel):
     last_updated: datetime = Field(default_factory=datetime.utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     popular_destinations: Optional[List[Dict[str, Any]]] = Field(default=None, description="Popular destinations when user searches 'all' in destination")
+    travel_preferences: Dict[str, Any] = Field(default_factory=dict, description="Broker preferences: dietary_restrictions, budget_level, travel_style, etc.")
+    booking_funnel_state: str = Field(default="idle", description="Booking funnel stage: idle | confirming_search | searching | selecting | confirming_booking | completed")
     
     @classmethod
     def from_user_session(cls, session) -> "SessionDocument":
@@ -210,6 +212,8 @@ class SessionDocument(BaseModel):
                 # This is verified by Pydantic's model_dump() method
             
             popular = getattr(session, "popular_destinations", None)
+            travel_prefs = getattr(session, "travel_preferences", {}) or {}
+            funnel_state = getattr(session, "booking_funnel_state", "idle") or "idle"
             return cls(
                 session_id=session.session_id,
                 user_id=session.user_id,
@@ -218,7 +222,9 @@ class SessionDocument(BaseModel):
                 trip_plan=trip_plan_dict,
                 title=session.title,
                 last_updated=datetime.fromisoformat(session.last_updated.replace('Z', '+00:00')),
-                popular_destinations=popular
+                popular_destinations=popular,
+                travel_preferences=travel_prefs,
+                booking_funnel_state=funnel_state,
             )
         except Exception as e:
             import logging
@@ -232,7 +238,9 @@ class SessionDocument(BaseModel):
                 chat_id=session.chat_id,
                 trip_plan={},
                 title=session.title,
-                last_updated=datetime.fromisoformat(session.last_updated.replace('Z', '+00:00'))
+                last_updated=datetime.fromisoformat(session.last_updated.replace('Z', '+00:00')),
+                travel_preferences=getattr(session, "travel_preferences", {}) or {},
+                booking_funnel_state=getattr(session, "booking_funnel_state", "idle") or "idle",
             )
     
     def to_user_session(self):
@@ -246,7 +254,9 @@ class SessionDocument(BaseModel):
             trip_plan=TripPlan(**self.trip_plan),
             title=self.title,
             last_updated=self.last_updated.isoformat(),
-            popular_destinations=getattr(self, "popular_destinations", None)
+            popular_destinations=getattr(self, "popular_destinations", None),
+            travel_preferences=getattr(self, "travel_preferences", {}) or {},
+            booking_funnel_state=getattr(self, "booking_funnel_state", "idle") or "idle",
         )
 
 
@@ -257,7 +267,7 @@ class Message(BaseModel):
     """Single message in conversation - extra='allow' to handle unexpected fields from external APIs"""
     model_config = {"extra": "allow"}
     
-    role: str = Field(..., description="Message role: user or assistant")
+    role: str = Field(..., description="Message role: user | assistant | tool_call | tool_output")
     content: str = Field(..., description="Message content")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -349,17 +359,50 @@ WORKFLOW_HISTORY_INDEXES = [
 
 # RL Q-table indexes (per-user, per-slot option preferences)
 RL_QTABLE_INDEXES = [
-    IndexModel([("user_id", 1), ("slot_name", 1), ("option_key", 1)], unique=True, name="rl_qtable_unique"),
-    IndexModel([("user_id", 1), ("slot_name", 1)], name="rl_qtable_user_slot"),
-    IndexModel([("last_updated", -1)], name="rl_qtable_updated"),
+    IndexModel([("user_id", 1), ("slot_name", 1), ("option_key", 1)], unique=True, name="pref_scores_unique"),
+    IndexModel([("user_id", 1), ("slot_name", 1)], name="pref_scores_user_slot"),
+    IndexModel([("last_updated", -1)], name="pref_scores_updated"),
 ]
 
 # RL reward history indexes
 RL_REWARDS_INDEXES = [
-    IndexModel([("user_id", 1), ("created_at", -1)], name="rl_rewards_user_time"),
-    IndexModel([("user_id", 1), ("slot_name", 1)], name="rl_rewards_user_slot"),
-    IndexModel([("created_at", -1)], name="rl_rewards_time"),
+    IndexModel([("user_id", 1), ("created_at", -1)], name="feedback_user_time"),
+    IndexModel([("user_id", 1), ("slot_name", 1)], name="feedback_user_slot"),
+    IndexModel([("created_at", -1)], name="feedback_time"),
 ]
+
+# =============================================================================
+# Trips Collection  (independent trip entity — 1 trip : many chats)
+# =============================================================================
+class TripDocument(BaseModel):
+    """Standalone trip entity stored in the 'trips' collection.
+
+    Multiple chat sessions can share the same trip by referencing trip_id.
+    The trip_plan here is the single source of truth; session.trip_plan is a cache.
+    """
+    model_config = {
+        "extra": "allow",
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+    }
+
+    id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
+    trip_id: str = Field(..., description="Unique trip identifier (UUID, generated by frontend or backend)")
+    user_id: str = Field(..., description="Owner user_id")
+    title: str = Field(default="ทริปใหม่", description="Human-readable trip title")
+    trip_plan: Dict[str, Any] = Field(default_factory=dict, description="Serialised TripPlan")
+    status: str = Field(default="planning", description="planning | booked | completed")
+    booking_ids: List[str] = Field(default_factory=list, description="Related booking IDs")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_updated: datetime = Field(default_factory=datetime.utcnow)
+
+
+TRIP_INDEXES = [
+    IndexModel([("trip_id", 1)], unique=True, name="trip_id_unique"),
+    IndexModel([("user_id", 1), ("last_updated", -1)], name="trip_user_updated"),
+    IndexModel([("user_id", 1), ("status", 1)], name="trip_user_status"),
+]
+
 
 MEMORY_INDEXES = [
     # ✅ SECURITY: Index on user_id for fast queries and data isolation

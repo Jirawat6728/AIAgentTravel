@@ -31,7 +31,7 @@ TEST_MESSAGE = (
 
 async def main():
     from app.models.session import UserSession
-    from app.storage.hybrid_storage import HybridStorage
+    from app.storage.mongodb_storage import MongoStorage
     from app.services.llm import LLMServiceWithMCP
     from app.engine.agent import TravelAgent
 
@@ -45,7 +45,7 @@ async def main():
     print(f"Message: {TEST_MESSAGE[:80]}...")
     print()
 
-    storage = HybridStorage()
+    storage = MongoStorage()
     session = await storage.get_session(session_id)
     if not session:
         session = UserSession(
