@@ -48,19 +48,23 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
     switch (name) {
       case 'firstName':
         if (!value.trim()) return 'กรุณากรอกชื่อ';
+        if (!/^[A-Za-z\s]+$/.test(value.trim())) return 'ชื่อต้องเป็นตัวอักษรภาษาอังกฤษเท่านั้น';
         if (value.trim().length < 2) return 'ชื่อต้องมีอย่างน้อย 2 ตัวอักษร';
-        if (/[0-9!@#$%^&*(),.?":{}|<>]/.test(value)) return 'ชื่อต้องไม่มีตัวเลขหรืออักขระพิเศษ';
         return '';
       case 'lastName':
         if (!value.trim()) return 'กรุณากรอกนามสกุล';
+        if (!/^[A-Za-z\s]+$/.test(value.trim())) return 'นามสกุลต้องเป็นตัวอักษรภาษาอังกฤษเท่านั้น';
         if (value.trim().length < 2) return 'นามสกุลต้องมีอย่างน้อย 2 ตัวอักษร';
-        if (/[0-9!@#$%^&*(),.?":{}|<>]/.test(value)) return 'นามสกุลต้องไม่มีตัวเลขหรืออักขระพิเศษ';
         return '';
       case 'firstNameTh':
-        if (value.trim() && !/^[ก-๙\s]+$/.test(value.trim())) return 'ชื่อภาษาไทยต้องเป็นภาษาไทยเท่านั้น';
+        if (!value.trim()) return 'กรุณากรอกชื่อภาษาไทย';
+        if (!/^[ก-๙\s]+$/.test(value.trim())) return 'ชื่อภาษาไทยต้องเป็นภาษาไทยเท่านั้น';
+        if (value.trim().length < 2) return 'ชื่อภาษาไทยต้องมีอย่างน้อย 2 ตัวอักษร';
         return '';
       case 'lastNameTh':
-        if (value.trim() && !/^[ก-๙\s]+$/.test(value.trim())) return 'นามสกุลภาษาไทยต้องเป็นภาษาไทยเท่านั้น';
+        if (!value.trim()) return 'กรุณากรอกนามสกุลภาษาไทย';
+        if (!/^[ก-๙\s]+$/.test(value.trim())) return 'นามสกุลภาษาไทยต้องเป็นภาษาไทยเท่านั้น';
+        if (value.trim().length < 2) return 'นามสกุลภาษาไทยต้องมีอย่างน้อย 2 ตัวอักษร';
         return '';
       case 'email':
         if (!value.trim()) return 'กรุณากรอกอีเมล';
@@ -124,6 +128,17 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
+
+  // ปุ่มสมัครสมาชิกกดไม่ได้ถ้าช่องบังคับยังไม่ครบ
+  const isFormIncomplete =
+    !formData.firstName.trim() ||
+    !formData.lastName.trim() ||
+    !formData.firstNameTh.trim() ||
+    !formData.lastNameTh.trim() ||
+    !formData.email.trim() ||
+    !formData.phone.trim() ||
+    !formData.password ||
+    !formData.confirmPassword;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -259,7 +274,7 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                     onChange={handleChange}
                     onBlur={handleBlur}
                     placeholder={t('auth.firstName')}
-                    className={`form-input ${errors.firstName ? 'error' : formData.firstName.trim().length >= 2 && !/[0-9!@#$%^&*(),.?":{}|<>]/.test(formData.firstName) ? 'valid' : ''}`}
+                    className={`form-input ${errors.firstName ? 'error' : formData.firstName.trim().length >= 2 && /^[A-Za-z\s]+$/.test(formData.firstName.trim()) ? 'valid' : ''}`}
                     disabled={isSubmitting}
                   />
                   {errors.firstName && <span className="error-message">{errors.firstName}</span>}
@@ -274,7 +289,7 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
                     onChange={handleChange}
                     onBlur={handleBlur}
                     placeholder={t('auth.lastName')}
-                    className={`form-input ${errors.lastName ? 'error' : formData.lastName.trim().length >= 2 && !/[0-9!@#$%^&*(),.?":{}|<>]/.test(formData.lastName) ? 'valid' : ''}`}
+                    className={`form-input ${errors.lastName ? 'error' : formData.lastName.trim().length >= 2 && /^[A-Za-z\s]+$/.test(formData.lastName.trim()) ? 'valid' : ''}`}
                     disabled={isSubmitting}
                   />
                   {errors.lastName && <span className="error-message">{errors.lastName}</span>}
@@ -453,7 +468,7 @@ export default function RegisterPage({ onRegister, onNavigateToLogin, onGoogleLo
               </div>
 
               {/* Submit Button */}
-              <button type="submit" className={`btn-register ${isSuccess ? 'btn-success' : ''}`} disabled={isSubmitting || isSuccess}>
+              <button type="submit" className={`btn-register ${isSuccess ? 'btn-success' : ''}`} disabled={isSubmitting || isSuccess || isFormIncomplete}>
                 {isSuccess ? (
                   <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ flexShrink: 0 }}>

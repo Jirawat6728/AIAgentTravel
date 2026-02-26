@@ -49,8 +49,9 @@ def _build_verification_html(
 ) -> str:
     """
     Build OTP email HTML.
-    context='register'     → registration / re-send verification
-    context='email_change' → email change verification (shows new_email)
+    context='register'       → registration / re-send verification
+    context='email_change'   → email change verification (shows new_email)
+    context='reset_password' → reset password OTP
     """
     otp_boxes = "".join(
         f'<span style="display:inline-block;width:48px;height:56px;line-height:56px;'
@@ -74,6 +75,13 @@ def _build_verification_html(
             f'ด้านล่างเพื่อยืนยันการเปลี่ยนอีเมล</p>'
         )
         ignore_text = "หากไม่ได้ขอเปลี่ยนอีเมล กรุณาเพิกเฉยต่ออีเมลนี้"
+    elif context == "reset_password":
+        body_text = (
+            f'<p style="color:#6b7280;font-size:15px;line-height:1.8;margin:0 0 28px;">'
+            f'คุณได้ขอลืมรหัสผ่าน กรุณากรอก <strong style="color:#4f46e5;">รหัส OTP 6 หลัก</strong> '
+            f'ด้านล่างเพื่อยืนยันและตั้งรหัสผ่านใหม่</p>'
+        )
+        ignore_text = "หากไม่ได้ขอลืมรหัสผ่าน กรุณาเพิกเฉยต่ออีเมลนี้"
     else:
         body_text = (
             f'<p style="color:#6b7280;font-size:15px;line-height:1.8;margin:0 0 28px;">'
@@ -112,13 +120,12 @@ def _build_verification_html(
           <div style="text-align:center;margin:32px 0 24px;">
             <p style="color:#374151;font-size:14px;margin:0 0 16px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;">รหัส OTP ของคุณ</p>
             <div style="display:inline-block;">{otp_boxes}</div>
-            <p style="color:#6b7280;font-size:13px;margin:16px 0 0;">หรือคัดลอกรหัส: <strong style="color:#4f46e5;font-size:20px;letter-spacing:4px;">{otp}</strong></p>
           </div>
 
           <!-- Warning box -->
           <div style="background:#fef9c3;border:1px solid #fde047;border-radius:10px;padding:14px 18px;margin:28px 0 0;">
             <p style="color:#854d0e;font-size:13px;margin:0;line-height:1.7;">
-              &#9203;&nbsp;<strong>รหัส OTP จะหมดอายุใน 10 นาที</strong> กรุณากรอกโดยเร็ว<br>
+              &#9203;&nbsp;<strong>รหัส OTP จะหมดอายุใน 4 นาที</strong> กรุณากรอกโดยเร็ว<br>
               {ignore_text}
             </p>
           </div>
@@ -179,6 +186,20 @@ class EmailService:
             new_email=new_email or to_email,
         )
         return _send_gmail(to_email, f"รหัส OTP ยืนยันการเปลี่ยนอีเมล - {self.site_name}", html)
+
+    def send_reset_password_otp(
+        self,
+        to_email: str,
+        token: str,
+        user_name: Optional[str] = None,
+    ) -> bool:
+        """ส่ง OTP สำหรับรีเซ็ตรหัสผ่าน (เหมือนเปลี่ยนอีเมล/ยืนยันอีเมล)"""
+        name = user_name or "คุณ"
+        html = _build_verification_html(
+            name, token, self.site_name,
+            context="reset_password",
+        )
+        return _send_gmail(to_email, f"รหัส OTP รีเซ็ตรหัสผ่าน - {self.site_name}", html)
 
     # ── Legacy alias (kept for backward compat, not used) ──────────────────────
     def send_email_change_verification(

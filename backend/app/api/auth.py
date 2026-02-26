@@ -775,7 +775,7 @@ async def update_email(request: Request, email_data: dict):
         email_service = get_email_service()
         otp = email_service.generate_verification_token()  # 6-digit OTP
 
-        # เก็บ pending_new_email + OTP (หมดอายุใน 10 นาที)
+        # เก็บ pending_new_email + OTP (หมดอายุใน 4 นาที)
         await users_collection.update_one(
             {"user_id": user_id},
             {
@@ -847,17 +847,17 @@ async def verify_email_change_otp(request: Request, body: dict):
         if not stored_otp or not pending_new:
             raise HTTPException(status_code=400, detail="ไม่พบการรอเปลี่ยนอีเมล กรุณาขอรหัสใหม่")
 
-        # ตรวจสอบอายุ OTP (10 นาที)
+        # ตรวจสอบอายุ OTP (4 นาที)
         sent_at = user_data.get("email_verification_sent_at")
         if sent_at:
             if isinstance(sent_at, str):
                 sent_at = date_parser.parse(sent_at)
-            if datetime.utcnow() - sent_at > timedelta(minutes=10):
+            if datetime.utcnow() - sent_at > timedelta(minutes=4):
                 await users_collection.update_one(
                     {"user_id": user_id},
                     {"$unset": {"pending_new_email": "", "email_verification_token": "", "email_verification_sent_at": ""}}
                 )
-                raise HTTPException(status_code=400, detail="รหัส OTP หมดอายุ (10 นาที) กรุณาขอรหัสใหม่")
+                raise HTTPException(status_code=400, detail="รหัส OTP หมดอายุ (4 นาที) กรุณาขอรหัสใหม่")
 
         if stored_otp != otp:
             raise HTTPException(status_code=400, detail="รหัส OTP ไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง")
@@ -1310,15 +1310,150 @@ async def get_reset_password_info(email: str):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+class SendResetPasswordOtpRequest(BaseModel):
+    email: str
+
+
+@router.post("/send-reset-password-otp")
+async def send_reset_password_otp(body: SendResetPasswordOtpRequest):
+    """
+    ส่ง OTP 6 หลักไปที่อีเมลสำหรับรีเซ็ตรหัสผ่าน (เหมือนเปลี่ยนอีเมล/ยืนยันอีเมล)
+    ผู้ใช้ต้องกรอก OTP ในขั้นตอนถัดไปก่อนเปลี่ยนรหัสผ่าน
+    """
+    email_raw = (body.email or "").strip()
+    email_trimmed = email_raw
+    email_lower = email_trimmed.lower()
+    if not email_trimmed or "@" not in email_trimmed:
+        raise HTTPException(status_code=400, detail="กรุณากรอกอีเมลที่ถูกต้อง")
+
+    try:
+        storage = MongoStorage()
+        await storage.connect()
+        users_collection = storage.db["users"]
+
+        user_data = await users_collection.find_one({"email": email_raw})
+        if not user_data:
+            user_data = await users_collection.find_one({"email": email_trimmed})
+        if not user_data:
+            user_data = await users_collection.find_one({
+                "email": {"$regex": f"^{email_lower}$", "$options": "i"}
+            })
+
+        if not user_data:
+            logger.warning(f"❌ User not found for send-reset-password-otp: '{email_trimmed}'")
+            raise HTTPException(
+                status_code=404,
+                detail=f"ไม่พบผู้ใช้ในระบบ กรุณาตรวจสอบอีเมล '{email_trimmed}' หรือสมัครสมาชิกใหม่"
+            )
+
+        user_id = user_data.get("user_id")
+        stored_email = (user_data.get("email") or "").strip()
+
+        from app.services.email_service import get_email_service
+        email_service = get_email_service()
+        otp = email_service.generate_verification_token()
+
+        await users_collection.update_one(
+            {"user_id": user_id},
+            {
+                "$set": {
+                    "reset_password_otp": otp,
+                    "reset_password_otp_sent_at": datetime.utcnow(),
+                }
+            }
+        )
+
+        user_name = user_data.get("full_name") or user_data.get("first_name") or "คุณ"
+        sent = email_service.send_reset_password_otp(
+            to_email=stored_email,
+            token=otp,
+            user_name=user_name,
+        )
+        if sent:
+            logger.info(f"Reset password OTP sent to {stored_email} for user {user_id}")
+        else:
+            logger.warning(f"Reset password OTP send failed (SMTP) for {stored_email}")
+
+        return {
+            "ok": True,
+            "message": f"ส่งรหัส OTP ไปที่ {stored_email} แล้ว กรุณาตรวจสอบอีเมลและกรอกรหัส 6 หลัก",
+            "email": stored_email,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Send reset password OTP error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="เกิดข้อผิดพลาดในการส่ง OTP")
+
+
+class VerifyResetPasswordOtpRequest(BaseModel):
+    email: str
+    otp: str
+
+
+@router.post("/verify-reset-password-otp")
+async def verify_reset_password_otp(body: VerifyResetPasswordOtpRequest):
+    """
+    ตรวจสอบรหัส OTP สำหรับรีเซ็ตรหัสผ่าน (ไม่เปลี่ยนรหัส) ใช้ก่อนนำผู้ใช้ไปหน้าเปลี่ยนรหัสผ่าน
+    """
+    email_trimmed = (body.email or "").strip()
+    otp = (body.otp or "").strip()
+    if not otp or len(otp) != 6 or not otp.isdigit():
+        raise HTTPException(status_code=400, detail="กรุณากรอกรหัส OTP 6 หลัก")
+
+    email_lower = email_trimmed.lower()
+    if not email_trimmed or "@" not in email_trimmed:
+        raise HTTPException(status_code=400, detail="กรุณากรอกอีเมลที่ถูกต้อง")
+
+    try:
+        storage = MongoStorage()
+        await storage.connect()
+        users_collection = storage.db["users"]
+
+        user_data = await users_collection.find_one({"email": email_trimmed})
+        if not user_data:
+            user_data = await users_collection.find_one({
+                "email": {"$regex": f"^{email_lower}$", "$options": "i"}
+            })
+        if not user_data:
+            raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้ในระบบ")
+
+        stored_otp = user_data.get("reset_password_otp")
+        sent_at = user_data.get("reset_password_otp_sent_at")
+        if not stored_otp or not sent_at:
+            raise HTTPException(status_code=400, detail="ไม่พบการรอรีเซ็ตรหัสผ่าน กรุณากดตรวจสอบอีเมลเพื่อรับ OTP ก่อน")
+
+        if isinstance(sent_at, str):
+            sent_at = date_parser.parse(sent_at)
+        if datetime.utcnow() - sent_at > timedelta(minutes=4):
+            await users_collection.update_one(
+                {"user_id": user_data.get("user_id")},
+                {"$unset": {"reset_password_otp": "", "reset_password_otp_sent_at": ""}}
+            )
+            raise HTTPException(status_code=400, detail="รหัส OTP หมดอายุ (4 นาที) กรุณากดตรวจสอบอีเมลเพื่อรับ OTP ใหม่")
+
+        if stored_otp != otp:
+            raise HTTPException(status_code=400, detail="รหัส OTP ไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง")
+
+        return {"ok": True, "message": "รหัส OTP ถูกต้อง สามารถเปลี่ยนรหัสผ่านได้"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Verify reset password OTP error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="เกิดข้อผิดพลาด")
+
+
 class ResetPasswordRequest(BaseModel):
     email: str
     new_password: str
+    otp: Optional[str] = None  # บังคับเมื่อใช้ฟลูส่ง OTP จากตรวจสอบอีเมล
 
 
 @router.post("/reset-password")
 async def reset_password(request: ResetPasswordRequest, raw_request: Request):
     """
     Reset user password.
+    ต้องส่ง otp (รหัส 6 หลักที่ส่งไปอีเมล) มาด้วย ถ้าใช้ฟลูส่ง OTP จากปุ่มตรวจสอบอีเมล
     If header X-Password-Encoding: sha256, new_password must be SHA-256 hex (64 chars).
     """
     try:
@@ -1327,80 +1462,95 @@ async def reset_password(request: ResetPasswordRequest, raw_request: Request):
             is_valid, error_message = validate_password_strength(request.new_password)
             if not is_valid:
                 raise HTTPException(status_code=400, detail=error_message)
-        
+
+        otp = (request.otp or "").strip()
+        if not otp or len(otp) != 6 or not otp.isdigit():
+            raise HTTPException(status_code=400, detail="กรุณากรอกรหัส OTP 6 หลักที่ส่งไปอีเมล")
+
         email_trimmed = request.email.strip()
         email_lower = email_trimmed.lower()
-        logger.info(f"🔐 Password reset request for email: '{request.email}' (trimmed: '{email_trimmed}', lower: '{email_lower}')")
-        
+        logger.info(f"🔐 Password reset request for email: '{request.email}' with OTP")
+
         storage = MongoStorage()
         await storage.connect()
         users_collection = storage.db["users"]
-        
+
         user_data = None
-        
-        # Try multiple search strategies (same as GET endpoint)
-        # Strategy 1: Exact match
         user_data = await users_collection.find_one({"email": request.email})
         if not user_data:
             user_data = await users_collection.find_one({"email": email_trimmed})
         if not user_data:
-            # Strategy 2: Case-insensitive
             user_data = await users_collection.find_one({
                 "email": {"$regex": f"^{email_lower}$", "$options": "i"}
             })
-        
+
         if not user_data:
             logger.warning(f"❌ User not found for password reset: '{request.email}'")
             raise HTTPException(
-                status_code=404, 
+                status_code=404,
                 detail=f"ไม่พบผู้ใช้ในระบบ กรุณาตรวจสอบอีเมล '{email_trimmed}'"
             )
-        
-        logger.info(f"✅ Found user for password reset: {user_data.get('email')} (user_id: {user_data.get('user_id')})")
-        
-        # Backup old password hash if exists
+
+        stored_otp = user_data.get("reset_password_otp")
+        sent_at = user_data.get("reset_password_otp_sent_at")
+        if not stored_otp or not sent_at:
+            raise HTTPException(status_code=400, detail="ไม่พบการรอรีเซ็ตรหัสผ่าน กรุณากดตรวจสอบอีเมลเพื่อรับ OTP ก่อน")
+
+        if isinstance(sent_at, str):
+            sent_at = date_parser.parse(sent_at)
+        if datetime.utcnow() - sent_at > timedelta(minutes=4):
+            await users_collection.update_one(
+                {"user_id": user_data.get("user_id")},
+                {"$unset": {"reset_password_otp": "", "reset_password_otp_sent_at": ""}}
+            )
+            raise HTTPException(status_code=400, detail="รหัส OTP หมดอายุ (4 นาที) กรุณากดตรวจสอบอีเมลเพื่อรับ OTP ใหม่")
+
+        if stored_otp != otp:
+            raise HTTPException(status_code=400, detail="รหัส OTP ไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง")
+
+        user_id = user_data.get("user_id")
+        logger.info(f"✅ OTP verified for password reset: {user_data.get('email')} (user_id: {user_id})")
+
         old_password_hash = user_data.get("password_hash")
-        update_data = {}
-        
-        if old_password_hash:
-            # Backup old password hash
-            update_data["password_hash_backup"] = old_password_hash
-            update_data["password_backup_date"] = datetime.utcnow()
-            logger.info(f"Backed up old password hash for user: {request.email}")
-        
-        # Hash new password (client may send SHA-256 hex)
         try:
             if client_sends_sha256:
                 new_password_hash = hash_password_from_client_sha256(request.new_password)
             else:
                 new_password_hash = hash_password(request.new_password)
-            update_data["password_hash"] = new_password_hash
-            update_data["password_changed_at"] = datetime.utcnow()
-            logger.info(f"Password hashed successfully for user: {request.email}")
         except ValueError as ve:
             raise HTTPException(status_code=400, detail=str(ve))
         except Exception as hash_error:
             logger.error(f"Password hashing error: {hash_error}", exc_info=True)
             raise HTTPException(status_code=500, detail="Password encryption failed")
-        
-        # Update user
+
+        set_data = {
+            "password_hash": new_password_hash,
+            "password_changed_at": datetime.utcnow(),
+        }
+        if old_password_hash:
+            set_data["password_hash_backup"] = old_password_hash
+            set_data["password_backup_date"] = datetime.utcnow()
+
         result = await users_collection.update_one(
-            {"email": request.email},
-            {"$set": update_data}
+            {"user_id": user_id},
+            {
+                "$set": set_data,
+                "$unset": {"reset_password_otp": "", "reset_password_otp_sent_at": ""}
+            }
         )
-        
+
         if result.matched_count == 0:
             raise HTTPException(status_code=404, detail="User not found")
-        
+
         logger.info(f"Password reset successfully for user: {request.email} (backup: {bool(old_password_hash)})")
-        
+
         return {
             "ok": True,
-            "message": "Password reset successfully",
+            "message": "เปลี่ยนรหัสผ่านสำเร็จ",
             "email": request.email,
             "backup_created": bool(old_password_hash)
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1815,18 +1965,18 @@ async def verify_email(request: VerifyEmailOTPRequest):
         if not stored_otp:
             raise HTTPException(status_code=400, detail="ไม่พบรหัส OTP กรุณาขอรหัสใหม่")
 
-        # ตรวจสอบหมดอายุ (10 นาที)
+        # ตรวจสอบหมดอายุ (4 นาที)
         verification_sent_at = user_data.get("email_verification_sent_at")
         if verification_sent_at:
             if isinstance(verification_sent_at, str):
                 verification_sent_at = date_parser.parse(verification_sent_at)
             token_age = datetime.utcnow() - verification_sent_at
-            if token_age > timedelta(minutes=10):
+            if token_age > timedelta(minutes=4):
                 await users_collection.update_one(
                     {"email": normalized_email},
                     {"$unset": {"email_verification_token": "", "email_verification_sent_at": ""}}
                 )
-                raise HTTPException(status_code=400, detail="รหัส OTP หมดอายุแล้ว (10 นาที) กรุณาขอรหัสใหม่")
+                raise HTTPException(status_code=400, detail="รหัส OTP หมดอายุแล้ว (4 นาที) กรุณาขอรหัสใหม่")
 
         # ตรวจสอบ OTP ตรงกันไหม
         if stored_otp != otp:

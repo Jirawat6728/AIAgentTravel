@@ -30,9 +30,12 @@ export function clearAllUserData() {
     }
   });
   
-  // Clear sessionStorage
+  // Clear sessionStorage (รวม session-only login keys)
   const sessionStorageKeys = [
-    'ai_travel_loaded_trips'
+    'ai_travel_loaded_trips',
+    'is_logged_in',
+    'user_data',
+    'session_timestamp',
   ];
   
   sessionStorageKeys.forEach(key => {

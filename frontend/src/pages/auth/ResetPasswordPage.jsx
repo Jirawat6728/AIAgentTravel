@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import './ResetPasswordPage.css';
 import { sha256Password } from '../../utils/passwordHash.js';
+import Swal from 'sweetalert2';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
@@ -14,7 +15,28 @@ export default function ResetPasswordPage({ onNavigateToLogin, onNavigateToHome,
   const [isLoadingUser, setIsLoadingUser] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
   const [userInfo, setUserInfo] = useState(null);
-  const [step, setStep] = useState('email'); // 'email' or 'password'
+  const [step, setStep] = useState('email'); // 'email' | 'otp'
+  const [otp, setOtp] = useState('');
+  const [otpError, setOtpError] = useState('');
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [passwordStrength, setPasswordStrength] = useState({ score: 0, feedback: [] });
+
+  const calculatePasswordStrength = (password) => {
+    let score = 0;
+    const feedback = [];
+    if (password.length >= 8) score++; else feedback.push(lang === 'th' ? 'อย่างน้อย 8 ตัวอักษร' : 'At least 8 characters');
+    if (/[A-Z]/.test(password)) score++; else feedback.push(lang === 'th' ? 'ตัวพิมพ์ใหญ่ (A-Z)' : 'Uppercase (A-Z)');
+    if (/[a-z]/.test(password)) score++; else feedback.push(lang === 'th' ? 'ตัวพิมพ์เล็ก (a-z)' : 'Lowercase (a-z)');
+    if (/\d/.test(password)) score++; else feedback.push(lang === 'th' ? 'ตัวเลข (0-9)' : 'Number (0-9)');
+    if (/[!@#$%^&*(),.?":{}|<>]/.test(password)) score++; else feedback.push(lang === 'th' ? 'อักขระพิเศษ (!@#$...)' : 'Special char (!@#$...)');
+    return { score, feedback };
+  };
+
+  const strengthColors = ['#ef4444', '#f97316', '#eab308', '#84cc16', '#22c55e'];
+  const strengthLabels = lang === 'th'
+    ? ['อ่อนแอมาก', 'อ่อนแอ', 'พอใช้', 'ดี', 'แข็งแกร่ง']
+    : ['Very Weak', 'Weak', 'Fair', 'Good', 'Strong'];
 
   const validate = () => {
     const newErrors = {};
@@ -25,14 +47,21 @@ export default function ResetPasswordPage({ onNavigateToLogin, onNavigateToHome,
       } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         newErrors.email = lang === 'th' ? 'รูปแบบอีเมลไม่ถูกต้อง' : 'Invalid email format';
       }
-    } else if (step === 'password') {
-      if (!newPassword.trim()) {
+    } else if (step === 'otp') {
+      if (!newPassword) {
         newErrors.newPassword = lang === 'th' ? 'กรุณากรอกรหัสผ่านใหม่' : 'New password is required';
-      } else if (newPassword.length < 6) {
-        newErrors.newPassword = lang === 'th' ? 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร' : 'Password must be at least 6 characters';
+      } else if (newPassword.length < 8) {
+        newErrors.newPassword = lang === 'th' ? 'รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร' : 'Password must be at least 8 characters';
+      } else if (!/[A-Z]/.test(newPassword)) {
+        newErrors.newPassword = lang === 'th' ? 'รหัสผ่านต้องมีตัวพิมพ์ใหญ่อย่างน้อย 1 ตัว' : 'Password must have at least one uppercase letter';
+      } else if (!/[a-z]/.test(newPassword)) {
+        newErrors.newPassword = lang === 'th' ? 'รหัสผ่านต้องมีตัวพิมพ์เล็กอย่างน้อย 1 ตัว' : 'Password must have at least one lowercase letter';
+      } else if (!/\d/.test(newPassword)) {
+        newErrors.newPassword = lang === 'th' ? 'รหัสผ่านต้องมีตัวเลขอย่างน้อย 1 ตัว' : 'Password must have at least one number';
+      } else if (!/[!@#$%^&*(),.?":{}|<>]/.test(newPassword)) {
+        newErrors.newPassword = lang === 'th' ? 'รหัสผ่านต้องมีอักขระพิเศษอย่างน้อย 1 ตัว (!@#$...)' : 'Password must have at least one special character (!@#$...)';
       }
-      
-      if (!confirmPassword.trim()) {
+      if (!confirmPassword) {
         newErrors.confirmPassword = lang === 'th' ? 'กรุณายืนยันรหัสผ่าน' : 'Please confirm password';
       } else if (newPassword !== confirmPassword) {
         newErrors.confirmPassword = lang === 'th' ? 'รหัสผ่านไม่ตรงกัน' : 'Passwords do not match';
@@ -57,6 +86,12 @@ export default function ResetPasswordPage({ onNavigateToLogin, onNavigateToHome,
       }
     } else if (name === 'newPassword') {
       setNewPassword(value);
+      setPasswordStrength(calculatePasswordStrength(value));
+      if (confirmPassword && confirmPassword !== value) {
+        setErrors(prev => ({ ...prev, confirmPassword: lang === 'th' ? 'รหัสผ่านไม่ตรงกัน' : 'Passwords do not match' }));
+      } else if (confirmPassword) {
+        setErrors(prev => ({ ...prev, confirmPassword: '' }));
+      }
     } else if (name === 'confirmPassword') {
       setConfirmPassword(value);
     }
@@ -69,45 +104,241 @@ export default function ResetPasswordPage({ onNavigateToLogin, onNavigateToHome,
     }
   };
 
+  // SweetAlert OTP dialog เหมือนเปลี่ยนอีเมล/ยืนยันอีเมล — เมื่อกรอก OTP ถูกไปหน้าเปลี่ยนรหัสผ่าน
+  const showResetPasswordOtpDialog = async (emailToUse) => {
+    const buildHTML = (err = '') => `
+      <p style="color:#6366f1;font-weight:600;font-size:14px;margin:0 0 16px;word-break:break-all;">${emailToUse}</p>
+      <p style="color:#4b5563;font-size:14px;margin:0 0 16px;line-height:1.6;">
+        เราได้ส่งรหัส OTP 6 หลักไปที่อีเมลของคุณแล้ว<br>
+        <span style="color:#9ca3af;font-size:12px;">ไม่พบอีเมล? ตรวจสอบโฟลเดอร์ Spam</span>
+      </p>
+      <div id="reset-otp-inputs" style="display:flex;gap:8px;justify-content:center;margin:0 0 8px;">
+        ${[0, 1, 2, 3, 4, 5].map((i) => `
+          <input id="reset-otp-${i}" type="text" inputmode="numeric" maxlength="1"
+            style="width:44px;height:52px;text-align:center;font-size:24px;font-weight:700;
+                   border:2px solid ${err ? '#ef4444' : '#a5b4fc'};border-radius:10px;
+                   color:#4f46e5;background:#f5f3ff;outline:none;" />`).join('')}
+      </div>
+      ${err ? `<p style="color:#ef4444;font-size:13px;margin:4px 0 0;">${err}</p>` : ''}
+      <p id="reset-otp-countdown-wrap" style="color:#f59e0b;font-size:12px;margin:12px 0 0;display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;">
+        <span>⏰ รหัสหมดอายุใน <strong id="reset-otp-countdown-text">4:00</strong></span>
+        <button id="reset-otp-resend-btn" type="button" style="display:none;background:#6366f1;color:#fff;border:none;border-radius:6px;padding:3px 10px;font-size:11px;cursor:pointer;font-weight:600;">ขอรหัสใหม่</button>
+      </p>
+    `;
+
+    let countdownTimer = null;
+    let isExpired = false;
+
+    const startCountdown = () => {
+      // clear timer เดิมก่อนเสมอ
+      if (countdownTimer) clearInterval(countdownTimer);
+      countdownTimer = null;
+      isExpired = false;
+      // reset ปุ่มยืนยัน
+      const confirmBtn = document.querySelector('.swal2-confirm');
+      if (confirmBtn) confirmBtn.disabled = false;
+
+      const expiryAt = Date.now() + 4 * 60 * 1000; // 4 นาที
+      const update = () => {
+        const el = document.getElementById('reset-otp-countdown-text');
+        const wrap = document.getElementById('reset-otp-countdown-wrap');
+        if (!el) return;
+        const remaining = Math.max(0, Math.ceil((expiryAt - Date.now()) / 1000));
+        const mins = Math.floor(remaining / 60);
+        const secs = remaining % 60;
+        el.textContent = `${mins}:${String(secs).padStart(2, '0')}`;
+        if (remaining <= 0) {
+          if (countdownTimer) clearInterval(countdownTimer);
+          countdownTimer = null;
+          isExpired = true;
+          if (wrap) {
+            wrap.style.color = '#ef4444';
+            wrap.innerHTML = '⏰ <strong>' + (lang === 'th' ? 'รหัสหมดอายุแล้ว กรุณาขอรหัสใหม่' : 'Code expired. Please request a new code.') + '</strong>';
+          }
+          // ปิดปุ่มยืนยันเมื่อหมดเวลา
+          const btn = document.querySelector('.swal2-confirm');
+          if (btn) btn.disabled = true;
+          // แสดงปุ่มขอรหัสใหม่
+          const resendBtn = document.getElementById('reset-otp-resend-btn');
+          if (resendBtn) resendBtn.style.display = 'inline-block';
+        }
+      };
+      update();
+      countdownTimer = setInterval(update, 1000);
+    };
+
+    const doResend = async () => {
+      const resendBtn = document.getElementById('reset-otp-resend-btn');
+      if (resendBtn) { resendBtn.disabled = true; resendBtn.textContent = 'กำลังส่ง...'; }
+      try {
+        await fetch(`${API_BASE_URL}/api/auth/send-reset-password-otp`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ email: emailToUse }),
+        });
+      } catch (_) { /* ignore */ }
+      for (let i = 0; i < 6; i++) {
+        const inp = document.getElementById(`reset-otp-${i}`);
+        if (inp) inp.value = '';
+      }
+      if (resendBtn) resendBtn.style.display = 'none';
+      document.getElementById('reset-otp-0')?.focus();
+      startCountdown();
+    };
+
+    const setupInputs = () => {
+      for (let i = 0; i < 6; i++) {
+        const el = document.getElementById(`reset-otp-${i}`);
+        if (!el) continue;
+        el.addEventListener('input', (e) => {
+          e.target.value = e.target.value.replace(/\D/g, '').slice(0, 1);
+          if (e.target.value && i < 5) document.getElementById(`reset-otp-${i + 1}`)?.focus();
+        });
+        el.addEventListener('keydown', (e) => {
+          if (e.key === 'Backspace' && !e.target.value && i > 0) document.getElementById(`reset-otp-${i - 1}`)?.focus();
+        });
+        el.addEventListener('paste', (e) => {
+          e.preventDefault();
+          const pasted = (e.clipboardData.getData('text') || '').replace(/\D/g, '').slice(0, 6);
+          pasted.split('').forEach((ch, j) => {
+            const inp = document.getElementById(`reset-otp-${j}`);
+            if (inp) inp.value = ch;
+          });
+          document.getElementById(`reset-otp-${Math.min(pasted.length, 5)}`)?.focus();
+        });
+      }
+      document.getElementById('reset-otp-0')?.focus();
+      document.getElementById('reset-otp-resend-btn')?.addEventListener('click', doResend);
+      startCountdown();
+    };
+
+    while (true) {
+      const result = await Swal.fire({
+        title: lang === 'th' ? 'กรอกรหัส OTP 📧' : 'Enter OTP 📧',
+        html: buildHTML(),
+        showCancelButton: true,
+        confirmButtonText: lang === 'th' ? 'ยืนยัน' : 'Confirm',
+        confirmButtonColor: '#6366f1',
+        cancelButtonText: lang === 'th' ? 'ยกเลิก' : 'Cancel',
+        cancelButtonColor: '#e5e7eb',
+        allowOutsideClick: false,
+        focusConfirm: false,
+        didOpen: setupInputs,
+        didClose: () => {
+          if (countdownTimer) clearInterval(countdownTimer);
+          countdownTimer = null;
+        },
+        preConfirm: () => {
+          if (isExpired) {
+            Swal.showValidationMessage(lang === 'th' ? 'รหัส OTP หมดอายุแล้ว กรุณากดขอรหัสใหม่' : 'OTP expired. Please request a new code.');
+            return false;
+          }
+          const otpValue = Array.from({ length: 6 }, (_, i) => document.getElementById(`reset-otp-${i}`)?.value || '').join('');
+          if (otpValue.length < 6 || /\D/.test(otpValue)) {
+            Swal.showValidationMessage(lang === 'th' ? 'กรุณากรอกรหัส OTP ให้ครบ 6 หลัก' : 'Please enter all 6 digits');
+            return false;
+          }
+          return otpValue;
+        },
+      });
+
+      if (!result.isConfirmed) return null;
+
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/auth/verify-reset-password-otp`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ email: emailToUse, otp: result.value }),
+        });
+        const data = await res.json().catch(() => ({}));
+
+        if (res.ok && data.ok) {
+          await Swal.fire({
+            icon: 'success',
+            title: lang === 'th' ? 'รหัส OTP ถูกต้อง ✅' : 'OTP verified ✅',
+            text: lang === 'th' ? 'กรุณาตั้งรหัสผ่านใหม่ด้านล่าง' : 'Please set your new password below.',
+            confirmButtonText: 'ตกลง',
+            confirmButtonColor: '#6366f1',
+          });
+          return result.value;
+        }
+
+        const errMsg = typeof data.detail === 'string' ? data.detail : (lang === 'th' ? 'รหัส OTP ไม่ถูกต้อง' : 'Invalid OTP');
+        const errResult = await Swal.fire({
+          icon: 'error',
+          title: lang === 'th' ? 'OTP ไม่ถูกต้อง' : 'Invalid OTP',
+          html: `<p style="color:#4b5563;margin:0 0 4px;">${errMsg}</p>
+                 <p style="color:#9ca3af;font-size:12px;margin:0;">${lang === 'th' ? 'กรุณาตรวจสอบอีเมลและกรอกรหัสใหม่' : 'Please check your email and try again.'}</p>`,
+          confirmButtonText: lang === 'th' ? 'ลองใหม่' : 'Try again',
+          confirmButtonColor: '#6366f1',
+          showDenyButton: true,
+          denyButtonText: lang === 'th' ? 'ขอรหัสใหม่' : 'Resend OTP',
+          denyButtonColor: '#e5e7eb',
+        });
+        if (errResult.isDenied) {
+          await fetch(`${API_BASE_URL}/api/auth/send-reset-password-otp`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ email: emailToUse }),
+          });
+          await Swal.fire({
+            icon: 'info',
+            title: lang === 'th' ? 'ส่ง OTP ใหม่แล้ว' : 'OTP resent',
+            text: lang === 'th' ? 'กรุณาตรวจสอบอีเมลและกรอกรหัสใหม่' : 'Please check your email.',
+            confirmButtonText: 'ตกลง',
+            confirmButtonColor: '#6366f1',
+          });
+        }
+      } catch {
+        await Swal.fire({
+          icon: 'error',
+          title: lang === 'th' ? 'เกิดข้อผิดพลาด' : 'Error',
+          text: lang === 'th' ? 'ไม่สามารถเชื่อมต่อได้ กรุณาลองใหม่' : 'Connection error. Please try again.',
+          confirmButtonText: 'ตกลง',
+          confirmButtonColor: '#6366f1',
+        });
+        return null;
+      }
+    }
+  };
+
   const handleCheckEmail = async (e) => {
     e.preventDefault();
-    
-    if (!validate()) {
-      return;
-    }
+    if (!validate()) return;
 
     setIsLoadingUser(true);
     setErrors({});
     setSuccessMessage('');
-    
+    setOtpError('');
     try {
-      const res = await fetch(`${API_BASE_URL}/api/auth/reset-password/${encodeURIComponent(email)}`, {
-        method: 'GET',
+      const res = await fetch(`${API_BASE_URL}/api/auth/send-reset-password-otp`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include'
+        credentials: 'include',
+        body: JSON.stringify({ email: email.trim() })
       });
-      
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const errorData = await res.json().catch(() => ({ detail: 'User not found' }));
-        const errorMessage = errorData.detail || errorData.message || 'User not found';
+        const errorMessage = data.detail || data.message || (lang === 'th' ? 'ไม่พบผู้ใช้ในระบบ' : 'User not found');
         throw new Error(errorMessage);
       }
-      
-      const data = await res.json();
-      setUserInfo(data);
-      setStep('password');
-      
+      const emailToUse = data.email || email.trim();
+      const otpValue = await showResetPasswordOtpDialog(emailToUse);
+      if (otpValue != null) {
+        setStep('otp');
+        setOtp(otpValue);
+      }
     } catch (error) {
-      console.error('Check email error:', error);
-      const errorMsg = error.message || (lang === 'th' ? 'ไม่พบผู้ใช้ในระบบ' : 'User not found');
+      console.error('Send reset password OTP error:', error);
       setErrors({
-        general: errorMsg,
-        email: lang === 'th' 
+        general: error.message,
+        email: lang === 'th'
           ? 'อีเมลนี้ไม่มีในระบบ กรุณาตรวจสอบหรือสมัครสมาชิกใหม่'
           : 'This email is not registered. Please check or register a new account.'
       });
-      // ✅ Set email error to show red border (same as password error)
-      // This will trigger the error class on the email input field
     } finally {
       setIsLoadingUser(false);
     }
@@ -115,15 +346,12 @@ export default function ResetPasswordPage({ onNavigateToLogin, onNavigateToHome,
 
   const handleResetPassword = async (e) => {
     e.preventDefault();
-    
-    if (!validate()) {
-      return;
-    }
+    if (!validate()) return;
 
     setIsLoading(true);
     setErrors({});
+    setOtpError('');
     setSuccessMessage('');
-    
     try {
       const newPasswordHash = await sha256Password(newPassword);
       const res = await fetch(`${API_BASE_URL}/api/auth/reset-password`, {
@@ -134,33 +362,31 @@ export default function ResetPasswordPage({ onNavigateToLogin, onNavigateToHome,
         },
         credentials: 'include',
         body: JSON.stringify({
-          email: email,
-          new_password: newPasswordHash
+          email: email.trim(),
+          new_password: newPasswordHash,
+          otp: otp.trim()
         })
       });
-      
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.detail || 'Failed to reset password');
+        const msg = data.detail || data.message || 'Failed to reset password';
+        if (msg.includes('OTP')) setOtpError(msg);
+        throw new Error(msg);
       }
-      
-      const data = await res.json();
       setSuccessMessage(
-        lang === 'th' 
-          ? `เปลี่ยนรหัสผ่านสำเร็จแล้ว${data.backup_created ? ' (ได้ทำการ backup รหัสผ่านเดิมไว้แล้ว)' : ''}` 
+        lang === 'th'
+          ? `เปลี่ยนรหัสผ่านสำเร็จแล้ว${data.backup_created ? ' (ได้ทำการ backup รหัสผ่านเดิมไว้แล้ว)' : ''}`
           : `Password reset successfully${data.backup_created ? ' (old password has been backed up)' : ''}`
       );
-      
-      // Reset form
       setNewPassword('');
       setConfirmPassword('');
+      setOtp('');
       setStep('email');
       setUserInfo(null);
-      
     } catch (error) {
       console.error('Reset password error:', error);
       setErrors({
-        general: lang === 'th' 
+        general: lang === 'th'
           ? error.message || 'เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง'
           : error.message || 'An error occurred. Please try again.'
       });
@@ -175,32 +401,28 @@ export default function ResetPasswordPage({ onNavigateToLogin, onNavigateToHome,
       subtitle: 'Enter your email to check and reset password.',
       email: 'Email',
       checkBtn: 'Check Email',
-      passwordStatus: 'Password Status',
-      hasPassword: 'Has password set',
-      noPassword: 'No password set',
+      otpSent: 'We sent a 6-digit OTP to your email. Enter it below.',
+      otpLabel: 'OTP Code',
       newPassword: 'New Password',
       confirmPassword: 'Confirm Password',
       resetBtn: 'Reset Password',
       backToLogin: 'Back to Login',
       backToEmail: 'Back to Email',
       success: 'Password reset successfully!',
-      userInfo: 'User Information',
     },
     th: {
       title: 'รีเซ็ตรหัสผ่าน',
       subtitle: 'กรอกอีเมลของคุณเพื่อตรวจสอบและเปลี่ยนรหัสผ่าน',
       email: 'อีเมล',
       checkBtn: 'ตรวจสอบอีเมล',
-      passwordStatus: 'สถานะรหัสผ่าน',
-      hasPassword: 'มีรหัสผ่านอยู่แล้ว',
-      noPassword: 'ยังไม่มีรหัสผ่าน',
+      otpSent: 'ส่งรหัส OTP 6 หลักไปที่อีเมลของคุณแล้ว กรุณากรอกรหัสด้านล่าง',
+      otpLabel: 'รหัส OTP',
       newPassword: 'รหัสผ่านใหม่',
       confirmPassword: 'ยืนยันรหัสผ่าน',
       resetBtn: 'เปลี่ยนรหัสผ่าน',
       backToLogin: 'กลับไปหน้าเข้าสู่ระบบ',
       backToEmail: 'กลับไปกรอกอีเมล',
       success: 'เปลี่ยนรหัสผ่านสำเร็จ!',
-      userInfo: 'ข้อมูลผู้ใช้',
     },
   };
 
@@ -209,7 +431,8 @@ export default function ResetPasswordPage({ onNavigateToLogin, onNavigateToHome,
       {/* Transparent Header with Logo */}
       <header className="login-transparent-header">
         <div className="header-logo" onClick={onNavigateToHome} style={{ cursor: 'pointer' }}>
-          <img src="/images/project-logo.png" alt="AI Travel Agent" className="login-logo-img" />
+          <img src="/favicon.svg" alt="" className="login-logo-img" aria-hidden="true" />
+          <span className="header-logo-text">AITravelAgent</span>
         </div>
       </header>
 
@@ -255,6 +478,105 @@ export default function ResetPasswordPage({ onNavigateToLogin, onNavigateToHome,
                     {text[lang].backToLogin}
                   </button>
                 </div>
+              ) : step === 'otp' ? (
+                <form onSubmit={handleResetPassword} className="form-content">
+                  <div className="form-group">
+                    <label htmlFor="newPassword" className="form-label">{text[lang].newPassword}</label>
+                    <div className="password-input-wrapper">
+                      <input
+                        type={showNewPassword ? 'text' : 'password'}
+                        id="newPassword"
+                        name="newPassword"
+                        value={newPassword}
+                        onChange={handleChange}
+                        placeholder={text[lang].newPassword}
+                        className={`form-input has-toggle ${errors.newPassword ? 'error' : passwordStrength.score === 5 ? 'valid' : ''}`}
+                        autoComplete="new-password"
+                      />
+                      <button type="button" className="toggle-password" onClick={() => setShowNewPassword(v => !v)} aria-label={showNewPassword ? 'Hide' : 'Show'}>
+                        {showNewPassword ? (
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M10.94 6.08A6.93 6.93 0 0 1 12 6c3.18 0 6.17 2.29 7.91 6a15.23 15.23 0 0 1-.9 1.64 1 1 0 0 1-1.7-.3 1 1 0 0 0-1.72-1.04 6 6 0 0 0-1.54-1.54 1 1 0 0 0-1.72 1.04 1 1 0 0 1-1.7.3 7.12 7.12 0 0 1-1.9-1.9 1 1 0 0 0-1.72-1.04ZM3.71 2.29a1 1 0 0 0-1.42 1.42l3.1 3.09a14.62 14.62 0 0 0-3.31 4.8 1 1 0 0 0 0 .8C4.83 15.85 8.21 18 12 18a9.26 9.26 0 0 0 5.05-1.54l3.24 3.25a1 1 0 0 0 1.42-1.42Zm6.36 9.19 2.45 2.45A1.81 1.81 0 0 1 12 14a2 2 0 0 1-2-2 1.81 1.81 0 0 1 .07-.52Z" fill="currentColor"/></svg>
+                        ) : (
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Zm0 8a5 5 0 1 1 0-10 5 5 0 0 1 0 10Zm0-15.5C7 1.5 2.73 4.61 1 9c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5C21.27 4.61 17 1.5 12 1.5Z" fill="currentColor"/></svg>
+                        )}
+                      </button>
+                    </div>
+                    {errors.newPassword && <span className="error-message">{errors.newPassword}</span>}
+                    {newPassword && (
+                      <div className="password-strength" style={{ marginTop: '8px' }}>
+                        <div className="strength-bar">
+                          <div
+                            className="strength-fill"
+                            style={{
+                              width: `${(passwordStrength.score / 5) * 100}%`,
+                              background: strengthColors[passwordStrength.score - 1] || '#e5e7eb',
+                              height: '4px', borderRadius: '2px', transition: 'width 0.3s, background 0.3s'
+                            }}
+                          />
+                        </div>
+                        <div className="strength-text" style={{ fontSize: '12px', marginTop: '4px', color: '#6b7280', display: 'flex', justifyContent: 'space-between' }}>
+                          <span>{lang === 'th' ? 'ความแข็งแกร่ง: ' : 'Strength: '}
+                            <span style={{ color: strengthColors[passwordStrength.score - 1] || '#9ca3af', fontWeight: 600 }}>
+                              {passwordStrength.score > 0 ? strengthLabels[passwordStrength.score - 1] : (lang === 'th' ? 'อ่อนแาก' : 'Very Weak')}
+                            </span>
+                          </span>
+                        </div>
+                        {passwordStrength.feedback.length > 0 && (
+                          <div style={{ fontSize: '12px', color: '#9ca3af', marginTop: '2px' }}>
+                            {lang === 'th' ? 'ต้องมี: ' : 'Requires: '}{passwordStrength.feedback.join(', ')}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="confirmPassword" className="form-label">{text[lang].confirmPassword}</label>
+                    <div className="password-input-wrapper">
+                      <input
+                        type={showConfirmPassword ? 'text' : 'password'}
+                        id="confirmPassword"
+                        name="confirmPassword"
+                        value={confirmPassword}
+                        onChange={handleChange}
+                        placeholder={text[lang].confirmPassword}
+                        className={`form-input has-toggle ${errors.confirmPassword ? 'error' : confirmPassword && newPassword === confirmPassword ? 'valid' : ''}`}
+                        autoComplete="new-password"
+                      />
+                      <button type="button" className="toggle-password" onClick={() => setShowConfirmPassword(v => !v)} aria-label={showConfirmPassword ? 'Hide' : 'Show'}>
+                        {showConfirmPassword ? (
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M10.94 6.08A6.93 6.93 0 0 1 12 6c3.18 0 6.17 2.29 7.91 6a15.23 15.23 0 0 1-.9 1.64 1 1 0 0 1-1.7-.3 1 1 0 0 0-1.72-1.04 6 6 0 0 0-1.54-1.54 1 1 0 0 0-1.72 1.04 1 1 0 0 1-1.7.3 7.12 7.12 0 0 1-1.9-1.9 1 1 0 0 0-1.72-1.04ZM3.71 2.29a1 1 0 0 0-1.42 1.42l3.1 3.09a14.62 14.62 0 0 0-3.31 4.8 1 1 0 0 0 0 .8C4.83 15.85 8.21 18 12 18a9.26 9.26 0 0 0 5.05-1.54l3.24 3.25a1 1 0 0 0 1.42-1.42Zm6.36 9.19 2.45 2.45A1.81 1.81 0 0 1 12 14a2 2 0 0 1-2-2 1.81 1.81 0 0 1 .07-.52Z" fill="currentColor"/></svg>
+                        ) : (
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Zm0 8a5 5 0 1 1 0-10 5 5 0 0 1 0 10Zm0-15.5C7 1.5 2.73 4.61 1 9c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5C21.27 4.61 17 1.5 12 1.5Z" fill="currentColor"/></svg>
+                        )}
+                      </button>
+                    </div>
+                    {errors.confirmPassword && <span className="error-message">{errors.confirmPassword}</span>}
+                  </div>
+                  {errors.general && (
+                    <div className="error-message" style={{ textAlign: 'center', marginBottom: '0.5rem' }}>
+                      {errors.general}
+                    </div>
+                  )}
+                  <button type="submit" className="btn-login" disabled={isLoading}>
+                    {isLoading ? (lang === 'th' ? 'กำลังเปลี่ยนรหัสผ่าน...' : 'Resetting...') : text[lang].resetBtn}
+                  </button>
+                  <div className="register-link">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStep('email');
+                        setOtp('');
+                        setOtpError('');
+                        setNewPassword('');
+                        setConfirmPassword('');
+                        setErrors({});
+                      }}
+                      className="link-button"
+                    >
+                      {text[lang].backToEmail}
+                    </button>
+                  </div>
+                </form>
               ) : step === 'email' ? (
                 <form onSubmit={handleCheckEmail} className="form-content">
                   {/* Email */}
@@ -324,107 +646,7 @@ export default function ResetPasswordPage({ onNavigateToLogin, onNavigateToHome,
                     </button>
                   </div>
                 </form>
-              ) : (
-                <form onSubmit={handleResetPassword} className="form-content">
-                  {/* User Info */}
-                  {userInfo && (
-                    <div style={{ 
-                      background: '#f3f4f6', 
-                      padding: '1rem', 
-                      borderRadius: '0.5rem', 
-                      marginBottom: '1rem' 
-                    }}>
-                      <div style={{ fontWeight: 'bold', marginBottom: '0.5rem' }}>
-                        {text[lang].userInfo}
-                      </div>
-                      <div style={{ fontSize: '0.9rem', color: '#6b7280' }}>
-                        <div><strong>Email:</strong> {userInfo.email}</div>
-                        {userInfo.full_name && (
-                          <div><strong>{lang === 'th' ? 'ชื่อ:' : 'Name:'}</strong> {userInfo.full_name}</div>
-                        )}
-                        <div style={{ marginTop: '0.5rem' }}>
-                          <strong>{text[lang].passwordStatus}:</strong>{' '}
-                          <span style={{ 
-                            color: userInfo.has_password ? '#10b981' : '#ef4444',
-                            fontWeight: 'bold'
-                          }}>
-                            {userInfo.has_password ? text[lang].hasPassword : text[lang].noPassword}
-                          </span>
-                          {userInfo.has_backup && (
-                            <span style={{ 
-                              color: '#3b82f6', 
-                              fontSize: '0.85rem', 
-                              marginLeft: '0.5rem' 
-                            }}>
-                              ({lang === 'th' ? 'มี backup' : 'has backup'})
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* New Password */}
-                  <div className="form-group">
-                    <label htmlFor="newPassword" className="form-label">{text[lang].newPassword}</label>
-                    <input
-                      type="password"
-                      id="newPassword"
-                      name="newPassword"
-                      value={newPassword}
-                      onChange={handleChange}
-                      placeholder={text[lang].newPassword}
-                      className={`form-input ${errors.newPassword ? 'error' : ''}`}
-                      autoComplete="new-password"
-                    />
-                    {errors.newPassword && <span className="error-message">{errors.newPassword}</span>}
-                  </div>
-
-                  {/* Confirm Password */}
-                  <div className="form-group">
-                    <label htmlFor="confirmPassword" className="form-label">{text[lang].confirmPassword}</label>
-                    <input
-                      type="password"
-                      id="confirmPassword"
-                      name="confirmPassword"
-                      value={confirmPassword}
-                      onChange={handleChange}
-                      placeholder={text[lang].confirmPassword}
-                      className={`form-input ${errors.confirmPassword ? 'error' : ''}`}
-                      autoComplete="new-password"
-                    />
-                    {errors.confirmPassword && <span className="error-message">{errors.confirmPassword}</span>}
-                  </div>
-
-                  {errors.general && (
-                    <div className="error-message" style={{ textAlign: 'center' }}>
-                      {errors.general}
-                    </div>
-                  )}
-
-                  {/* Submit Button */}
-                  <button type="submit" className="btn-login" disabled={isLoading}>
-                    {isLoading ? (lang === 'th' ? 'กำลังเปลี่ยนรหัสผ่าน...' : 'Resetting...') : text[lang].resetBtn}
-                  </button>
-
-                  {/* Back to Email Link */}
-                  <div className="register-link">
-                    <button 
-                      type="button" 
-                      onClick={() => {
-                        setStep('email');
-                        setUserInfo(null);
-                        setNewPassword('');
-                        setConfirmPassword('');
-                        setErrors({});
-                      }} 
-                      className="link-button"
-                    >
-                      {text[lang].backToEmail}
-                    </button>
-                  </div>
-                </form>
-              )}
+              ) : null}
             </div>
           </div>
         </div>

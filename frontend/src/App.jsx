@@ -74,7 +74,9 @@ function App() {
     if (!savedView) return "home";
     // Protected views require login — if not logged in, show home to avoid blank screen
     const protectedViews = ['chat', 'profile', 'bookings', 'payment', 'flights', 'hotels', 'car-rentals', 'settings'];
-    const savedIsLoggedIn = localStorage.getItem("is_logged_in") === "true";
+    const savedIsLoggedIn =
+      localStorage.getItem("is_logged_in") === "true" ||
+      sessionStorage.getItem("is_logged_in") === "true";
     if (protectedViews.includes(savedView) && !savedIsLoggedIn) {
       return "home";
     }
@@ -287,21 +289,28 @@ function App() {
     };
   }, [isLoggedIn, user?.id]);
 
-  // Navigate without changing browser URL (path stays the same on all pages)
+  // Navigate: pushState เพื่อให้ปุ่มย้อนกลับของเบราว์เซอร์ทำงาน (ใช้ replace เมื่อไม่ต้องการเพิ่ม history)
   const navigateToView = useCallback((newView, replace = false) => {
     setView(newView);
     // Save view to localStorage (but not login/register pages)
     if (newView !== 'login' && newView !== 'register' && newView !== 'reset-password') {
       localStorage.setItem("app_view", newView);
     }
+    if (window.history && window.history.pushState) {
+      if (replace) {
+        window.history.replaceState({ view: newView }, '', '/');
+      } else {
+        window.history.pushState({ view: newView }, '', '/');
+      }
+    }
   }, []);
 
-  // Keep browser URL always at / (no path change on any page)
-  // ยกเว้น verify-email-change — ต้องเก็บ query string (?token=) ไว้ให้ component อ่านได้
+  // ซิงค์ state ของ history entry ปัจจุบัน (ให้ปุ่มย้อนกลับใช้ state นี้ได้) และบังคับ URL เป็น / ยกเว้น verify-email-change
   useEffect(() => {
-    if (window.history.replaceState && window.location.pathname !== '/' && view !== 'verify-email-change') {
-      window.history.replaceState({ view }, '', '/');
-    }
+    if (!window.history.replaceState || view === 'verify-email-change') return;
+    const path = window.location.pathname;
+    const url = path !== '/' ? '/' : '/';
+    window.history.replaceState({ view }, '', url);
   }, [view]);
 
   // Optional: handle browser back
@@ -337,11 +346,15 @@ function App() {
     return hasName && hasEmail;
   }, []);
 
-  // Restore session from localStorage immediately on mount (for instant UI)
+  // Restore session from localStorage (rememberMe) or sessionStorage (session-only) immediately on mount
   useEffect(() => {
-    const savedIsLoggedIn = localStorage.getItem("is_logged_in") === "true";
-    const savedUserData = localStorage.getItem("user_data");
-    const savedTimestamp = localStorage.getItem("session_timestamp");
+    const savedIsLoggedIn =
+      localStorage.getItem("is_logged_in") === "true" ||
+      sessionStorage.getItem("is_logged_in") === "true";
+    const savedUserData =
+      localStorage.getItem("user_data") || sessionStorage.getItem("user_data");
+    const savedTimestamp =
+      localStorage.getItem("session_timestamp") || sessionStorage.getItem("session_timestamp");
     
     if (savedIsLoggedIn && savedUserData) {
       try {
@@ -495,8 +508,73 @@ function App() {
                    color:#4f46e5;background:#f5f3ff;outline:none;" />`).join('')}
       </div>
       ${err ? `<p style="color:#ef4444;font-size:13px;margin:4px 0 0;">${err}</p>` : ''}
-      <p style="color:#f59e0b;font-size:12px;margin:12px 0 0;">⏰ รหัสหมดอายุใน <strong>10 นาที</strong></p>
+      <p id="otp-countdown-wrap" style="color:#f59e0b;font-size:12px;margin:12px 0 0;display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;">
+        <span>⏰ รหัสหมดอายุใน <strong id="otp-countdown-text">4:00</strong></span>
+        <button id="otp-resend-btn" type="button" style="display:none;background:#6366f1;color:#fff;border:none;border-radius:6px;padding:3px 10px;font-size:11px;cursor:pointer;font-weight:600;">ขอรหัสใหม่</button>
+      </p>
     `;
+
+    let countdownTimer = null;
+    let isExpired = false;
+
+    const startCountdown = () => {
+      // clear timer เดิมก่อนเสมอ
+      if (countdownTimer) clearInterval(countdownTimer);
+      countdownTimer = null;
+      isExpired = false;
+      // reset ปุ่มยืนยัน
+      const confirmBtn = document.querySelector('.swal2-confirm');
+      if (confirmBtn) confirmBtn.disabled = false;
+
+      const expiryAt = Date.now() + 4 * 60 * 1000; // 4 นาที
+      const update = () => {
+        const el = document.getElementById('otp-countdown-text');
+        const wrap = document.getElementById('otp-countdown-wrap');
+        if (!el) return;
+        const remaining = Math.max(0, Math.ceil((expiryAt - Date.now()) / 1000));
+        const mins = Math.floor(remaining / 60);
+        const secs = remaining % 60;
+        el.textContent = `${mins}:${String(secs).padStart(2, '0')}`;
+        if (remaining <= 0) {
+          if (countdownTimer) clearInterval(countdownTimer);
+          countdownTimer = null;
+          isExpired = true;
+          if (wrap) {
+            wrap.style.color = '#ef4444';
+            wrap.innerHTML = '⏰ <strong>รหัสหมดอายุแล้ว</strong> กรุณาขอรหัสใหม่';
+          }
+          // ปิดปุ่มยืนยันเมื่อหมดเวลา
+          const btn = document.querySelector('.swal2-confirm');
+          if (btn) btn.disabled = true;
+          // แสดงปุ่มขอรหัสใหม่
+          const resendBtn = document.getElementById('otp-resend-btn');
+          if (resendBtn) resendBtn.style.display = 'inline-block';
+        }
+      };
+      update();
+      countdownTimer = setInterval(update, 1000);
+    };
+
+    const doResend = async () => {
+      const resendBtn = document.getElementById('otp-resend-btn');
+      if (resendBtn) { resendBtn.disabled = true; resendBtn.textContent = 'กำลังส่ง...'; }
+      try {
+        await fetch(`${API_BASE_URL}/api/auth/send-verification-email`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+          credentials: 'include',
+        });
+      } catch (_) { /* ignore */ }
+      for (let i = 0; i < 6; i++) {
+        const inp = document.getElementById(`otp-${i}`);
+        if (inp) inp.value = '';
+      }
+      otpValue = '';
+      if (resendBtn) resendBtn.style.display = 'none';
+      document.getElementById('otp-0')?.focus();
+      startCountdown();
+    };
 
     const setupInputs = () => {
       for (let i = 0; i < 6; i++) {
@@ -522,6 +600,8 @@ function App() {
         });
       }
       document.getElementById('otp-0')?.focus();
+      document.getElementById('otp-resend-btn')?.addEventListener('click', doResend);
+      startCountdown();
     };
 
     // loop จนกว่าจะยืนยันสำเร็จหรือ cancel
@@ -538,7 +618,15 @@ function App() {
         allowOutsideClick: false,
         focusConfirm: false,
         didOpen: setupInputs,
+        didClose: () => {
+          if (countdownTimer) clearInterval(countdownTimer);
+          countdownTimer = null;
+        },
         preConfirm: () => {
+          if (isExpired) {
+            Swal.showValidationMessage('รหัส OTP หมดอายุแล้ว กรุณากดขอรหัสใหม่');
+            return false;
+          }
           otpValue = Array.from({length:6}, (_,i) => document.getElementById(`otp-${i}`)?.value || '').join('');
           if (otpValue.length < 6 || /\D/.test(otpValue)) {
             Swal.showValidationMessage('กรุณากรอกรหัส OTP ให้ครบ 6 หลัก');
@@ -740,11 +828,23 @@ function App() {
           // Set new user data
           setIsLoggedIn(true);
           setUser(data.user);
-          
-          // ✅ Save to localStorage for persistent login (always save, but backend will set longer cookie if remember_me=true)
-          localStorage.setItem("is_logged_in", "true");
-          localStorage.setItem("user_data", JSON.stringify(data.user));
-          localStorage.setItem("session_timestamp", Date.now().toString());
+
+          // ✅ rememberMe=true → localStorage (persists across sessions)
+          // ✅ rememberMe=false → sessionStorage only (clears when browser closes)
+          const storage = rememberMe ? localStorage : sessionStorage;
+          storage.setItem("is_logged_in", "true");
+          storage.setItem("user_data", JSON.stringify(data.user));
+          storage.setItem("session_timestamp", Date.now().toString());
+          // ถ้าเลือก rememberMe ให้ clear sessionStorage เผื่อค้างอยู่ และกลับกัน
+          if (rememberMe) {
+            sessionStorage.removeItem("is_logged_in");
+            sessionStorage.removeItem("user_data");
+            sessionStorage.removeItem("session_timestamp");
+          } else {
+            localStorage.removeItem("is_logged_in");
+            localStorage.removeItem("user_data");
+            localStorage.removeItem("session_timestamp");
+          }
           
           // ✅ Don't clear trips data - let AITravelChat fetch from backend and merge
           // The backend is the source of truth, frontend will sync automatically

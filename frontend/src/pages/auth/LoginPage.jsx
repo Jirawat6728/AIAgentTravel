@@ -263,18 +263,19 @@ export default function LoginPage({ onLogin, onGoogleLogin, onNavigateToRegister
 
               {/* Remember Me and Forgot Password */}
               <div className="remember-me">
-                <div className="checkbox-wrapper">
+                <label className="checkbox-wrapper" htmlFor="remember">
                   <input
                     type="checkbox"
                     id="remember"
+                    name="remember"
                     checked={rememberMe}
                     onChange={(e) => setRememberMe(e.target.checked)}
                     className="checkbox"
+                    aria-checked={rememberMe}
                   />
-                  <label htmlFor="remember" className="checkbox-label">
-                    {t('auth.rememberMe')}
-                  </label>
-                </div>
+                  <span className="checkbox-box" />
+                  <span className="checkbox-label">{t('auth.rememberMe')}</span>
+                </label>
                 <div className="forgot-password">
                   <button type="button" onClick={onNavigateToResetPassword} className="forgot-link" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}>
                     {t('auth.forgotPassword')}

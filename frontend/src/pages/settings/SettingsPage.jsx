@@ -1007,7 +1007,7 @@ export default function SettingsPage({
             <div className="email-otp-form">
               <p className="email-otp-hint">
                 📧 ส่งรหัส OTP 6 หลักไปที่ <strong>{emailOtpPending}</strong> แล้ว<br/>
-                <span style={{ fontSize: '0.8rem', color: '#6b7280' }}>รหัสหมดอายุใน 10 นาที</span>
+                <span style={{ fontSize: '0.8rem', color: '#6b7280' }}>รหัสหมดอายุใน 4 นาที</span>
               </p>
               <div className="email-otp-inputs">
                 {[0,1,2,3,4,5].map((i) => (
