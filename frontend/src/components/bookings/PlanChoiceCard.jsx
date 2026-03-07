@@ -1,50 +1,8 @@
 import React, { useState, useMemo } from 'react';
+import { AIRLINE_NAMES } from '../../data/airlineNames';
+import { getAirportDisplay } from '../../data/airportNames';
+import { formatPriceInThb } from '../../utils/currency';
 import './PlanChoiceCard.css'; // ใช้คลาสจากไฟล์หลักร่วมกันได้
-
-function formatMoney(value, currency = 'THB') {
-  if (typeof value !== 'number' || Number.isNaN(value)) return null;
-  return `${currency} ${value.toLocaleString('th-TH')}`;
-}
-
-// ✅ แปลง airport code เป็นชื่อสนามบินเต็ม
-function getAirportName(code) {
-  if (!code) return '';
-  
-  const airportNames = {
-    // Thailand
-    'BKK': 'ท่าอากาศยานสุวรรณภูมิ',
-    'DMK': 'ท่าอากาศยานดอนเมือง',
-    'CNX': 'ท่าอากาศยานเชียงใหม่',
-    'HKT': 'ท่าอากาศยานภูเก็ต',
-    'USM': 'ท่าอากาศยานสมุย',
-    'KBV': 'ท่าอากาศยานกระบี่',
-    // China
-    'TAO': 'ท่าอากาศยานชิงเต่า (Qingdao Liuting International Airport)',
-    'PEK': 'ท่าอากาศยานปักกิ่ง (Beijing Capital International Airport)',
-    'PVG': 'ท่าอากาศยานเซี่ยงไฮ้ผู่ตง (Shanghai Pudong International Airport)',
-    'CAN': 'ท่าอากาศยานกวางโจว (Guangzhou Baiyun International Airport)',
-    // Korea
-    'ICN': 'ท่าอากาศยานนานาชาติอินชอน (Incheon International Airport)',
-    'GMP': 'ท่าอากาศยานกิมโป (Gimpo International Airport)',
-    // Japan
-    'NRT': 'ท่าอากาศยานนาริตะ (Narita International Airport)',
-    'HND': 'ท่าอากาศยานฮาเนดะ (Haneda Airport)',
-    'KIX': 'ท่าอากาศยานคันไซ (Kansai International Airport)',
-    // Singapore
-    'SIN': 'ท่าอากาศยานชางงี (Changi Airport)',
-    // Malaysia
-    'KUL': 'ท่าอากาศยานกัวลาลัมเปอร์ (Kuala Lumpur International Airport)',
-    // Vietnam
-    'SGN': 'ท่าอากาศยานโฮจิมินห์ (Tan Son Nhat International Airport)',
-    'HAN': 'ท่าอากาศยานฮานอย (Noi Bai International Airport)',
-    // Taiwan
-    'TPE': 'ท่าอากาศยานไต้หวัน (Taiwan Taoyuan International Airport)',
-    // Hong Kong
-    'HKG': 'ท่าอากาศยานฮ่องกง (Hong Kong International Airport)',
-  };
-  
-  return airportNames[code.toUpperCase()] || code;
-}
 
 // ✅ คำนวณ layover time (เวลารอคอยระหว่าง segments)
 function calculateLayoverTime(prevSegment, nextSegment) {
@@ -199,61 +157,10 @@ function AirlineLogo({ carrierCode, size = 40, style = {} }) {
   );
 }
 
-// ✅ แปลง airline IATA code เป็นชื่อเต็ม
+// ✅ แปลง airline IATA code เป็นชื่อเต็ม (ใช้ shared data)
 function getAirlineName(code) {
   if (!code) return 'Unknown';
-  
-  const airlineNames = {
-    'TG': 'Thai Airways',
-    'FD': 'Thai AirAsia',
-    'SL': 'Thai Lion Air',
-    'PG': 'Bangkok Airways',
-    'VZ': 'Thai Vietjet Air',
-    'WE': 'Thai Smile',
-    'XJ': 'Thai AirAsia X',
-    'DD': 'Nok Air',
-    'Z2': 'AirAsia Philippines',
-    'AK': 'AirAsia',
-    'D7': 'AirAsia X',
-    'QZ': 'Indonesia AirAsia',
-    'JT': 'Lion Air',
-    'SJ': 'Sriwijaya Air',
-    'GA': 'Garuda Indonesia',
-    'SQ': 'Singapore Airlines',
-    'MI': 'SilkAir',
-    'TR': 'Scoot',
-    '3K': 'Jetstar Asia',
-    'QF': 'Qantas',
-    'JQ': 'Jetstar',
-    'MH': 'Malaysia Airlines',
-    'OD': 'Malindo Air',
-    'VN': 'Vietnam Airlines',
-    'VJ': 'Vietjet Air',
-    'BL': 'Jetstar Pacific',
-    'CX': 'Cathay Pacific',
-    'KA': 'Cathay Dragon',
-    'HX': 'Hong Kong Airlines',
-    'UO': 'Hong Kong Express',
-    'JL': 'Japan Airlines',
-    'NH': 'All Nippon Airways',
-    'MM': 'Peach Aviation',
-    'GK': 'Jetstar Japan',
-    'KE': 'Korean Air',
-    'OZ': 'Asiana Airlines',
-    'TW': "T'way Air",
-    '7C': 'Jeju Air',
-    'ZE': 'Eastar Jet',
-    'CA': 'Air China',
-    'CZ': 'China Southern Airlines',
-    'MU': 'China Eastern Airlines',
-    '3U': 'Sichuan Airlines',
-    '9C': 'Spring Airlines',
-    'HO': 'Juneyao Airlines',
-    'FM': 'Shanghai Airlines',
-    'MF': 'Xiamen Airlines',
-  };
-  
-  return airlineNames[code.toUpperCase()] || code;
+  return AIRLINE_NAMES[code.toUpperCase()] || code;
 }
 
 // ✅ แปลง aircraft code เป็นชื่อเต็ม
@@ -437,7 +344,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
 
   const displayTotalPrice =
     typeof total_price === 'number'
-      ? `${displayCurrency} ${total_price.toLocaleString('th-TH')}`
+      ? formatPriceInThb(total_price, displayCurrency)
       : (total_price_text || null);
 
   // ===== Flight computed fields (from Amadeus structure) =====
@@ -457,7 +364,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
 
   const flightStops = stopsLabel(flight);
   const flightCarriers = carriersLabel(flight);
-  const flightPrice = formatMoney(
+  const flightPrice = formatPriceInThb(
     typeof flight?.price_total === 'number' ? flight.price_total : null,
     flight?.currency || displayCurrency
   );
@@ -568,7 +475,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
   const hotelName = hotel?.hotelName || null;
   const hotelNights = hotel?.nights != null ? hotel.nights : null;
   const hotelBoard = hotel?.boardType || null;
-  const hotelPrice = formatMoney(
+  const hotelPrice = formatPriceInThb(
     typeof hotel?.price_total === 'number' ? hotel.price_total : null,
     hotel?.currency || displayCurrency
   );
@@ -580,12 +487,12 @@ export default function PlanChoiceCard({ choice, onSelect }) {
   // ===== Price breakdown =====
   const breakdownFlight =
     typeof price_breakdown?.flight_total === 'number'
-      ? formatMoney(price_breakdown.flight_total, displayCurrency)
+      ? formatPriceInThb(price_breakdown.flight_total, displayCurrency)
       : null;
 
   const breakdownHotel =
     typeof price_breakdown?.hotel_total === 'number'
-      ? formatMoney(price_breakdown.hotel_total, displayCurrency)
+      ? formatPriceInThb(price_breakdown.hotel_total, displayCurrency)
       : null;
 
   // Extract transport info (transport already destructured from choice above)
@@ -594,7 +501,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
   
   const breakdownTransport =
     typeof price_breakdown?.transport_total === 'number'
-      ? formatMoney(price_breakdown.transport_total, displayCurrency)
+      ? formatPriceInThb(price_breakdown.transport_total, displayCurrency)
       : null;
 
   return (
@@ -613,6 +520,13 @@ export default function PlanChoiceCard({ choice, onSelect }) {
           {recommended && (!tags || !tags.includes('แนะนำ')) && (
             <span className="plan-card-tag">แนะนำ</span>
           )}
+          {/* ✅ แสดงแท็ก ขาไป/ขากลับ */}
+          {(choice?.flight_direction === 'outbound' || (firstSeg?.direction && String(firstSeg.direction).includes('ขาไป'))) && (
+            <span className="plan-card-tag" style={{ background: 'rgba(33, 150, 243, 0.25)', color: '#1976d2', marginLeft: '6px', fontSize: '13px', padding: '3px 10px' }}>🛫 ขาไป</span>
+          )}
+          {(choice?.flight_direction === 'inbound' || (firstSeg?.direction && String(firstSeg.direction).includes('ขากลับ'))) && (
+            <span className="plan-card-tag" style={{ background: 'rgba(156, 39, 176, 0.25)', color: '#7b1fa2', marginLeft: '6px', fontSize: '13px', padding: '3px 10px' }}>🛬 ขากลับ</span>
+          )}
           {/* ✅ แสดง tag "บินตรง" ถ้าเป็น non-stop และไม่มีใน tags */}
           {(choice?.is_non_stop || (flight && flightStops === 'Non-stop')) && flight && (!tags || !tags.includes('บินตรง')) && (
             <span className="plan-card-tag" style={{ 
@@ -630,19 +544,15 @@ export default function PlanChoiceCard({ choice, onSelect }) {
 
         {tags && Array.isArray(tags) && tags.length > 0 && (
           <div className="plan-card-tags">
-            {/* ✅ กรอง tags ไม่ให้ซ้ำกัน และกรอง "แนะนำ" และ "บินตรง" ออกถ้าแสดงใน header แล้ว */}
             {[...new Set(tags)]
+              .filter(tag => !['Amadeus', 'ราคาจริง', 'จองได้ทันที'].includes(tag))
               .filter(tag => {
-                // กรอง "แนะนำ" ถ้าแสดงใน header แล้ว
                 if (tag === 'แนะนำ' && recommended) return false;
-                // กรอง "บินตรง" ถ้าแสดงใน header แล้ว
                 if (tag === 'บินตรง' && (choice?.is_non_stop || (flight && flightStops === 'Non-stop'))) return false;
                 return true;
               })
               .map((tag, idx) => (
-                <span key={idx} className="plan-tag-pill">
-                  {tag}
-                </span>
+                <span key={idx} className="plan-tag-pill">{tag}</span>
               ))}
           </div>
         )}
@@ -716,7 +626,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
                             const layover = calculateLayoverTime(seg, nextSeg);
                             return layover ? (
                               <span key={idx} style={{ marginRight: '8px' }}>
-                                {seg.to ? `รอที่ ${seg.to}` : 'รอต่อเครื่อง'} ({layover})
+                                {seg.to ? `รอที่ ${getAirportDisplay(seg.to)}` : 'รอต่อเครื่อง'} ({layover})
                               </span>
                             ) : null;
                           })}
@@ -855,7 +765,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
                                 marginTop: '4px',
                                 opacity: 0.9
                               }}>
-                                ที่ {getAirportName(seg.to)}
+                                ที่ {getAirportDisplay(seg.to)}
                               </div>
                             )}
                           </div>
@@ -1028,66 +938,103 @@ export default function PlanChoiceCard({ choice, onSelect }) {
                     <div className="plan-card-small">ชั้นโดยสาร: {flight.cabin}</div>
                   )}
                   
-                  {/* ✅ Badge เงื่อนไขตั๋ว (Refundable / Changeable) */}
-                  <div style={{ marginTop: '8px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                    {/* Refundable Badge */}
-                    <span style={{
-                        padding: '4px 8px',
-                        borderRadius: '4px',
-                        fontSize: '13px',
-                        fontWeight: '500',
-                        backgroundColor: flight_details?.refundable ? 'rgba(74, 222, 128, 0.2)' : 'rgba(248, 113, 113, 0.2)',
-                        color: flight_details?.refundable ? '#4ade80' : '#f87171',
-                        border: `1px solid ${flight_details?.refundable ? 'rgba(74, 222, 128, 0.4)' : 'rgba(248, 113, 113, 0.4)'}`
-                    }}>
-                        {flight_details?.refundable ? '✅ คืนเงินได้' : '❌ คืนเงินไม่ได้'}
-                    </span>
-
-                    {/* Changeable Badge */}
-                    <span style={{
-                        padding: '4px 8px',
-                        borderRadius: '4px',
-                        fontSize: '13px',
-                        fontWeight: '500',
-                        backgroundColor: flight_details?.changeable ? 'rgba(96, 165, 250, 0.2)' : 'rgba(248, 113, 113, 0.2)',
-                        color: flight_details?.changeable ? '#60a5fa' : '#f87171',
-                        border: `1px solid ${flight_details?.changeable ? 'rgba(96, 165, 250, 0.4)' : 'rgba(248, 113, 113, 0.4)'}`
-                    }}>
-                        {flight_details?.changeable ? '✅ เปลี่ยนวันได้' : '❌ เปลี่ยนวันไม่ได้'}
-                    </span>
-                  </div>
-                  <div className="plan-card-small" style={{ marginTop: '4px', fontSize: '12px', opacity: 0.8 }}>
-                      *เงื่อนไขเป็นไปตามที่สายการบินกำหนด อาจมีค่าธรรมเนียมเพิ่มเติม
+                  {/* Fare Rules (Refundable / Changeable) */}
+                  <div style={{ marginTop: '8px' }}>
+                    <div style={{ fontWeight: '600', marginBottom: '6px' }}>📋 Fare Rules</div>
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      <span style={{
+                          padding: '4px 8px',
+                          borderRadius: '4px',
+                          fontSize: '13px',
+                          fontWeight: '500',
+                          backgroundColor: flight_details?.refundable ? 'rgba(74, 222, 128, 0.2)' : 'rgba(248, 113, 113, 0.2)',
+                          color: flight_details?.refundable ? '#4ade80' : '#f87171',
+                          border: `1px solid ${flight_details?.refundable ? 'rgba(74, 222, 128, 0.4)' : 'rgba(248, 113, 113, 0.4)'}`
+                      }}>
+                          Refundable: {flight_details?.refundable ? '✅ คืนเงินได้' : '❌ คืนเงินไม่ได้'}
+                      </span>
+                      <span style={{
+                          padding: '4px 8px',
+                          borderRadius: '4px',
+                          fontSize: '13px',
+                          fontWeight: '500',
+                          backgroundColor: flight_details?.changeable ? 'rgba(96, 165, 250, 0.2)' : 'rgba(248, 113, 113, 0.2)',
+                          color: flight_details?.changeable ? '#60a5fa' : '#f87171',
+                          border: `1px solid ${flight_details?.changeable ? 'rgba(96, 165, 250, 0.4)' : 'rgba(248, 113, 113, 0.4)'}`
+                      }}>
+                          Changeable: {flight_details?.changeable ? '✅ เลื่อนวันได้' : '❌ เลื่อนวันไม่ได้'}
+                      </span>
+                      {flight_details?.changeable && flight_details?.change_fee && (
+                        <span className="plan-card-small" style={{ display: 'block', marginTop: '4px' }}>ค่าธรรมเนียม: {flight_details.change_fee}</span>
+                      )}
+                    </div>
+                    <div className="plan-card-small" style={{ marginTop: '4px', fontSize: '12px', opacity: 0.8 }}>
+                        *เงื่อนไขเป็นไปตามที่สายการบินกำหนด อาจมีค่าธรรมเนียมเพิ่มเติม
+                    </div>
                   </div>
                 </div>
 
-                {/* 3) กระเป๋า & สิ่งที่รวม */}
+                {/* 3) Baggage Allowance */}
                 <div style={{ marginBottom: '12px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.2)' }}>
-                  <div style={{ fontWeight: '600', marginBottom: '8px', fontSize: '16px' }}>3) กระเป๋า & สิ่งที่รวม</div>
-                  
-                  {/* แสดงแบบ Icon + Text ให้ดูง่ายขึ้น */}
+                  <div style={{ fontWeight: '600', marginBottom: '8px', fontSize: '16px' }}>🧳 Baggage Allowance</div>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
                     <div className="plan-card-small" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <span>👜</span> 
-                        <span>{flight_details?.hand_baggage || '7 kg'} (ถือขึ้นเครื่อง)</span>
+                        <span>กระเป๋าถือขึ้นเครื่อง: {flight_details?.hand_baggage || '1 กระเป๋า (7 kg)'}</span>
                     </div>
                     <div className="plan-card-small" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <span>🧳</span> 
                         <span style={{ fontWeight: '600', color: '#ffecb3' }}>
-                            {flight?.baggage || flight_details?.checked_baggage || 'ไม่รวม'}
-                        </span> 
-                        <span>(โหลดใต้เครื่อง)</span>
-                    </div>
-                    <div className="plan-card-small" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <span>🍽️</span> 
-                        <span>{flight_details?.meals || 'อาหารว่าง'}</span>
-                    </div>
-                    <div className="plan-card-small" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <span>📶</span> 
-                        <span>{flight_details?.wifi || 'ไม่มี Wi-Fi'}</span>
+                            กระเป๋าโหลด: {flight?.baggage || flight_details?.checked_baggage || 'ไม่รวม'}
+                        </span>
                     </div>
                   </div>
                 </div>
+
+                {/* 4) Amenities */}
+                <div style={{ marginBottom: '12px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.2)' }}>
+                  <div style={{ fontWeight: '600', marginBottom: '8px', fontSize: '16px' }}>✨ สิ่งอำนวยความสะดวก</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                    <div className="plan-card-small" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <span>📶</span> 
+                        <span>WiFi: {flight_details?.wifi ?? 'ตรวจสอบบนเครื่อง'}</span>
+                    </div>
+                    <div className="plan-card-small" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <span>🔌</span> 
+                        <span>ปลั๊กไฟ: {flight_details?.power_outlet ?? 'ตรวจสอบบนเครื่อง'}</span>
+                    </div>
+                    <div className="plan-card-small" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <span>🍽️</span> 
+                        <span>อาหาร: {flight_details?.meals || 'อาหารว่าง'}</span>
+                    </div>
+                    {(flight_details?.seat_width || flight_details?.seat_selection) && (
+                      <div className="plan-card-small" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <span>💺</span> 
+                        <span>ความกว้างที่นั่ง: {flight_details?.seat_width || flight_details?.seat_selection}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* CO2 Emissions */}
+                {(() => {
+                  const route = flight?.segments?.length ? (flight.segments[0]?.from && flight.segments[flight.segments.length - 1]?.to) : false;
+                  const co2Kg = flight_details?.co2_emissions_kg ?? (route ? calculateCO2e(1500) : null);
+                  return co2Kg != null && co2Kg > 0 ? (
+                    <div style={{ marginBottom: '12px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.2)' }}>
+                      <div style={{ fontWeight: '600', marginBottom: '4px' }}>🌱 CO2 Emissions</div>
+                      <div className="plan-card-small">~{co2Kg} kg CO2e (ประมาณการ)</div>
+                    </div>
+                  ) : null;
+                })()}
+
+                {/* On-time Performance */}
+                {flight_details?.on_time_performance != null && flight_details.on_time_performance !== '' && (
+                  <div style={{ marginBottom: '12px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.2)' }}>
+                    <div style={{ fontWeight: '600', marginBottom: '4px' }}>⏱️ On-time Performance</div>
+                    <div className="plan-card-small">{flight_details.on_time_performance}</div>
+                  </div>
+                )}
 
                 {/* 4) โปรโมชั่น */}
                 {flight_details?.promotions && flight_details.promotions.length > 0 && (
@@ -1139,7 +1086,9 @@ export default function PlanChoiceCard({ choice, onSelect }) {
                      <img 
                          key={idx} 
                          src={url} 
-                         alt={`hotel-${idx}`} 
+                         alt=""
+                         loading="lazy"
+                         onError={(e) => { e.target.style.display = 'none'; }}
                          style={{ 
                              width: '120px', 
                              height: '80px', 
@@ -1237,15 +1186,15 @@ export default function PlanChoiceCard({ choice, onSelect }) {
                  <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.2)' }}>
                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                          <span style={{ fontSize: '13px', opacity: 0.8 }}>ราคาต่อคืน</span>
-                         <span style={{ fontWeight: '600' }}>{formatMoney(hotel.booking.pricing.price_per_night, hotel.booking.pricing.currency)}</span>
+                         <span style={{ fontWeight: '600' }}>{formatPriceInThb(hotel.booking.pricing.price_per_night, hotel.booking.pricing.currency)}</span>
                      </div>
                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                          <span style={{ fontSize: '13px', opacity: 0.8 }}>ภาษีและค่าธรรมเนียม</span>
-                         <span style={{ fontSize: '13px' }}>{formatMoney(hotel.booking.pricing.taxes_and_fees, hotel.booking.pricing.currency)}</span>
+                         <span style={{ fontSize: '13px' }}>{formatPriceInThb(hotel.booking.pricing.taxes_and_fees, hotel.booking.pricing.currency)}</span>
                      </div>
                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px', fontSize: '16px' }}>
                          <span style={{ fontWeight: '600' }}>ราคารวม ({hotel.booking.check_out_date ? 'ตามวันที่เลือก' : 'Total'})</span>
-                         <span style={{ fontWeight: '700', color: '#81c784' }}>{formatMoney(hotel.booking.pricing.total_amount, hotel.booking.pricing.currency)}</span>
+                         <span style={{ fontWeight: '700', color: '#81c784' }}>{formatPriceInThb(hotel.booking.pricing.total_amount, hotel.booking.pricing.currency)}</span>
                      </div>
                  </div>
             )}
@@ -1342,14 +1291,14 @@ export default function PlanChoiceCard({ choice, onSelect }) {
                 border: '1px solid rgba(74, 222, 128, 0.3)'
               }}>
                 <div style={{ fontSize: '18px', fontWeight: '700', color: '#4ade80', marginBottom: '4px' }}>
-                  💰 ราคา: {formatMoney(
+                  💰 ราคา: {formatPriceInThb(
                     transport?.price || transport?.data?.price || car?.price || transport?.price_amount || car?.price_amount,
                     transport?.currency || transport?.data?.currency || car?.currency || 'THB'
                   )}
                 </div>
                 {(transport?.price_per_day || car?.price_per_day) && (
                   <div style={{ fontSize: '14px', opacity: 0.9, marginTop: '4px' }}>
-                    ราคาต่อวัน: {formatMoney(
+                    ราคาต่อวัน: {formatPriceInThb(
                       transport?.price_per_day || car?.price_per_day,
                       transport?.currency || car?.currency || 'THB'
                     )}

@@ -328,6 +328,12 @@ USER_INDEXES = [
     IndexModel([("last_active", -1)])
 ]
 
+# ผู้จองร่วม (Cotravelers) — แยกจาก users เหมือน user_saved_cards
+USER_FAMILY_INDEXES = [
+    IndexModel([("user_id", 1)], unique=True),
+    IndexModel([("updated_at", -1)]),
+]
+
 CONVERSATION_INDEXES = [
     IndexModel([("session_id", 1)]),
     IndexModel([("user_id", 1)]),

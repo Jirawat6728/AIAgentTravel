@@ -14,6 +14,7 @@ from app.models.database import (
     TripDocument,
     SESSION_INDEXES,
     USER_INDEXES,
+    USER_FAMILY_INDEXES,
     MEMORY_INDEXES,
     BOOKING_INDEXES,
     CONVERSATION_INDEXES,
@@ -69,6 +70,7 @@ class MongoStorage(StorageInterface):
             self.bookings_collection = self.db["bookings"]
             self.conversations_collection = self.db["conversations"]
             self.saved_cards_collection = self.db["user_saved_cards"]
+            self.family_collection = self.db["user_family"]
             self.trips_collection = self.db["trips"]
         else:
             self.sessions_collection = None
@@ -77,6 +79,7 @@ class MongoStorage(StorageInterface):
             self.bookings_collection = None
             self.conversations_collection = None
             self.saved_cards_collection = None
+            self.family_collection = None
             self.trips_collection = None
         
         logger.info(f"MongoStorage initialized with shared connection: database={self.database_name}")
@@ -105,6 +108,7 @@ class MongoStorage(StorageInterface):
             self.bookings_collection = self.db["bookings"]
             self.conversations_collection = self.db["conversations"]
             self.saved_cards_collection = self.db["user_saved_cards"]
+            self.family_collection = self.db["user_family"]
             self.trips_collection = self.db["trips"]
         
         try:
@@ -132,6 +136,8 @@ class MongoStorage(StorageInterface):
             
             await create_indexes_safe(self.sessions_collection, SESSION_INDEXES, "sessions")
             await create_indexes_safe(self.users_collection, USER_INDEXES, "users")
+            if hasattr(self, "family_collection") and self.family_collection is not None:
+                await create_indexes_safe(self.family_collection, USER_FAMILY_INDEXES, "user_family")
             await create_indexes_safe(self.memories_collection, MEMORY_INDEXES, "memories")
             await create_indexes_safe(self.bookings_collection, BOOKING_INDEXES, "bookings")
             await create_indexes_safe(self.conversations_collection, CONVERSATION_INDEXES, "conversations")

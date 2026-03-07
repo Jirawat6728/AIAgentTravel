@@ -4,7 +4,7 @@ Endpoint API ของ MCP (Model Context Protocol)
 """
 
 import asyncio
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
 
@@ -126,8 +126,11 @@ async def search_flights(
     origin: str,
     destination: str,
     departure_date: str,
-    adults: int = 1,
-    return_date: Optional[str] = None,
+    adults: int = Query(1, ge=1, le=9),
+    return_date: Optional[str] = Query(None),
+    children: int = Query(0, ge=0, le=9),
+    infants: int = Query(0, ge=0, le=9),
+    cabin_class: Optional[str] = Query(None),
 ):
     """Convenience endpoint for flight search"""
     result = await _run_tool(
@@ -138,6 +141,9 @@ async def search_flights(
             "departure_date": departure_date,
             "adults": adults,
             "return_date": return_date,
+            "children": children,
+            "infants": infants,
+            "cabin_class": cabin_class,
         },
         timeout=_SEARCH_TIMEOUT,
     )

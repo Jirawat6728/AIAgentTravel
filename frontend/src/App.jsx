@@ -91,6 +91,7 @@ function App() {
   const [pendingPrompt, setPendingPrompt] = useState("");
   const [isAuthChecking, setIsAuthChecking] = useState(true); // Loading state for auth check
   const [loadingData, setLoadingData] = useState(loadingAnimation); // Lottie animation data
+  const [paymentInitialBooking, setPaymentInitialBooking] = useState(null); // ข้อมูลจองจาก My Bookings สำหรับแสดงยอด/ทริปทันที
 
   // Format date for notification
   const formatNotificationDate = (dateString) => {
@@ -170,30 +171,28 @@ function App() {
 
   // ✅ Handle mark notification as read
   const handleMarkNotificationAsRead = useCallback(async (notificationId) => {
+    // ✅ อัปเดต count ทันที (optimistic) เพื่อให้ตัวเลขลดทันทีเมื่อกดอ่าน
+    setNotificationCount(prev => Math.max(0, prev - 1));
+    setNotifications(prev =>
+      prev.map(notif =>
+        notif.id === notificationId ? { ...notif, isRead: true } : notif
+      )
+    );
     try {
       const headers = { 'Content-Type': 'application/json' };
       const uid = user?.user_id || user?.id;
       if (uid) headers['X-User-ID'] = uid;
-      
-      // ✅ Mark as read in backend
       await fetch(`${API_BASE_URL}/api/notification/mark-read?notification_id=${notificationId}`, {
         method: 'POST',
         headers,
         credentials: 'include',
       });
-      
-      // ✅ Update local state
-      setNotifications(prev => 
-        prev.map(notif => 
-          notif.id === notificationId ? { ...notif, isRead: true } : notif
-        )
-      );
-      // ✅ Update notification count
-      setNotificationCount(prev => Math.max(0, prev - 1));
     } catch (error) {
       console.error("Failed to mark notification as read:", error);
+      // ถ้า API ล้มเหลว ให้ refetch count เพื่อ sync กับ backend
+      fetchNotificationCount();
     }
-  }, [user]);
+  }, [user, fetchNotificationCount]);
 
   // ล้างทั้งหมด = mark-all-read (ไม่ลบ เพื่อให้ยังดูประวัติได้)
   const handleMarkAllNotificationsAsRead = useCallback(async () => {
@@ -247,7 +246,11 @@ function App() {
           const msg = JSON.parse(event.data);
           if (msg.type === 'new_notification') {
             const notif = msg.notification;
-            // เพิ่ม notification ใหม่เข้า state ทันที
+            const currentUserId = user?.user_id || user?.id;
+            // แสดงเฉพาะการแจ้งเตือนของ user ปัจจุบัน (ป้องกันกรณีแจ้งเตือนข้าม user)
+            if (currentUserId && notif.user_id && notif.user_id !== currentUserId) {
+              return;
+            }
             const formatted = {
               id: notif.id || notif._id,
               type: notif.type || 'info',
@@ -261,7 +264,6 @@ function App() {
             setNotifications(prev => [formatted, ...prev]);
             setNotificationCount(prev => prev + 1);
           }
-          // heartbeat และ connected ไม่ต้องทำอะไร
         } catch (e) {
           console.error('SSE parse error:', e);
         }
@@ -289,27 +291,35 @@ function App() {
     };
   }, [isLoggedIn, user?.id]);
 
-  // Navigate: pushState เพื่อให้ปุ่มย้อนกลับของเบราว์เซอร์ทำงาน (ใช้ replace เมื่อไม่ต้องการเพิ่ม history)
-  const navigateToView = useCallback((newView, replace = false) => {
+  // ✅ Prefetch AITravelChat เมื่อ user login — ทำให้คลิกไปแท็บ Agent โหลดทันที
+  useEffect(() => {
+    if (isLoggedIn && user) import('./pages/chat/AITravelChat.jsx');
+  }, [isLoggedIn, user]);
+
+  // Navigate: pushState เพื่อให้ปุ่มย้อนกลับของเบราว์เซอร์ทำงาน (path ถ้าส่งมา เช่น /payment?booking_id=xxx จะไม่ถูกทับเป็น /)
+  const navigateToView = useCallback((newView, replace = false, path = null) => {
     setView(newView);
-    // Save view to localStorage (but not login/register pages)
     if (newView !== 'login' && newView !== 'register' && newView !== 'reset-password') {
       localStorage.setItem("app_view", newView);
     }
     if (window.history && window.history.pushState) {
+      const targetUrl = path || '/';
       if (replace) {
-        window.history.replaceState({ view: newView }, '', '/');
+        window.history.replaceState({ view: newView }, '', targetUrl);
       } else {
-        window.history.pushState({ view: newView }, '', '/');
+        window.history.pushState({ view: newView }, '', targetUrl);
       }
     }
   }, []);
 
-  // ซิงค์ state ของ history entry ปัจจุบัน (ให้ปุ่มย้อนกลับใช้ state นี้ได้) และบังคับ URL เป็น / ยกเว้น verify-email-change
+  // ซิงค์ state ของ history entry ปัจจุบัน — หน้า payment เก็บ query (booking_id/trip_id) ไว้
   useEffect(() => {
     if (!window.history.replaceState || view === 'verify-email-change') return;
     const path = window.location.pathname;
-    const url = path !== '/' ? '/' : '/';
+    const search = window.location.search || '';
+    const url = view === 'payment' && (path.includes('payment') || path === '/payment')
+      ? path + search
+      : path !== '/' ? path : '/';
     window.history.replaceState({ view }, '', url);
   }, [view]);
 
@@ -1612,11 +1622,9 @@ function App() {
           onNavigateToProfile={handleNavigateToProfile}
           onNavigateToSettings={handleNavigateToSettings}
           onNavigateToHome={() => navigateToView("home")}
-          onNavigateToPayment={(bookingId) => {
-            if (window.history && window.history.pushState) {
-              window.history.pushState({}, '', `/payment?booking_id=${bookingId}`);
-            }
-            navigateToView("payment");
+          onNavigateToPayment={(bookingId, initialBooking) => {
+            setPaymentInitialBooking(initialBooking || null);
+            navigateToView("payment", false, `/payment?booking_id=${encodeURIComponent(bookingId)}`);
           }}
           onNavigateToAI={(tripId, chatId, initialMessage) => {
             // Navigate to chat and set initial message
@@ -1640,16 +1648,19 @@ function App() {
       )}
 
       {view === "payment" && isLoggedIn && (() => {
-        // Extract booking_id from URL query params
         const urlParams = new URLSearchParams(window.location.search);
         const bookingId = urlParams.get('booking_id') || urlParams.get('id');
+        const tripId = urlParams.get('trip_id') || urlParams.get('tripId');
         
         return (
           <PaymentPage
             bookingId={bookingId}
+            tripId={tripId}
+            initialBooking={paymentInitialBooking}
             user={user}
-            onBack={() => navigateToView("bookings")}
+            onBack={() => { setPaymentInitialBooking(null); navigateToView("bookings"); }}
             onPaymentSuccess={(bookingId, chargeData) => {
+              setPaymentInitialBooking(null);
               navigateToView("bookings");
               setTimeout(() => {
                 Swal.fire({

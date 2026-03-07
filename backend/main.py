@@ -1,7 +1,8 @@
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, RedirectResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 import os
@@ -13,7 +14,14 @@ from app.core.resilience import chat_rate_limiter, api_rate_limiter, payment_rat
 from app.api.chat import router as chat_router
 from app.api.auth import router as auth_router
 from app.api.travel import router as travel_router
-from app.api.admin import router as admin_router, get_admin_dashboard_html
+from app.api.admin import (
+    router as admin_router,
+    get_admin_dashboard_html,
+    get_admin_login_html,
+    create_admin_session_token,
+    verify_admin_session_token,
+    ADMIN_SESSION_COOKIE,
+)
 from app.api.mcp import router as mcp_router
 from app.api.booking import router as booking_router
 from app.api.amadeus_viewer import router as amadeus_viewer_router
@@ -106,7 +114,6 @@ async def lifespan(app: FastAPI):
                     "และใน Atlas → Database Access (ตั้งรหัสผ่านใหม่ได้); รหัสผ่านมีอักขระพิเศษต้อง URL-encode"
                 )
             if attempt < max_retries - 1:
-                import asyncio
                 await asyncio.sleep(retry_delay)
             else:
                 logger.critical("Failed to initialize MongoDB after all retries. Server may be unstable.")
@@ -367,52 +374,61 @@ app.include_router(monitoring_router)
 app.include_router(options_cache_router)
 app.include_router(notification_router)
 
-# Admin dashboard: served from admin.py (แยกจาก frontend — เปิดที่ http://localhost:8000/admin)
+# Admin dashboard: หน้า login หรือ dashboard (ใช้ cookie แทน Basic Auth popup)
 @app.get("/admin", include_in_schema=False)
 async def admin_dashboard(request: Request):
-    """Serve the admin dashboard HTML from admin.py (no admin.html file)"""
+    """แสดงหน้า login ถ้ายังไม่เข้าสู่ระบบ ไม่เช่นนั้นแสดง dashboard"""
     if not settings.admin_enabled:
         return JSONResponse(
             status_code=403,
             content={"error": "Admin dashboard is disabled"}
         )
-
     if settings.admin_require_auth and settings.admin_password:
-        import base64
-        import secrets
-        try:
-            authorization = request.headers.get("Authorization")
-            if not authorization or not authorization.startswith("Basic "):
-                return HTMLResponse(
-                    status_code=401,
-                    headers={"WWW-Authenticate": "Basic realm=\"Admin Dashboard\""},
-                    content="<html><body><h1>Authentication required</h1></body></html>",
-                    media_type="text/html",
-                )
-            encoded = authorization.split(" ")[1]
-            decoded = base64.b64decode(encoded).decode("utf-8")
-            username, password = decoded.split(":", 1)
-            provided = password.encode("utf-8")
-            expected = settings.admin_password.encode("utf-8")
-            if not secrets.compare_digest(provided, expected):
-                return HTMLResponse(
-                    status_code=401,
-                    headers={"WWW-Authenticate": "Basic realm=\"Admin Dashboard\""},
-                    content="<html><body><h1>Invalid credentials</h1></body></html>",
-                    media_type="text/html",
-                )
-        except Exception as e:
-            logger.warning(f"Admin authentication error: {e}")
-            return HTMLResponse(
-                status_code=401,
-                headers={"WWW-Authenticate": "Basic realm=\"Admin Dashboard\""},
-                content="<html><body><h1>Authentication required</h1></body></html>",
-                media_type="text/html",
-            )
-
+        token = request.cookies.get(ADMIN_SESSION_COOKIE)
+        if not token or not verify_admin_session_token(token):
+            return HTMLResponse(get_admin_login_html(), media_type="text/html")
     html = get_admin_dashboard_html()
     logger.info("Serving admin dashboard from admin.py (backend only, แยกจาก frontend)")
     return HTMLResponse(html, media_type="text/html")
+
+
+@app.post("/admin/login", include_in_schema=False)
+async def admin_login(request: Request):
+    """รับ username/password จากฟอร์ม แล้วตั้ง cookie และ redirect ไป /admin"""
+    if not settings.admin_enabled or not settings.admin_password:
+        return RedirectResponse(url="/admin", status_code=302)
+    try:
+        body = await request.form()
+        username = (body.get("username") or "").strip()
+        password = (body.get("password") or "").strip()
+        expected = settings.admin_password.encode("utf-8")
+        provided = password.encode("utf-8")
+        if not password or not __import__("secrets").compare_digest(provided, expected):
+            logger.warning("Admin login failed: invalid password")
+            return HTMLResponse(get_admin_login_html(error=True), media_type="text/html", status_code=401)
+        token = create_admin_session_token()
+        response = RedirectResponse(url="/admin", status_code=302)
+        response.set_cookie(
+            key=ADMIN_SESSION_COOKIE,
+            value=token,
+            max_age=86400,
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        logger.info(f"Admin login successful: {username or 'admin'}")
+        return response
+    except Exception as e:
+        logger.warning(f"Admin login error: {e}")
+        return HTMLResponse(get_admin_login_html(), media_type="text/html")
+
+
+@app.get("/admin/logout", include_in_schema=False)
+async def admin_logout():
+    """ล้าง cookie และ redirect ไป /admin (หน้า login)"""
+    response = RedirectResponse(url="/admin", status_code=302)
+    response.delete_cookie(ADMIN_SESSION_COOKIE, path="/")
+    return response
 
 
 # Global Exception Handler

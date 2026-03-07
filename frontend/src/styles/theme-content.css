@@ -58,6 +58,16 @@
   color: #374151 !important;
 }
 
+/* ปุ่มลบ (กากบาท) — ให้เห็นชัดบนพื้นหลังอ่อน */
+[data-theme="light"] .trip-delete-btn {
+  color: #64748b !important;
+}
+
+[data-theme="light"] .trip-delete-btn:hover {
+  color: #dc2626 !important;
+  background: rgba(220, 38, 38, 0.1) !important;
+}
+
 [data-theme="light"] .trip-item-meta,
 [data-theme="light"] .trip-item-date,
 [data-theme="light"] .trip-item-sub {
@@ -240,26 +250,276 @@
   color: var(--content-accent);
 }
 
-/* My Bookings */
-[data-theme="dark"].my-bookings-content {
-  background-color: var(--content-bg);
+/* My Bookings — ธีมมืด (selector ใช้ .my-bookings-content[data-theme="dark"] เพราะ data-theme อยู่บน element เดียวกัน) */
+.my-bookings-container:has(.my-bookings-content[data-theme="dark"]) {
+  background: var(--content-bg) !important;
+}
+
+.my-bookings-content[data-theme="dark"] {
+  background-color: var(--content-bg) !important;
   color: var(--content-text);
 }
 
-[data-theme="dark"] .my-bookings-content .booking-card,
-[data-theme="dark"] .my-bookings-content .bookings-list > div {
-  background: var(--content-bg-card);
+.my-bookings-content[data-theme="dark"] .my-bookings-loading,
+.my-bookings-content[data-theme="dark"] .my-bookings-error {
+  background: var(--content-bg-card) !important;
+  color: var(--content-text);
+}
+
+.my-bookings-content[data-theme="dark"] .my-bookings-empty {
+  background: var(--content-bg-card) !important;
+  border-color: var(--content-border);
+}
+
+.my-bookings-content[data-theme="dark"] .booking-card,
+.my-bookings-content[data-theme="dark"] .bookings-list > div {
+  background: var(--content-bg-card) !important;
   border-color: var(--content-border);
   color: var(--content-text);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
-[data-theme="dark"] .my-bookings-content .booking-card h3,
-[data-theme="dark"] .my-bookings-content .empty-text {
+.my-bookings-content[data-theme="dark"] .booking-card h3,
+.my-bookings-content[data-theme="dark"] .empty-text,
+.my-bookings-content[data-theme="dark"] .booking-title,
+.my-bookings-content[data-theme="dark"] .flight-route,
+.my-bookings-content[data-theme="dark"] .hotel-name {
   color: var(--content-text);
 }
 
-[data-theme="dark"] .my-bookings-content .empty-subtext,
-[data-theme="dark"] .my-bookings-content .booking-meta {
+.my-bookings-content[data-theme="dark"] .empty-subtext,
+.my-bookings-content[data-theme="dark"] .booking-meta,
+.my-bookings-content[data-theme="dark"] .booking-date,
+.my-bookings-content[data-theme="dark"] .detail-label,
+.my-bookings-content[data-theme="dark"] .flight-label,
+.my-bookings-content[data-theme="dark"] .hotel-label,
+.my-bookings-content[data-theme="dark"] .flight-number,
+.my-bookings-content[data-theme="dark"] .flight-time,
+.my-bookings-content[data-theme="dark"] .flight-airline {
+  color: var(--content-text-muted);
+}
+
+.my-bookings-content[data-theme="dark"] .detail-value {
+  color: var(--content-text);
+}
+
+.my-bookings-content[data-theme="dark"] .detail-value.price,
+.my-bookings-content[data-theme="dark"] .total-price-label,
+.my-bookings-content[data-theme="dark"] .total-price-value {
+  color: var(--content-accent);
+}
+
+.my-bookings-content[data-theme="dark"] .booking-header {
+  border-bottom-color: var(--content-border);
+}
+
+.my-bookings-content[data-theme="dark"] .booking-passengers {
+  background: var(--content-bg-hover) !important;
+  border-color: var(--content-border);
+}
+
+.my-bookings-content[data-theme="dark"] .passengers-label {
+  color: var(--content-text-muted);
+}
+
+.my-bookings-content[data-theme="dark"] .booking-flight-section,
+.my-bookings-content[data-theme="dark"] .booking-flight-info,
+.my-bookings-content[data-theme="dark"] .booking-hotel-info {
+  background: var(--content-bg-hover) !important;
+  border-color: var(--content-border);
+}
+
+.my-bookings-content[data-theme="dark"] .booking-flight-section {
+  border-left-color: var(--content-accent);
+}
+
+.my-bookings-content[data-theme="dark"] .booking-total-price {
+  background: var(--content-bg-hover) !important;
+  border-color: var(--content-accent);
+  /* ลบ gradient สีฟ้าอ่อนของ light theme */
+}
+
+.my-bookings-content[data-theme="dark"] .booking-actions {
+  border-top-color: var(--content-border);
+}
+
+.my-bookings-content[data-theme="dark"] .btn-back {
+  background: var(--content-bg-card) !important;
+  color: var(--content-accent);
+  border: 1px solid var(--content-border);
+}
+
+.my-bookings-content[data-theme="dark"] .airline-logo-badge {
+  background: var(--content-bg-hover);
+  border-color: var(--content-border);
+}
+
+.my-bookings-content[data-theme="dark"] .airline-logo-fallback {
+  color: var(--content-text-muted);
+}
+
+.my-bookings-content[data-theme="dark"] .booking-cancelled-note {
+  background: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+  border: 1px solid var(--content-border);
+}
+
+.my-bookings-content[data-theme="dark"] .status-pending {
+  background: rgba(245, 158, 11, 0.25);
+  color: #fcd34d;
+}
+
+.my-bookings-content[data-theme="dark"] .status-confirmed,
+.my-bookings-content[data-theme="dark"] .status-paid {
+  background: rgba(34, 197, 94, 0.25);
+  color: #86efac;
+}
+
+.my-bookings-content[data-theme="dark"] .status-cancelled,
+.my-bookings-content[data-theme="dark"] .status-failed {
+  background: rgba(239, 68, 68, 0.25);
+  color: #fca5a5;
+}
+
+.my-bookings-content[data-theme="dark"] .status-unknown {
+  background: var(--content-bg-hover);
+  color: var(--content-text-muted);
+}
+
+.my-bookings-content[data-theme="dark"] .passenger-type-badge.adult {
+  background: rgba(59, 130, 246, 0.25);
+  color: #93c5fd;
+  border-color: var(--content-border);
+}
+
+.my-bookings-content[data-theme="dark"] .passenger-type-badge.child {
+  background: rgba(245, 158, 11, 0.25);
+  color: #fcd34d;
+  border-color: var(--content-border);
+}
+
+.my-bookings-content[data-theme="dark"] .passenger-name {
+  color: var(--content-text);
+}
+
+.my-bookings-content[data-theme="dark"] .main-booker-tag {
+  color: var(--content-text-muted);
+}
+
+.my-bookings-content[data-theme="dark"] .btn-cancel {
+  background: rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.my-bookings-content[data-theme="dark"] .btn-cancel:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.45);
+}
+
+.my-bookings-content[data-theme="dark"] .btn-refund-confirm-partial {
+  background: rgba(13, 148, 136, 0.25);
+  color: #5eead4;
+  border-color: var(--content-accent);
+}
+
+.my-bookings-content[data-theme="dark"] .btn-cancel-edit {
+  background: var(--content-bg-hover);
+  color: var(--content-text);
+  border-color: var(--content-border);
+}
+
+.my-bookings-content[data-theme="dark"] .btn-cancel-edit:hover {
+  background: var(--content-bg-card);
+}
+
+/* Notification Panel — ธีมมืด */
+.notification-panel[data-theme="dark"] {
+  background: var(--content-bg-card) !important;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4), 0 20px 40px -5px rgba(0, 0, 0, 0.3);
+}
+
+.notification-panel[data-theme="dark"] .notification-panel-header {
+  background: var(--content-bg-hover);
+  border-bottom-color: var(--content-border);
+}
+
+.notification-panel[data-theme="dark"] .notification-panel-title {
+  color: var(--content-text);
+}
+
+.notification-panel[data-theme="dark"] .notification-badge-new {
+  background: #10b981;
+  color: white;
+}
+
+.notification-panel[data-theme="dark"] .notification-clear-all-btn,
+.notification-panel[data-theme="dark"] .notification-clear-all-btn-small {
+  color: var(--content-text-muted);
+}
+
+.notification-panel[data-theme="dark"] .notification-clear-all-btn:hover,
+.notification-panel[data-theme="dark"] .notification-clear-all-btn-small:hover {
+  background: var(--content-bg-hover);
+  color: var(--content-text);
+}
+
+.notification-panel[data-theme="dark"] .notification-panel-content {
+  background: var(--content-bg-card);
+}
+
+.notification-panel[data-theme="dark"] .notification-section-header {
+  background: var(--content-bg-hover);
+  border-top-color: var(--content-border);
+  border-bottom-color: var(--content-border);
+  color: var(--content-text-muted);
+}
+
+.notification-panel[data-theme="dark"] .notification-item {
+  border-bottom-color: var(--content-border);
+}
+
+.notification-panel[data-theme="dark"] .notification-item:hover {
+  background: var(--content-bg-hover);
+}
+
+.notification-panel[data-theme="dark"] .notification-item.new {
+  background: rgba(16, 185, 129, 0.12);
+}
+
+.notification-panel[data-theme="dark"] .notification-item.new:hover {
+  background: rgba(16, 185, 129, 0.18);
+}
+
+.notification-panel[data-theme="dark"] .notification-icon-wrap.notif-icon-blue { background: rgba(59, 130, 246, 0.25); }
+.notification-panel[data-theme="dark"] .notification-icon-wrap.notif-icon-green { background: rgba(16, 185, 129, 0.25); }
+.notification-panel[data-theme="dark"] .notification-icon-wrap.notif-icon-red { background: rgba(239, 68, 68, 0.25); }
+.notification-panel[data-theme="dark"] .notification-icon-wrap.notif-icon-orange { background: rgba(249, 115, 22, 0.25); }
+.notification-panel[data-theme="dark"] .notification-icon-wrap.notif-icon-teal { background: rgba(20, 184, 166, 0.25); }
+.notification-panel[data-theme="dark"] .notification-icon-wrap.notif-icon-purple { background: rgba(139, 92, 246, 0.25); }
+.notification-panel[data-theme="dark"] .notification-icon-wrap.notif-icon-gray { background: var(--content-bg-hover); }
+
+.notification-panel[data-theme="dark"] .notif-type-label {
+  color: var(--content-text);
+}
+
+.notification-panel[data-theme="dark"] .notification-text {
+  color: var(--content-text);
+}
+
+.notification-panel[data-theme="dark"] .notification-time {
+  color: var(--content-text-muted);
+}
+
+.notification-panel[data-theme="dark"] .notif-unread-dot {
+  background: var(--content-accent);
+}
+
+.notification-panel[data-theme="dark"] .notification-empty,
+.notification-panel[data-theme="dark"] .notification-empty-inline {
+  color: var(--content-text-muted);
+}
+
+.notification-panel[data-theme="dark"] .notification-empty-text {
   color: var(--content-text-muted);
 }
 
@@ -331,5 +591,63 @@
 [data-theme="dark"] .chat-input-textarea {
   background: var(--content-bg);
   border-color: var(--content-border);
+  color: var(--content-text);
+}
+
+/* App Header: เมนูผู้ใช้ + เมนูมือถือ ให้มืดตามธีม */
+.app-header[data-theme="dark"] .app-user-popup {
+  background: var(--content-bg-card);
+  border-color: var(--content-border);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+}
+
+.app-header[data-theme="dark"] .app-user-popup-name,
+.app-header[data-theme="dark"] .app-user-popup-button {
+  color: var(--content-text);
+}
+
+.app-header[data-theme="dark"] .app-user-popup-email {
+  color: var(--content-text-muted);
+}
+
+.app-header[data-theme="dark"] .app-user-popup-divider {
+  background: var(--content-border);
+}
+
+.app-header[data-theme="dark"] .app-user-popup-button:hover {
+  background: var(--content-bg-hover);
+  color: var(--content-text);
+}
+
+.app-header[data-theme="dark"] .app-user-popup-button-signout:hover {
+  background: rgba(220, 38, 38, 0.2);
+  color: #f87171;
+}
+
+.app-header[data-theme="dark"] .app-user-popup-button-signin:hover {
+  background: rgba(96, 165, 250, 0.2);
+  color: var(--content-accent);
+}
+
+.app-header[data-theme="dark"] .app-user-popup-button-profile:hover,
+.app-header[data-theme="dark"] .app-user-popup-button-settings:hover {
+  background: var(--content-bg-hover);
+  color: var(--content-text);
+}
+
+.app-header[data-theme="dark"] .app-mobile-menu-dropdown {
+  background: var(--content-bg-card);
+  border: 1px solid var(--content-border);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+}
+
+.app-header[data-theme="dark"] .app-mobile-menu-item {
+  color: var(--content-text);
+  border-bottom-color: var(--content-border);
+}
+
+.app-header[data-theme="dark"] .app-mobile-menu-item:hover,
+.app-header[data-theme="dark"] .app-mobile-menu-item.active {
+  background: var(--content-bg-hover);
   color: var(--content-text);
 }

@@ -107,16 +107,22 @@ class MemoryService:
         
         user_id = user_id.strip()  # ✅ Normalize user_id to prevent whitespace issues
 
-        # ✅ PRIVACY: Check user's dataSharing preference before learning from conversation
+        # ✅ PRIVACY: ระดับความเป็นส่วนตัว + การแชร์ข้อมูลให้ AI
+        # ส่วนตัว (private) = ไม่ให้ AI เรียนรู้จากบทสนทนาเลย
+        # สาธารณะ (public) = ใช้ค่าจาก dataSharing ว่าอนุญาตให้ AI ใช้ข้อมูลหรือไม่
         try:
             users_collection = self.db.get_collection("users")
             user_doc = await users_collection.find_one({"user_id": user_id}, {"preferences": 1})
             prefs = (user_doc or {}).get("preferences") or {}
+            privacy_level = (prefs.get("privacyLevel") or "public").lower()
+            if privacy_level == "private":
+                logger.debug(f"Skipping memory consolidation for user {user_id}: privacy level is private")
+                return
             if prefs.get("dataSharing") is False:
                 logger.debug(f"Skipping memory consolidation for user {user_id}: dataSharing is disabled")
                 return
         except Exception as pref_err:
-            logger.debug(f"Could not check dataSharing preference for user {user_id}: {pref_err}")
+            logger.debug(f"Could not check privacy preferences for user {user_id}: {pref_err}")
         prompt = f"""You are the memory consolidation module of a travel agent AI.
 Analyze the following interaction and extract any NEW important facts or preferences about the user.
 

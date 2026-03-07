@@ -211,6 +211,17 @@
   cursor: pointer;
 }
 
+/* บุคลิก Agent: ให้ select กว้างพอแสดงข้อความเต็ม ไม่ตัด */
+.settings-item-personality .settings-item-control-personality {
+  min-width: 360px;
+  flex: 1 1 360px;
+  max-width: 100%;
+}
+.settings-item-personality .form-select-personality {
+  min-width: 0;
+  width: 100%;
+}
+
 .password-change-form,
 .email-update-form,
 .email-otp-form {
@@ -335,6 +346,48 @@
 
 .btn-link:hover {
   color: #1e3a8a;
+}
+
+/* ธีมมืด: ปุ่มในหน้าตั้งค่า */
+.settings-content-area[data-theme="dark"] .btn-secondary {
+  background: var(--content-bg-hover);
+  color: var(--content-text);
+  border-color: var(--content-border);
+}
+
+.settings-content-area[data-theme="dark"] .btn-secondary:hover:not(:disabled) {
+  background: var(--content-border);
+  color: var(--content-text);
+}
+
+.settings-content-area[data-theme="dark"] .btn-primary {
+  background: var(--content-accent);
+  color: #fff;
+}
+
+.settings-content-area[data-theme="dark"] .btn-primary:hover:not(:disabled) {
+  filter: brightness(1.15);
+}
+
+.settings-content-area[data-theme="dark"] .btn-danger {
+  background: #dc2626;
+  color: #fff;
+}
+
+.settings-content-area[data-theme="dark"] .btn-danger:hover:not(:disabled) {
+  background: #b91c1c;
+  filter: brightness(1.1);
+}
+
+.settings-content-area[data-theme="dark"] .btn-link,
+.settings-content-area[data-theme="dark"] .btn-text-link {
+  background: transparent;
+  color: var(--content-accent);
+}
+
+.settings-content-area[data-theme="dark"] .btn-link:hover,
+.settings-content-area[data-theme="dark"] .btn-text-link:hover {
+  color: var(--content-text);
 }
 
 .settings-actions {
@@ -704,6 +757,45 @@ body .add-card-popup.swal2-popup {
   overflow: hidden;
   box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(102, 126, 234, 0.08);
   max-width: 95vw;
+}
+
+/* ธีมสว่าง: โมดัลเพิ่มบัตรให้ตามธีมแอป (แก้บั๊กโผล่เป็นพื้นดำเมื่อใช้ Light) */
+.swal2-container[data-theme="light"] {
+  background: rgba(248, 250, 252, 0.92) !important;
+}
+.add-card-popup--light.swal2-popup {
+  background: #ffffff !important;
+  color: #1e293b;
+}
+.add-card-popup--light .swal2-title {
+  color: #1e293b !important;
+}
+.add-card-popup--light .swal2-html-container {
+  color: #334155;
+}
+.add-card-popup--light .add-card-label {
+  color: #475569 !important;
+}
+.add-card-popup--light .swal2-cancel {
+  background: #e2e8f0 !important;
+  color: #475569 !important;
+  border: 1px solid #cbd5e1 !important;
+}
+.add-card-popup--light .swal2-cancel:hover {
+  background: #f1f5f9 !important;
+  color: #1e293b !important;
+}
+.add-card-popup--light .add-card-input {
+  background: #ffffff !important;
+  border-color: #e2e8f0 !important;
+  color: #1e293b !important;
+}
+.add-card-popup--light .add-card-input::placeholder {
+  color: #94a3b8 !important;
+}
+.add-card-popup--light .add-card-input:focus {
+  background: #ffffff !important;
+  border-color: #6366f1 !important;
 }
 
 .add-card-popup .swal2-html-container {

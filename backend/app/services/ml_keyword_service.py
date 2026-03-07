@@ -418,8 +418,8 @@ class MLKeywordService:
                 if d.replace(tzinfo=None) < today:
                     issues.append("วันเดินทางต้องเป็นวันนี้หรืออนาคต")
                     score -= 0.3
-                if (d.replace(tzinfo=None) - today).days > 365:
-                    warnings.append("วันเดินทางห่างเกิน 1 ปี")
+                if (d.replace(tzinfo=None) - today).days > 730:
+                    warnings.append("วันเดินทางห่างเกิน 2 ปี")
                     score -= 0.05
             except Exception:
                 issues.append("รูปแบบวันเดินทางไม่ถูกต้อง")

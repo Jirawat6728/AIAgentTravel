@@ -143,10 +143,22 @@ class ProfileUpdateRequest(BaseModel):
     emergency_contact_relation: Optional[str] = Field(default=None, description="Emergency contact relation: SPOUSE, PARENT, FRIEND, OTHER")
     emergency_contact_email: Optional[str] = Field(default=None, description="Emergency contact email")
     hotel_number_of_guests: Optional[int] = Field(default=1, description="Number of guests (including main guest)")
+    # ที่อยู่ (Address) — ใช้แสดงในหน้าชำระเงิน/โปรไฟล์
+    address_line1: Optional[str] = Field(default=None, description="ที่อยู่ (เลขที่, หมู่, ถนน)")
+    address_line2: Optional[str] = Field(default=None, description="ที่อยู่บรรทัดที่ 2")
+    subDistrict: Optional[str] = Field(default=None, description="ตำบล/แขวง")
+    district: Optional[str] = Field(default=None, description="อำเภอ/เขต")
+    province: Optional[str] = Field(default=None, description="จังหวัด")
+    postal_code: Optional[str] = Field(default=None, description="รหัสไปรษณีย์")
+    country: Optional[str] = Field(default=None, description="ประเทศ (ISO code e.g. TH)")
     # Notification & App preferences (from Settings page)
     preferences: Optional[Dict[str, Any]] = Field(default=None, description="User preferences: notificationsEnabled, bookingNotifications, paymentNotifications, tripChangeNotifications, emailNotifications, etc.")
+    # หนังสือเดินทางหลายเล่ม (Multi-Passport) — แต่ละ element: {id, passport_no, passport_type, passport_issue_date, passport_expiry, ..., status, is_primary}
+    passports: Optional[list] = Field(default=None, description="List of passport entries; supports dual citizenship, multiple types, second passport. Use primary for default at booking.")
+    # วีซ่าหลายประเทศ/หลายประเภท — แต่ละ element: {id, country_code, visa_type, expiry_date, entries: Single|Multiple, linked_passport, status}
+    visa_records: Optional[list] = Field(default=None, description="List of visa records; one person can have multiple visas (multiple countries, multiple types). linked_passport = passport number used for the visa.")
     # ผู้จองร่วม (สมาชิกในครอบครัว) - สำหรับเลือกตอนจองมากกว่า 1 คน
-    family: Optional[list] = Field(default=None, description="List of family members (adult/child) for co-traveler selection: [{id, type, first_name, last_name, date_of_birth?, passport_no?, ...}]")
+    family: Optional[list] = Field(default=None, description="List of family members (adult/child) for co-traveler selection: [{id, type, first_name, last_name, date_of_birth?, passport_no?, passports?, ...}]")
 
 def _sha256_hex(s: str) -> str:
     import hashlib
@@ -557,19 +569,74 @@ async def get_me(request: Request, response: Response):
     Get current user profile from session cookie.
     Returns 200 with {user: {...}} when authenticated, {user: null} when not (no 401).
     Refreshes session cookie to extend expiry.
+    โปรไฟล์ส่วนตัวกับผู้จองร่วม (family) เก็บแยกใน MongoDB
     """
     user_id = request.cookies.get(settings.session_cookie_name)
     if not user_id:
         return {"user": None}
 
     try:
+        from app.services.user_family_service import get_user_with_family
         storage = MongoStorage()
         await storage.connect()
-        users_collection = storage.db["users"]
-        user_data = await users_collection.find_one({"user_id": user_id})
+        user_data = await get_user_with_family(storage.db, user_id)
 
         if not user_data:
             return {"user": None}
+
+        # ✅ ปกติหนังสือเดินทางหลายเล่ม: เติม passports array จาก legacy ถ้ายังไม่มี (user + แต่ละ family member)
+        from app.models.passport import (
+            ensure_passports_from_doc,
+            get_primary_passport,
+            get_active_passports,
+            expiry_warning_6_months,
+        )
+        user_data["passports"] = ensure_passports_from_doc(user_data)
+        primary = get_primary_passport(user_data["passports"])
+        user_data["primary_passport"] = primary
+        warnings = []
+        for p in get_active_passports(user_data["passports"]):
+            msg = expiry_warning_6_months(p)
+            if msg:
+                warnings.append({"passport_id": p.get("id"), "passport_no": p.get("passport_no"), "message": msg})
+        user_data["passport_warnings"] = warnings
+
+        # ✅ วีซ่าหลายประเทศ: เติม visa_records จาก legacy ถ้ายังไม่มี; คำนวณ status; เตือน linked_passport
+        from app.models.visa import (
+            ensure_visa_records_from_doc,
+            get_active_visas,
+            compute_visa_status,
+            get_linked_passport_warning,
+        )
+        user_data["visa_records"] = ensure_visa_records_from_doc(user_data)
+        for v in user_data["visa_records"]:
+            v["status"] = compute_visa_status(v)
+        passport_numbers = [p.get("passport_no") for p in (user_data.get("passports") or []) if p.get("passport_no")]
+        visa_warnings = []
+        for v in get_active_visas(user_data["visa_records"]):
+            msg = get_linked_passport_warning(v, passport_numbers)
+            if msg:
+                visa_warnings.append({"country_code": v.get("country_code"), "linked_passport": v.get("linked_passport"), "message": msg})
+        user_data["visa_warnings"] = visa_warnings
+
+        for member in user_data.get("family") or []:
+            member["passports"] = ensure_passports_from_doc(member)
+            member["primary_passport"] = get_primary_passport(member["passports"])
+            member["passport_warnings"] = []
+            for p in get_active_passports(member["passports"]):
+                msg = expiry_warning_6_months(p)
+                if msg:
+                    member["passport_warnings"].append({"passport_id": p.get("id"), "passport_no": p.get("passport_no"), "message": msg})
+            # วีซ่าหลายประเทศ (ผู้จองร่วม) — pattern เดียวกับผู้จองหลัก
+            member["visa_records"] = ensure_visa_records_from_doc(member)
+            for v in member["visa_records"]:
+                v["status"] = compute_visa_status(v)
+            member_passport_numbers = [p.get("passport_no") for p in (member.get("passports") or []) if p.get("passport_no")]
+            member["visa_warnings"] = []
+            for v in get_active_visas(member["visa_records"]):
+                msg = get_linked_passport_warning(v, member_passport_numbers)
+                if msg:
+                    member["visa_warnings"].append({"country_code": v.get("country_code"), "linked_passport": v.get("linked_passport"), "message": msg})
 
         # Refresh session cookie to extend expiry (keeps user logged in)
         response.set_cookie(
@@ -586,6 +653,12 @@ async def get_me(request: Request, response: Response):
         user_dict = user_model.model_dump()
         if "is_admin" not in user_dict:
             user_dict["is_admin"] = user_data.get("is_admin", False)
+        # ส่งคืน passports, primary_passport, passport_warnings, visa_records, visa_warnings (extra fields)
+        user_dict["passports"] = user_data["passports"]
+        user_dict["primary_passport"] = user_data["primary_passport"]
+        user_dict["passport_warnings"] = user_data["passport_warnings"]
+        user_dict["visa_records"] = user_data["visa_records"]
+        user_dict["visa_warnings"] = user_data["visa_warnings"]
         return {"user": user_dict}
     except Exception as e:
         logger.error(f"Error getting user profile: {e}")
@@ -610,31 +683,81 @@ async def update_profile(request: Request, profile: ProfileUpdateRequest):
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     try:
+        from app.services.user_family_service import save_user_family, get_user_with_family
         storage = MongoStorage()
         await storage.connect()
         users_collection = storage.db["users"]
-        
+
         update_data = {k: v for k, v in profile.model_dump().items() if v is not None}
         if not update_data:
             return {"ok": True}
 
-        result = await users_collection.update_one(
-            {"user_id": user_id},
-            {"$set": update_data}
-        )
+        # แยกโปรไฟล์ส่วนตัวกับผู้จองร่วม — เก็บคนละ collection
+        family_data = update_data.pop("family", None)
 
-        if result.matched_count == 0:
-            raise HTTPException(status_code=404, detail="User not found")
+        # หนังสือเดินทางหลายเล่ม: ถ้ามี passports ให้ sync legacy fields จาก primary (เพื่อ backward compat)
+        passports_data = update_data.get("passports")
+        if passports_data is not None and isinstance(passports_data, list):
+            from app.models.passport import get_primary_passport
+            primary = get_primary_passport(passports_data)
+            if primary:
+                update_data["passport_no"] = primary.get("passport_no")
+                update_data["passport_expiry"] = primary.get("passport_expiry")
+                update_data["passport_issue_date"] = primary.get("passport_issue_date")
+                update_data["passport_issuing_country"] = primary.get("passport_issuing_country")
+                update_data["passport_given_names"] = primary.get("passport_given_names")
+                update_data["passport_surname"] = primary.get("passport_surname")
+                update_data["passport_type"] = primary.get("passport_type", "N")
+                update_data["place_of_birth"] = primary.get("place_of_birth")
+                update_data["nationality"] = primary.get("nationality")
+            else:
+                update_data["passport_no"] = None
+                update_data["passport_expiry"] = None
+                update_data["passport_issue_date"] = None
+                update_data["passport_issuing_country"] = None
+                update_data["passport_given_names"] = None
+                update_data["passport_surname"] = None
+                update_data["place_of_birth"] = None
 
-        # Get updated user
-        user_data = await users_collection.find_one({"user_id": user_id})
+        # วีซ่าหลายประเทศ: ถ้ามี visa_records ให้บันทึก; sync แรกที่ active ไป legacy (backward compat)
+        visa_records_data = update_data.get("visa_records")
+        if visa_records_data is not None and isinstance(visa_records_data, list):
+            from app.models.visa import get_active_visas, compute_visa_status
+            for v in visa_records_data:
+                v["status"] = compute_visa_status(v)
+            update_data["visa_records"] = visa_records_data
+            active_visas = get_active_visas(visa_records_data)
+            if active_visas:
+                first = active_visas[0]
+                update_data["visa_type"] = first.get("visa_type")
+                update_data["visa_number"] = first.get("visa_number")
+                update_data["visa_issuing_country"] = first.get("country_code")
+                update_data["visa_expiry_date"] = first.get("expiry_date")
+                update_data["visa_entry_type"] = "M" if (first.get("entries") or "").strip() == "Multiple" else "S"
+                update_data["visa_purpose"] = first.get("purpose") or "T"
+            else:
+                update_data["visa_type"] = None
+                update_data["visa_number"] = None
+                update_data["visa_issuing_country"] = None
+                update_data["visa_expiry_date"] = None
+                update_data["visa_entry_type"] = "S"
+                update_data["visa_purpose"] = "T"
 
-        # Notification: อัปเดตโปรไฟล์ / เพิ่ม co-traveler
-        try:
-            from app.services.notification_service import create_and_push_notification
-            if "family" in update_data:
-                # ตรวจว่าเพิ่ม family member ใหม่หรือไม่
-                new_family = update_data["family"] or []
+        # 1) อัปเดตโปรไฟล์ส่วนตัวใน users (ไม่มี family)
+        if update_data:
+            result = await users_collection.update_one(
+                {"user_id": user_id},
+                {"$set": update_data}
+            )
+            if result.matched_count == 0:
+                raise HTTPException(status_code=404, detail="User not found")
+
+        # 2) อัปเดตผู้จองร่วมใน user_family
+        if family_data is not None:
+            await save_user_family(storage.db, user_id, family_data)
+            try:
+                from app.services.notification_service import create_and_push_notification
+                new_family = family_data or []
                 notif_msg = f"เพิ่มผู้จองร่วม {len(new_family)} คนเรียบร้อยแล้ว" if new_family else "อัปเดตรายชื่อผู้จองร่วมเรียบร้อยแล้ว"
                 await create_and_push_notification(
                     db=storage.db,
@@ -644,22 +767,138 @@ async def update_profile(request: Request, profile: ProfileUpdateRequest):
                     message=notif_msg,
                     metadata={"family_count": len(new_family)},
                 )
-            elif any(k in update_data for k in ("full_name", "first_name", "last_name", "phone", "avatar_url")):
-                await create_and_push_notification(
-                    db=storage.db,
-                    user_id=user_id,
-                    notif_type="account_profile_updated",
-                    title="อัปเดตโปรไฟล์สำเร็จ",
-                    message="ข้อมูลโปรไฟล์ของคุณถูกอัปเดตเรียบร้อยแล้ว",
-                )
-        except Exception:
-            pass
+            except Exception:
+                pass
 
+        user_data = await get_user_with_family(storage.db, user_id)
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
         return {"ok": True, "user": User(**user_data).model_dump()}
 
     except Exception as e:
         logger.error(f"Error updating profile: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ── ผู้จองร่วม (Family) API — แยกเหมือน saved-cards ──────────────────────
+
+class FamilyMemberBody(BaseModel):
+    """Body for add/update family member (co-traveler)."""
+    id: Optional[str] = None
+    type: str = Field(..., description="adult or child")
+    first_name: str = Field(..., min_length=1)
+    last_name: str = Field(..., min_length=1)
+    first_name_th: Optional[str] = None
+    last_name_th: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    gender: Optional[str] = None
+    national_id: Optional[str] = None
+    passport_no: Optional[str] = None
+    passport_expiry: Optional[str] = None
+    passport_issue_date: Optional[str] = None
+    passport_issuing_country: Optional[str] = None
+    passport_given_names: Optional[str] = None
+    passport_surname: Optional[str] = None
+    place_of_birth: Optional[str] = None
+    passport_type: Optional[str] = None
+    nationality: Optional[str] = None
+    address_line1: Optional[str] = None
+    subDistrict: Optional[str] = None
+    district: Optional[str] = None
+    province: Optional[str] = None
+    postal_code: Optional[str] = None
+    country: Optional[str] = None
+
+    model_config = {"extra": "allow"}  # รองรับ address_option, subDistrict, district ฯลฯ จาก frontend
+
+
+@router.get("/family")
+async def list_family(request: Request):
+    """รายการผู้จองร่วม (เหมือน GET /saved-cards)"""
+    from app.core.security import extract_user_id_from_request
+    from app.services.user_family_service import get_user_family
+    user_id = extract_user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        storage = MongoStorage()
+        await storage.connect()
+        family = await get_user_family(storage.db, user_id)
+        return {"ok": True, "family": family}
+    except Exception as e:
+        logger.error(f"list_family failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/family")
+async def add_family_member_api(request: Request, body: FamilyMemberBody):
+    """เพิ่มผู้จองร่วม 1 คน (เหมือน POST /saved-cards)"""
+    from app.core.security import extract_user_id_from_request
+    from app.services.user_family_service import add_family_member
+    import uuid
+    user_id = extract_user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        member = body.model_dump(exclude_none=False)
+        member["id"] = body.id or str(uuid.uuid4())
+        storage = MongoStorage()
+        await storage.connect()
+        family = await add_family_member(storage.db, user_id, member)
+        # Notification
+        try:
+            from app.services.notification_service import create_and_push_notification
+            await create_and_push_notification(
+                db=storage.db,
+                user_id=user_id,
+                notif_type="account_cotraveler_added",
+                title="อัปเดตผู้จองร่วม",
+                message=f"เพิ่มผู้จองร่วมเรียบร้อยแล้ว",
+                metadata={"family_count": len(family)},
+            )
+        except Exception:
+            pass
+        return {"ok": True, "family": family}
+    except Exception as e:
+        logger.error(f"add_family_member failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/family/{member_id}")
+async def update_family_member_api(request: Request, member_id: str, body: FamilyMemberBody):
+    """อัปเดตผู้จองร่วมตาม id (เหมือน PUT /saved-cards/:id)"""
+    from app.core.security import extract_user_id_from_request
+    from app.services.user_family_service import update_family_member
+    user_id = extract_user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        member = body.model_dump(exclude_none=False)
+        storage = MongoStorage()
+        await storage.connect()
+        family = await update_family_member(storage.db, user_id, member_id, member)
+        return {"ok": True, "family": family}
+    except Exception as e:
+        logger.error(f"update_family_member failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/family/{member_id}")
+async def delete_family_member_api(request: Request, member_id: str):
+    """ลบผู้จองร่วมตาม id (เหมือน DELETE /saved-cards/:id)"""
+    from app.core.security import extract_user_id_from_request
+    from app.services.user_family_service import delete_family_member
+    user_id = extract_user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        storage = MongoStorage()
+        await storage.connect()
+        family = await delete_family_member(storage.db, user_id, member_id)
+        return {"ok": True, "family": family}
+    except Exception as e:
+        logger.error(f"delete_family_member failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/change-password")

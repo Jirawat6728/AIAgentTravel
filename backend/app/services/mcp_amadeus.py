@@ -434,39 +434,13 @@ class AmadeusMCP:
             original_results = [r for r in results if not r.get("_fallback_check_in")]
             display_results = original_results[:3] + fallback_results[:2]
 
-            formatted = []
-            for idx, hotel in enumerate(display_results):
-                try:
-                    hotel_data = hotel.get("hotel", {})
-                    offers = hotel.get("offers", [])
-                    if not offers:
-                        continue
-                    first_offer = offers[0]
-                    price = first_offer.get("price", {})
-                    formatted.append({
-                        "option_number": idx + 1,
-                        "name": hotel_data.get("name", "Unknown Hotel"),
-                        "rating": hotel_data.get("rating", 0),
-                        "address": (
-                            hotel_data.get("address", {}).get("lines", [""])[0]
-                            if hotel_data.get("address", {}).get("lines")
-                            else ""
-                        ),
-                        "price": {"total": price.get("total", "0"), "currency": price.get("currency", "THB")},
-                        "room_type": (
-                            first_offer.get("room", {}).get("typeEstimated", {}).get("category", "Standard")
-                        ),
-                        "_fallback": bool(hotel.get("_fallback_check_in")),
-                    })
-                except Exception as e:
-                    logger.warning(f"Error formatting hotel {idx + 1}: {e}")
-                    continue
-
+            # Return full raw Amadeus objects so DataAggregator can run _normalize_and_sync_hotel
+            # (images, amenities, check-in/out, price breakdown) instead of minimal formatted list
             return {
                 "success": True,
                 "tool": "search_hotels",
-                "results_count": len(formatted),
-                "hotels": formatted,
+                "results_count": len(display_results),
+                "hotels": display_results,
                 "search_params": {
                     "location": location,
                     "check_in": check_in,

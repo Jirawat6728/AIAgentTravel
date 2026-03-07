@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { formatPriceInThb } from '../../utils/currency';
 import './PaymentPopup.css';
 
 function formatThaiDate(isoDate) {
@@ -16,11 +17,7 @@ function formatThaiDate(isoDate) {
 }
 
 function formatCurrency(amount, currency = 'THB') {
-  return new Intl.NumberFormat('th-TH', {
-    style: 'currency',
-    currency: currency,
-    minimumFractionDigits: 0,
-  }).format(amount);
+  return formatPriceInThb(amount, currency);
 }
 
 const PAYMENT_METHODS = [

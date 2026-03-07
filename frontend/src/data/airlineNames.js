@@ -1,0 +1,235 @@
+/**
+ * IATA code → ชื่อเต็มสายการบิน
+ * ใช้ร่วมกันในทุก component ที่แสดงเที่ยวบิน
+ */
+
+export const AIRLINE_NAMES = {
+  // Thailand
+  TG: 'Thai Airways',
+  FD: 'Scoot',
+  XJ: 'Thai AirAsia X',
+  PG: 'Bangkok Airways',
+  VZ: 'Thai Vietjet',
+  WE: 'Thai Smile',
+  DD: 'Nok Air',
+  SL: 'Thai Lion Air',
+  OD: 'Malindo Air',
+  QV: 'Lao Airlines',
+  '8M': 'Myanmar Airways International',
+  FY: 'Firefly',
+  '2Y': 'Air Andaman',
+
+  // Singapore & Malaysia
+  SQ: 'Singapore Airlines',
+  MI: 'SilkAir',
+  TR: 'Scoot',
+  '3K': 'Jetstar Asia',
+  MH: 'Malaysia Airlines',
+  AK: 'AirAsia',
+  D7: 'AirAsia X',
+  QD: 'AirAsia',
+  ZG: 'AirAsia',
+  I5: 'AirAsia India',
+
+  // Indonesia
+  GA: 'Garuda Indonesia',
+  QZ: 'Lion Air',
+  JT: 'Lion Air',
+  SJ: 'Sriwijaya Air',
+  QG: 'Citilink',
+  ID: 'Batik Air',
+  IU: 'Super Air Jet',
+
+  // Vietnam
+  VN: 'Vietnam Airlines',
+  VJ: 'VietJet Air',
+  QH: 'Bamboo Airways',
+  BL: 'Jetstar Pacific',
+
+  // Philippines
+  PR: 'Philippine Airlines',
+  Z2: 'Cebu Pacific',
+  '5J': 'Cebu Pacific',
+
+  // Japan
+  JL: 'Japan Airlines',
+  NH: 'All Nippon Airways',
+  NQ: 'Air Japan',
+  MM: 'Peach Aviation',
+  GK: 'Jetstar Japan',
+  JQ: 'Jetstar',
+  HD: 'AIRDO',
+
+  // Korea
+  KE: 'Korean Air',
+  OZ: 'Asiana Airlines',
+  BX: 'Air Busan',
+  TW: "T'way Air",
+  '7C': 'Jeju Air',
+  ZE: 'Eastar Jet',
+
+  // China & Hong Kong
+  CA: 'Air China',
+  CZ: 'China Southern Airlines',
+  MU: 'China Eastern Airlines',
+  FM: 'Shanghai Airlines',
+  MF: 'Xiamen Airlines',
+  '3U': 'Sichuan Airlines',
+  '9C': 'Spring Airlines',
+  HO: 'Juneyao Airlines',
+  AQ: '9 Air',
+  CX: 'Cathay Pacific',
+  KA: 'Cathay Dragon',
+  HX: 'Hong Kong Airlines',
+  UO: 'Hong Kong Express',
+  NX: 'Air Macau',
+  CI: 'China Airlines',
+
+  // Taiwan
+  BR: 'EVA Air',
+
+  // India
+  UK: 'Vistara',
+  '6E': 'IndiGo',
+  SG: 'SpiceJet',
+  AI: 'Air India',
+  IX: 'Air India Express',
+  I9: 'Air India Regional',
+  G8: 'Go First',
+  W2: 'Flexflight',
+  LB: 'Air Costa',
+
+  // Middle East
+  EK: 'Emirates',
+  QR: 'Qatar Airways',
+  EY: 'Etihad',
+  FZ: 'flydubai',
+  GF: 'Gulf Air',
+  WY: 'Oman Air',
+  KU: 'Kuwait Airways',
+  RJ: 'Royal Jordanian',
+  SV: 'Saudia',
+  XY: 'Flynas',
+  PC: 'Pegasus Airlines',
+  TK: 'Turkish Airlines',
+  VF: 'AJet',
+  '3O': 'Air Arabia Maroc',
+  G9: 'Air Arabia',
+  '5W': 'Wizz Air Abu Dhabi',
+
+  // Central Asia
+  KC: 'Air Astana',
+  HY: 'Uzbekistan Airways',
+
+  // Russia & CIS
+  SU: 'Aeroflot',
+  S7: 'S7 Airlines',
+  U6: 'Ural Airlines',
+
+  // Europe
+  BA: 'British Airways',
+  AF: 'Air France',
+  LH: 'Lufthansa',
+  KL: 'KLM',
+  AY: 'Finnair',
+  IB: 'Iberia',
+  LX: 'Swiss International',
+  OS: 'Austrian Airlines',
+  SK: 'Scandinavian Airlines',
+  TP: 'TAP Portugal',
+  UX: 'Air Europa',
+  SN: 'Brussels Airlines',
+  EI: 'Aer Lingus',
+  JU: 'Air Serbia',
+  A3: 'Aegean Airlines',
+  W6: 'Wizz Air',
+  U2: 'easyJet',
+  FR: 'Ryanair',
+
+  // North America
+  UA: 'United Airlines',
+  AA: 'American Airlines',
+  DL: 'Delta Air Lines',
+  WN: 'Southwest Airlines',
+  B6: 'JetBlue',
+  AS: 'Alaska Airlines',
+  NK: 'Spirit Airlines',
+  F9: 'Frontier Airlines',
+  AC: 'Air Canada',
+  RV: 'Air Canada Rouge',
+
+  // Oceania
+  QF: 'Qantas',
+  NZ: 'Air New Zealand',
+
+  // Brunei & Others
+  BI: 'Royal Brunei Airlines',
+  UL: 'SriLankan Airlines',
+  H1: 'Hahn Air',
+};
+
+/**
+ * IATA → โดเมนเว็บ (สำหรับโลโก้ Clearbit/Google Favicon)
+ */
+export const AIRLINE_DOMAINS = {
+  TG: 'thaiairways.com',
+  FD: 'flyscoot.com',
+  XJ: 'thaiairasia.com',
+  PG: 'bangkokair.com',
+  VZ: 'thaivietjet.com',
+  WE: 'thaismileair.com',
+  DD: 'nokair.com',
+  SL: 'thailionair.com',
+  OD: 'malindoair.com',
+  QV: 'laoairlines.com',
+  '8M': 'maiair.com',
+  FY: 'fireflyz.com.my',
+  SQ: 'singaporeair.com',
+  TR: 'scoot.com',
+  '3K': 'jetstar.com',
+  MH: 'malaysiaairlines.com',
+  AK: 'airasia.com',
+  D7: 'airasia.com',
+  GA: 'garuda-indonesia.com',
+  QZ: 'lionair.co.id',
+  JT: 'lionair.co.id',
+  VN: 'vietnamairlines.com',
+  VJ: 'vietjetair.com',
+  QH: 'bambooairways.com',
+  PR: 'philippineairlines.com',
+  Z2: 'cebupacificair.com',
+  '5J': 'cebupacificair.com',
+  JL: 'jal.co.jp',
+  NH: 'ana.co.jp',
+  KE: 'koreanair.com',
+  OZ: 'flyasiana.com',
+  CA: 'airchina.com.cn',
+  CZ: 'csair.com',
+  MU: 'ceair.com',
+  FM: 'shanghai-air.com',
+  MF: 'xiamenair.com',
+  CX: 'cathaypacific.com',
+  KA: 'cathaydragon.com',
+  BR: 'evaair.com',
+  CI: 'china-airlines.com',
+  EK: 'emirates.com',
+  QR: 'qatarairways.com',
+  EY: 'etihad.com',
+  FZ: 'flydubai.com',
+  GF: 'gulfair.com',
+  TK: 'turkishairlines.com',
+  BA: 'britishairways.com',
+  AF: 'airfrance.com',
+  LH: 'lufthansa.com',
+  KL: 'klm.com',
+  UA: 'united.com',
+  AA: 'aa.com',
+  DL: 'delta.com',
+  QF: 'qantas.com',
+  NZ: 'airnewzealand.com',
+  H1: 'hahnair.com',
+  UK: 'airvistara.com',
+  '6E': 'goindigo.in',
+  SG: 'spicejet.com',
+  W2: 'flexflight.com',
+};

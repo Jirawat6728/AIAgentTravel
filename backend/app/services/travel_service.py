@@ -749,7 +749,7 @@ class TravelOrchestrator:
     # Core Data Fetchers (Amadeus REST)
     # -------------------------------------------------------------------------
     
-    async def get_flights(self, origin: str = "BKK", destination: str = "NRT", departure_date: str = None, adults: int = 1, non_stop: bool = False, cabin_class: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_flights(self, origin: str = "BKK", destination: str = "NRT", departure_date: str = None, adults: int = 1, children: int = 0, infants: int = 0, non_stop: bool = False, cabin_class: Optional[str] = None, return_date: str = None) -> List[Dict[str, Any]]:
         """Fetch Flight Offers with flexible parameters
         
         Args:
@@ -757,8 +757,11 @@ class TravelOrchestrator:
             destination: Destination city name or IATA code
             departure_date: Departure date in YYYY-MM-DD format
             adults: Number of adult passengers
+            children: Number of child passengers (2-11)
+            infants: Number of infant passengers (under 2)
             non_stop: If True, only return non-stop flights
             cabin_class: Cabin class (ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST)
+            return_date: Return date in YYYY-MM-DD format (round-trip if provided)
         """
         token = await self._get_amadeus_token()
         
@@ -797,6 +800,21 @@ class TravelOrchestrator:
             )
             return []
         
+        # Normalize return_date (Buddhist year → Christian)
+        norm_return_date = None
+        if return_date:
+            rd = str(return_date).strip()
+            try:
+                rparts = rd.split("-")
+                if len(rparts) == 3:
+                    ry, rm, rday = int(rparts[0]), int(rparts[1]), int(rparts[2])
+                    if ry > 2100:
+                        ry = ry - 543
+                    norm_return_date = f"{ry:04d}-{rm:02d}-{rday:02d}"
+                    logger.info(f"📅 Return date: {norm_return_date}")
+            except (ValueError, IndexError):
+                pass
+
         params = {
             "originLocationCode": origin_code,
             "destinationLocationCode": dest_code,
@@ -806,6 +824,13 @@ class TravelOrchestrator:
             "nonStop": "true" if non_stop else "false",
             "currencyCode": "THB"
         }
+        if children > 0:
+            params["children"] = children
+        if infants > 0:
+            params["infants"] = infants
+        if norm_return_date:
+            params["returnDate"] = norm_return_date
+            logger.info(f"✈️ Round-trip search: {origin_code} → {dest_code}, depart {date}, return {norm_return_date}")
         
         # Add cabin class if specified
         if cabin_class:
@@ -828,8 +853,8 @@ class TravelOrchestrator:
                 search_date = datetime.strptime(date, "%Y-%m-%d")
                 today = datetime.now()
                 days_ahead = (search_date - today).days
-                max_days_ahead = 330  # ~11 months
-                
+                max_days_ahead = 730  # 2 years - ระบบรองรับจองระยะไกล/ข้ามปี
+
                 if days_ahead < 0:
                     logger.warning(f"⚠️ Search date {date} is in the past ({-days_ahead} days ago)")
                 elif days_ahead > max_days_ahead:
@@ -987,7 +1012,7 @@ class TravelOrchestrator:
                 f"   Meta: {meta}\n"
                 f"   Errors: {full_response.get('errors')}\n"
                 f"   Possible causes:\n"
-                f"   1. Date too far in future (Amadeus supports ~11 months ahead)\n"
+                f"   1. Date too far in future (Amadeus may have limited data beyond ~1 year)\n"
                 f"   2. No flights available for this route/date\n"
                 f"   3. IATA codes may be incorrect: {origin_code} or {dest_code}\n"
                 f"   4. Route not serviced by airlines in Amadeus database\n"
@@ -1207,6 +1232,12 @@ class TravelOrchestrator:
                     use_booking_env=False,  # Search uses production
                 )
                 data = resp.json().get("data", []) or []
+                # ✅ Inject city_code for Google sync (ภาพ/รีวิว) ใน data_aggregator
+                city_for_sync = codes_to_try[0] if codes_to_try else ""
+                for item in data:
+                    item.setdefault("_debug", {})
+                    if "_debug" in item and not item["_debug"].get("city_code_used"):
+                        item["_debug"]["city_code_used"] = f"city:{city_for_sync}" if city_for_sync else ""
                 
                 # ✅ Log hotel offers results
                 if data:
@@ -1262,8 +1293,8 @@ class TravelOrchestrator:
                             check_in_dt = datetime.strptime(check_in, "%Y-%m-%d")
                             today = datetime.now()
                             days_ahead = (check_in_dt - today).days
-                            max_days = 330
-                            
+                            max_days = 730  # 2 years - ระบบรองรับจองระยะไกล/ข้ามปี
+
                             date_info = ""
                             if days_ahead < 0:
                                 date_info = f" (date is {-days_ahead} days in the past)"
@@ -1275,7 +1306,7 @@ class TravelOrchestrator:
                         logger.warning(
                             f"⚠️ No hotel offers found for hotelIds={hotel_ids} (check_in={check_in}, check_out={check_out}, guests={guests}){date_info}\n"
                             f"   Possible causes:\n"
-                            f"   1. Date too far in future (Amadeus supports ~11 months ahead)\n"
+                            f"   1. Date too far in future (Amadeus may have limited data beyond ~1 year)\n"
                             f"   2. No availability for these dates\n"
                             f"   3. Hotels may not have offers loaded in Amadeus for this period"
                         )
@@ -1349,8 +1380,23 @@ class TravelOrchestrator:
 
     async def get_hotels_google(self, location_name: str, limit: int = 10, radius_m: int = 8000) -> List[Dict[str, Any]]:
         """
-        Fallback hotel discovery using Google Places (not bookable via Amadeus).
-        Returns rich place details to be shown when Amadeus sandbox can't provide results.
+        Fallback accommodation discovery - delegates to get_accommodations_google.
+        Kept for backward compatibility.
+        """
+        return await self.get_accommodations_google(location_name, limit, radius_m)
+
+    async def get_accommodations_google(
+        self, location_name: str, limit: int = 15, radius_m: int = 8000
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for all accommodation types using Google Places:
+        โรงแรม (hotels), รีสอร์ท (resorts), เกสต์เฮาส์ (guesthouses),
+        บังกะโล (bungalows), ห้องเช่า (rentals), โฮสเทล (hostels), วิลลา (villas), etc.
+
+        Uses both:
+        1) Nearby Search (type=lodging) - hotels, motels, resorts, hostels, B&Bs
+        2) Text Search - broader query for guesthouses, bungalows, villas, vacation rentals
+        Results are merged and deduplicated by place_id.
         """
         if not self.gmaps:
             raise AgentException("Google Maps API not configured")
@@ -1359,26 +1405,49 @@ class TravelOrchestrator:
         lat, lng = loc["lat"], loc["lng"]
 
         loop = asyncio.get_running_loop()
-
-        def _nearby():
-            return self.gmaps.places_nearby(location=(lat, lng), radius=radius_m, type="lodging")
-
-        nearby = await loop.run_in_executor(None, _nearby)
-        results = (nearby or {}).get("results", [])[:limit]
-
-        # NOTE: To keep this robust (and avoid Places Details field mismatches),
-        # we rely on Nearby Search results which already include name/rating/photos/vicinity.
+        seen_ids: set[str] = set()
         places: List[Dict[str, Any]] = []
-        for r in results:
+
+        def _normalize(r: dict) -> None:
+            pid = r.get("place_id")
+            if not pid or pid in seen_ids:
+                return
+            seen_ids.add(pid)
             place = dict(r)
             place["_resolved_city"] = loc.get("city")
             place["_resolved_country"] = loc.get("country_code")
-            # Normalize address key for downstream
             if "formatted_address" not in place and place.get("vicinity"):
                 place["formatted_address"] = place.get("vicinity")
             places.append(place)
 
-        return places
+        # 1) Nearby: lodging (hotels, motels, resorts, hostels, B&Bs)
+        def _nearby_lodging():
+            return self.gmaps.places_nearby(
+                location=(lat, lng), radius=radius_m, type="lodging"
+            )
+
+        nearby = await loop.run_in_executor(None, _nearby_lodging)
+        for r in (nearby or {}).get("results", [])[:limit]:
+            _normalize(r)
+
+        # 2) Text Search: broader accommodation types (guesthouse, bungalow, villa, rental)
+        query_broad = f"ที่พัก เกสต์เฮาส์ บังกะโล รีสอร์ท วิลลา {location_name}"
+        try:
+            def _text_search():
+                return self.gmaps.places(
+                    query=query_broad,
+                    location=(lat, lng),
+                    radius=radius_m,
+                    language="th",
+                )
+
+            text_res = await loop.run_in_executor(None, _text_search)
+            for r in (text_res or {}).get("results", [])[:limit]:
+                _normalize(r)
+        except Exception as e:
+            logger.debug(f"Google Text Search for accommodations failed: {e}")
+
+        return places[:limit]
 
     async def get_transfers(self, airport_code: str, address: str) -> List[Dict[str, Any]]:
         """Fetch Transfer Offers (Legacy: Code to Address)"""

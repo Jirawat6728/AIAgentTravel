@@ -4,6 +4,7 @@
  */
 import React from 'react';
 import { formatMoney, formatDuration } from './planChoiceCardUtils';
+import { formatPriceInThb } from '../../utils/currency';
 import './PlanChoiceCard.css';
 
 function transportTypeLabel(transport, car) {
@@ -31,7 +32,7 @@ export default function PlanChoiceCardTransfer({ choice, onSelect }) {
   const resolvedTotal = typeof total_price === 'number' ? total_price : typeof price === 'number' ? price : (typeof transportPrice === 'number' ? transportPrice : null);
   const hasRealPrice = resolvedTotal != null && Number(resolvedTotal) > 0;
   const displayTotalPrice = hasRealPrice
-    ? `${displayCurrency} ${Number(resolvedTotal).toLocaleString('th-TH')}`
+    ? formatPriceInThb(resolvedTotal, displayCurrency)
     : (total_price_text || 'ราคาต้องสอบถาม');
 
   const hasContent = ground_transport || transport || car;
@@ -56,9 +57,11 @@ export default function PlanChoiceCardTransfer({ choice, onSelect }) {
         </div>
         {tags && Array.isArray(tags) && tags.length > 0 && (
           <div className="plan-card-tags">
-            {[...new Set(tags)].map((tag, idx) => (
-              <span key={idx} className="plan-tag-pill">{tag}</span>
-            ))}
+            {[...new Set(tags)]
+              .filter(tag => !['Amadeus', 'ราคาจริง', 'จองได้ทันที'].includes(tag))
+              .map((tag, idx) => (
+                <span key={idx} className="plan-tag-pill">{tag}</span>
+              ))}
           </div>
         )}
       </div>

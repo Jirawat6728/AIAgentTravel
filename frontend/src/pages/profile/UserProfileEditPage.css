@@ -392,6 +392,12 @@
   font-weight: 500;
 }
 
+.passport-toggle-btn:hover:not(.active) {
+  border-color: #94a3b8 !important;
+  background: #f1f5f9 !important;
+  color: #475569 !important;
+}
+
 .form-actions {
   display: flex;
   gap: 14px;
@@ -613,5 +619,150 @@
   .btn-save {
     width: 100%;
   }
+}
+
+/* ========== Dark theme (แก้ไขโปรไฟล์) — แก้บั๊คธีมมืด ========== */
+.profile-edit-wrapper:has(.settings-content-area[data-theme="dark"]) {
+  background: var(--content-bg, #1e1e2e);
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .settings-sidebar,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .settings-content {
+  background: var(--content-bg-card, #2d2d3d);
+  border-color: var(--content-border, #3f3f46);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .settings-sidebar h2,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-section-title,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .profile-edit-header h2 {
+  color: var(--content-text, #e4e4e7);
+  border-bottom-color: var(--content-border, #3f3f46);
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .settings-nav-item {
+  color: var(--content-text-muted, #a1a1aa);
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .settings-nav-item:hover {
+  background: var(--content-bg-hover, #3d3d4d);
+  color: var(--content-text, #e4e4e7);
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .settings-nav-item.active {
+  background: #3b82f6;
+  color: #fff;
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-label,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-hint,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .profile-edit-subtitle {
+  color: var(--content-text-muted, #a1a1aa);
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-section {
+  background: var(--content-bg-hover, #3d3d4d);
+  border-color: var(--content-border, #3f3f46);
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-input,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-select,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-textarea {
+  background: var(--content-bg, #1e1e2e) !important;
+  border-color: var(--content-border, #3f3f46);
+  color: #e4e4e7 !important;
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-input::placeholder,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-textarea::placeholder {
+  color: var(--content-text-muted, #a1a1aa);
+}
+
+/* ให้ข้อมูลที่พิมพ์/ที่แสดงใน input มองเห็นชัดในธีมมืด (รวม autofill) */
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-input:-webkit-autofill,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-input:-webkit-autofill:hover,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #e4e4e7 !important;
+  -webkit-box-shadow: 0 0 0 1000px #1e1e2e inset !important;
+  box-shadow: 0 0 0 1000px #1e1e2e inset !important;
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-input:focus,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-select:focus {
+  background: var(--content-bg, #1e1e2e) !important;
+  color: #e4e4e7 !important;
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-select option {
+  background: #1e1e2e;
+  color: #e4e4e7;
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-input[readonly],
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-input.form-input-readonly {
+  background: var(--content-bg-hover, #3d3d4d) !important;
+  color: #e4e4e7 !important;
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .profile-edit-content-header .btn-secondary,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .btn-secondary {
+  background: var(--content-bg-hover, #3d3d4d);
+  border-color: var(--content-border, #3f3f46);
+  color: var(--content-text, #e4e4e7);
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .profile-edit-content-header .btn-secondary:hover,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .btn-secondary:hover {
+  background: var(--content-bg, #1e1e2e);
+  color: var(--content-text, #e4e4e7);
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .btn-back:hover {
+  background: var(--content-bg-hover, #3d3d4d);
+  color: var(--content-text, #e4e4e7);
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .settings-content::-webkit-scrollbar-track {
+  background: var(--content-bg-hover, #3d3d4d);
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .settings-content::-webkit-scrollbar-thumb {
+  background: var(--content-border, #3f3f46);
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .settings-sidebar::-webkit-scrollbar-track {
+  background: var(--content-bg-hover, #3d3d4d);
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .settings-sidebar::-webkit-scrollbar-thumb {
+  background: var(--content-border, #3f3f46);
+}
+
+/* ข้อความอธิบาย / คำแนะนำ (p, span) — ให้มองเห็นในธีมมืด แทน inline color #6b7280, #374151 */
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .settings-content p {
+  color: var(--content-text-muted, #a1a1aa) !important;
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .form-section span,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .settings-content span[style*="color"] {
+  color: var(--content-text-muted, #a1a1aa) !important;
+}
+
+/* กล่องคำอธิบาย (พื้น #f9fafb) */
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .settings-content div[style*="background: #f9fafb"],
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .settings-content div[style*="background:#f9fafb"] {
+  background: var(--content-bg-hover, #3d3d4d) !important;
+  color: var(--content-text-muted, #a1a1aa) !important;
+}
+
+/* การ์ดผู้จองร่วม / รายการในหน้าแก้ไขโปรไฟล์ */
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .summary-k,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .trip-item-title {
+  color: var(--content-text, #e4e4e7);
+}
+
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .summary-v,
+.profile-edit-wrapper .settings-content-area[data-theme="dark"] .trip-item-sub {
+  color: var(--content-text-muted, #a1a1aa);
 }
 

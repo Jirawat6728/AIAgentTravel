@@ -31,8 +31,18 @@ def _get_queues(user_id: str) -> List[asyncio.Queue]:
 
 async def push_notification_event(user_id: str, notification: dict):
     """
-    เรียกจาก booking.py หลัง insert_one เพื่อ push event ไปยัง SSE subscribers ทันที
+    Push event ไปยัง SSE subscribers ของเจ้าของการแจ้งเตือนเท่านั้น
+    ใช้ user_id ใน notification เป็นหลัก เพื่อไม่ให้แจ้งเตือนข้ามไปยัง user อื่น
     """
+    target_uid = (notification or {}).get("user_id")
+    if target_uid and target_uid != user_id:
+        logger.warning(
+            "push_notification_event user_id mismatch: passed=%s notification.user_id=%s, using notification owner",
+            user_id, target_uid
+        )
+        user_id = target_uid
+    if not user_id:
+        return
     queues = _get_queues(user_id)
     if not queues:
         return
@@ -43,7 +53,6 @@ async def push_notification_event(user_id: str, notification: dict):
             q.put_nowait(payload)
         except asyncio.QueueFull:
             dead.append(q)
-    # ลบ queue ที่เต็ม (client ตายแล้ว)
     for q in dead:
         try:
             _sse_subscribers[user_id].remove(q)
@@ -151,9 +160,17 @@ async def list_notifications(request: Request):
 async def notification_stream(request: Request):
     """
     SSE endpoint — client subscribe แล้วรับ push ทันทีเมื่อมี notification ใหม่
-    ใช้แทน polling ทุก 60 วินาที
+    ใช้เฉพาะ user ปัจจุบันจาก session/cookie หรือ X-User-ID (ไม่ใช้ query _uid เป็นหลัก เพื่อความปลอดภัย)
     """
     user_id = extract_user_id_from_request(request)
+    # ถ้ามี _uid ใน query ใช้ตรวจสอบเท่านั้น — ต้องตรงกับ user ที่ authenticate มิฉะนั้นไม่ subscribe
+    query_uid = request.query_params.get("_uid") or request.query_params.get("user_id")
+    if query_uid and query_uid.strip() and query_uid.strip() != user_id:
+        logger.warning("notification_stream: query _uid does not match authenticated user, rejecting")
+        return StreamingResponse(
+            iter(["data: {\"type\":\"error\",\"message\":\"user_mismatch\"}\n\n"]),
+            media_type="text/event-stream"
+        )
     if not user_id:
         return StreamingResponse(
             iter(["data: {\"type\":\"error\",\"message\":\"unauthenticated\"}\n\n"]),
@@ -162,7 +179,6 @@ async def notification_stream(request: Request):
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=50)
 
-    # ลงทะเบียน subscriber
     if user_id not in _sse_subscribers:
         _sse_subscribers[user_id] = []
     _sse_subscribers[user_id].append(queue)

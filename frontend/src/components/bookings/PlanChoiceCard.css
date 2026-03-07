@@ -71,7 +71,7 @@
   /* ✅ FORCE scroll behavior */
   overflow-x: auto !important; 
   overflow-y: hidden;
-  align-items: stretch; /* ✅ Ensure all cards have equal height */
+  align-items: flex-start; /* ✅ การ์ดยืดหดตามข้อมูล — ไม่บังคับให้สูงเท่ากัน */
   gap: clamp(10px, 1.5vw, 14px);
   margin-top: clamp(8px, 1vw, 12px);
   width: 100%;
@@ -370,4 +370,21 @@
   background: #ffffff;
   color: #111111 !important;
   /* Removed transform to reduce GPU usage */
+}
+
+/* ✅ การ์ดยืดหดตามข้อมูล — แอนิเมชัน expand/collapse */
+.plan-card-details-expandable {
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  margin-top: 0;
+  transition: max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.25s ease,
+              margin-top 0.3s ease;
+}
+
+.plan-card-details-expandable.is-expanded {
+  max-height: 2000px; /* ครอบคลุมรายละเอียดเที่ยวบินหลายขา */
+  opacity: 1;
+  margin-top: 12px;
 }

@@ -1,10 +1,16 @@
 import React, { useState, useEffect } from 'react';
+import { useTheme } from '../../context/ThemeContext';
 import './NotificationPanel.css';
 
 function getRelativeTime(isoString) {
   if (!isoString) return 'เมื่อสักครู่';
   try {
-    const date = new Date(isoString);
+    // Backend sends UTC; ถ้าไม่มี Z หรือ timezone ให้ถือเป็น UTC เพื่อหลีกเลี่ยง offset ~7 ชม.
+    let normalized = String(isoString).trim();
+    if (normalized && !/[Zz]|[+-]\d{2}:?\d{2}$/.test(normalized)) {
+      normalized = normalized + 'Z';
+    }
+    const date = new Date(normalized);
     const diffMs = Date.now() - date.getTime();
     if (isNaN(diffMs) || diffMs < 0) return 'เมื่อสักครู่';
     const diffSec  = Math.floor(diffMs / 1000);
@@ -30,6 +36,7 @@ const TYPE_CONFIG = {
   booking_cancelled:        { icon: '❌', color: 'red',    label: 'ยกเลิกการจอง' },
   booking_updated:          { icon: '✏️', color: 'blue',   label: 'อัปเดตการจอง' },
   trip_change:              { icon: '✏️', color: 'blue',   label: 'อัปเดตทริป' },
+  trip_edited:               { icon: '✏️', color: 'green', label: 'แก้ไขทริป' },
   // Payment
   payment_status:           { icon: '💳', color: 'green',  label: 'การชำระเงิน' },
   payment_success:          { icon: '✅', color: 'green',  label: 'ชำระเงินสำเร็จ' },
@@ -65,9 +72,9 @@ export default function NotificationPanel({
   onMarkAsRead = null,
   onClearAll = null
 }) {
+  const theme = useTheme();
   const [localNotifications, setLocalNotifications] = useState(notifications);
   const [markingIds, setMarkingIds] = useState(new Set());
-  const [activeFilter, setActiveFilter] = useState('all');
   const [, setTick] = useState(0); // force re-render ทุก 30 วินาที เพื่ออัปเดต relative time
 
   useEffect(() => {
@@ -82,6 +89,8 @@ export default function NotificationPanel({
 
   const handleMarkAsRead = (id) => {
     setMarkingIds(prev => new Set(prev).add(id));
+    // ✅ อัปเดต count ทันที (เรียก parent ก่อน)
+    if (onMarkAsRead) onMarkAsRead(id);
     setTimeout(() => {
       setLocalNotifications(prev =>
         prev.map(notif => notif.id === id ? { ...notif, isRead: true } : notif)
@@ -91,7 +100,6 @@ export default function NotificationPanel({
         next.delete(id);
         return next;
       });
-      if (onMarkAsRead) onMarkAsRead(id);
     }, 250);
   };
 
@@ -101,32 +109,8 @@ export default function NotificationPanel({
     if (onClearAll) onClearAll(); // sync กับ backend (mark-all-read)
   };
 
-  // Filter categories
-  const FILTERS = [
-    { key: 'all',      label: 'ทั้งหมด' },
-    { key: 'booking',  label: '🎫 การจอง' },
-    { key: 'payment',  label: '💳 ชำระเงิน' },
-    { key: 'flight',   label: '✈️ เที่ยวบิน' },
-    { key: 'checkin',  label: '🏨 เช็คอิน' },
-    { key: 'account',  label: '👤 บัญชี' },
-  ];
-
-  const FILTER_TYPES = {
-    booking:  ['booking_created', 'booking_cancelled', 'booking_updated', 'trip_change', 'trip_alert'],
-    payment:  ['payment_status', 'payment_success', 'payment_failed'],
-    flight:   ['flight_delayed', 'flight_cancelled', 'flight_rescheduled'],
-    checkin:  ['checkin_reminder_flight', 'checkin_reminder_hotel'],
-    account:  ['account_email_changed', 'account_password_changed', 'account_card_added', 'account_card_removed', 'account_cotraveler_added', 'account_profile_updated'],
-  };
-
-  const filterNotif = (list) => {
-    if (activeFilter === 'all') return list;
-    const types = FILTER_TYPES[activeFilter] || [];
-    return list.filter(n => types.includes(n.type));
-  };
-
-  const newNotifications = filterNotif(localNotifications.filter(n => !n.isRead));
-  const previousNotifications = filterNotif(localNotifications.filter(n => n.isRead));
+  const newNotifications = localNotifications.filter(n => !n.isRead);
+  const previousNotifications = localNotifications.filter(n => n.isRead);
 
   if (!isOpen) return null;
 
@@ -166,6 +150,7 @@ export default function NotificationPanel({
     <div className="notification-panel-overlay" onClick={onClose}>
       <div
         className="notification-panel"
+        data-theme={theme}
         onClick={(e) => e.stopPropagation()}
         style={{ right: `${position.right}px`, top: `${position.top}px` }}
       >
@@ -182,19 +167,6 @@ export default function NotificationPanel({
           <button className="notification-clear-all-btn" onClick={handleClearAll}>
             ล้างทั้งหมด
           </button>
-        </div>
-
-        {/* Filter tabs */}
-        <div className="notif-filter-bar">
-          {FILTERS.map(f => (
-            <button
-              key={f.key}
-              className={`notif-filter-btn${activeFilter === f.key ? ' active' : ''}`}
-              onClick={() => setActiveFilter(f.key)}
-            >
-              {f.label}
-            </button>
-          ))}
         </div>
 
         {/* Content */}

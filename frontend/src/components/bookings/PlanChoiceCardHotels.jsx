@@ -1,27 +1,74 @@
 /**
  * PlanChoiceCard เฉพาะที่พักทั้งหมด
- * แยกอิสระจาก PlanChoiceCard เพื่อแก้บั๊กและแสดงผลที่พักเท่านั้น
+ * แสดงข้อมูลครบแบบ PlanChoiceCard: ภาพ, ดาว/รีวิว, รูปแบบห้อง, จำนวนคืน, ส่วนกลาง, เช็คอิน/เอาท์, ราคาแยก/รวม
  */
 import React from 'react';
-import { formatMoney } from './planChoiceCardUtils';
+import { formatPriceInThb } from '../../utils/currency';
 import './PlanChoiceCard.css';
+
+function formatDate(isoStr) {
+  if (!isoStr || typeof isoStr !== 'string') return null;
+  try {
+    const d = isoStr.split('T')[0].split('-');
+    if (d.length >= 3) return `${d[2]}/${d[1]}/${d[0]}`;
+    return isoStr;
+  } catch (_) {
+    return isoStr;
+  }
+}
+
+function calcNights(checkIn, checkOut) {
+  if (!checkIn || !checkOut) return null;
+  try {
+    const a = new Date(checkIn.split('T')[0]);
+    const b = new Date(checkOut.split('T')[0]);
+    const diff = (b - a) / (1000 * 60 * 60 * 24);
+    return Number.isInteger(diff) && diff > 0 ? diff : null;
+  } catch (_) {
+    return null;
+  }
+}
 
 export default function PlanChoiceCardHotels({ choice, onSelect }) {
   const { id, label, tags, recommended, hotel, currency, total_price, total_price_text, price_breakdown, price, title } = choice || {};
   const displayCurrency = price_breakdown?.currency || currency || hotel?.currency || 'THB';
-  // ✅ ราคารวม: choice.total_price / price หรือ hotel แบบ catalog (price_total, booking.pricing.total_amount)
   const resolvedTotal = typeof total_price === 'number' ? total_price
     : typeof price === 'number' ? price
     : (typeof hotel?.price_total === 'number' ? hotel.price_total : null)
     ?? (typeof hotel?.booking?.pricing?.total_amount === 'number' ? hotel.booking.pricing.total_amount : null);
   const displayTotalPrice = resolvedTotal != null
-    ? `${displayCurrency} ${Number(resolvedTotal).toLocaleString('th-TH')}`
+    ? formatPriceInThb(resolvedTotal, displayCurrency)
     : (total_price_text || null);
 
-  const hotelName = hotel?.hotelName || hotel?.name || 'Unknown Hotel';
-  const hotelNights = hotel?.nights != null ? hotel.nights : null;
-  const hotelBoard = hotel?.boardType || null;
-  const hotelPrice = formatMoney(typeof hotel?.price_total === 'number' ? hotel.price_total : null, hotel?.currency || displayCurrency);
+  const hotelName = hotel?.hotelName || hotel?.name || choice?.title || choice?.raw?.display_name || 'Unknown Hotel';
+  const hotelNights = hotel?.nights ?? calcNights(hotel?.booking?.check_in_date, hotel?.booking?.check_out_date);
+  const checkInStr = formatDate(hotel?.booking?.check_in_date);
+  const checkOutStr = formatDate(hotel?.booking?.check_out_date);
+
+  const pricing = hotel?.booking?.pricing;
+  const pricePerNight = pricing?.price_per_night;
+  const taxesAndFees = pricing?.taxes_and_fees;
+  const totalAmount = pricing?.total_amount ?? hotel?.price_total ?? resolvedTotal;
+  const pricingCurrency = pricing?.currency || hotel?.currency || displayCurrency;
+
+  const amenityLabels = [];
+  if (hotel?.amenities) {
+    const a = hotel.amenities;
+    if (a.has_wifi) amenityLabels.push('Wi-Fi');
+    if (a.has_pool) amenityLabels.push('สระว่ายน้ำ');
+    if (a.has_fitness) amenityLabels.push('ฟิตเนส');
+    if (a.has_parking) amenityLabels.push('ที่จอดรถ');
+    if (a.has_spa) amenityLabels.push('สปา');
+    if (a.has_air_conditioning) amenityLabels.push('แอร์');
+  }
+  const mealPlan = hotel?.booking?.policies?.meal_plan || '';
+  const mealPlanUpper = (mealPlan || '').toUpperCase();
+  if (mealPlanUpper.includes('BREAKFAST') || mealPlanUpper.includes('BFST') || mealPlanUpper.includes('HALF') || mealPlanUpper.includes('FULL')) amenityLabels.push('อาหารเช้า');
+  if (mealPlanUpper.includes('LUNCH') || (mealPlanUpper.includes('FULL') && mealPlanUpper.includes('BOARD'))) amenityLabels.push('อาหารกลางวัน');
+  if (mealPlanUpper.includes('DINNER') || mealPlanUpper.includes('HALF') || mealPlanUpper.includes('FULL')) amenityLabels.push('อาหารเย็น');
+  if (mealPlan && !['อาหารเช้า','อาหารกลางวัน','อาหารเย็น'].some(m => amenityLabels.includes(m)) && mealPlan !== 'Room Only') amenityLabels.push(mealPlan);
+  const originalList = Array.isArray(hotel?.amenities?.original_list) ? hotel.amenities.original_list : [];
+  const hasAnyAmenity = amenityLabels.length > 0 || originalList.length > 0;
 
   if (!hotel) {
     return (
@@ -44,89 +91,148 @@ export default function PlanChoiceCardHotels({ choice, onSelect }) {
         </div>
         {tags && Array.isArray(tags) && tags.length > 0 && (
           <div className="plan-card-tags">
-            {[...new Set(tags)].map((tag, idx) => (
-              <span key={idx} className="plan-tag-pill">{tag}</span>
-            ))}
+            {[...new Set(tags)]
+              .filter(tag => !['Amadeus', 'ราคาจริง', 'จองได้ทันที'].includes(tag))
+              .map((tag, idx) => (
+                <span key={idx} className="plan-tag-pill">{tag}</span>
+              ))}
           </div>
         )}
       </div>
 
       <div className="plan-card-section">
-        <div className="plan-card-section-title">🏨 ที่พัก: {hotelName}</div>
+        <div className="plan-card-section-title">🏨 รายละเอียดที่พัก</div>
 
-        {hotel.visuals?.image_urls && hotel.visuals.image_urls.length > 0 && (
-          <div style={{ width: '100%', overflowX: 'auto', whiteSpace: 'nowrap', marginBottom: 12, borderRadius: 8 }}>
-            {hotel.visuals.image_urls.map((url, idx) => (
-              <img key={idx} src={url} alt={`hotel-${idx}`} style={{ width: 120, height: 80, objectFit: 'cover', borderRadius: 6, marginRight: 8, display: 'inline-block' }} />
-            ))}
+        {/* 1. ภาพที่พัก - แสดงเสมอ */}
+        <div style={{ marginBottom: 12 }}>
+          <div className="plan-card-small" style={{ marginBottom: 6, opacity: 0.9 }}>ภาพที่พัก</div>
+          {hotel.visuals?.image_urls && hotel.visuals.image_urls.length > 0 ? (
+            <div style={{ width: '100%', overflowX: 'auto', whiteSpace: 'nowrap', borderRadius: 8, scrollbarWidth: 'none' }}>
+              {hotel.visuals.image_urls.map((url, idx) => (
+                <img key={idx} src={url} alt="" loading="lazy" onError={(e) => { e.target.style.display = 'none'; }} style={{ width: 140, height: 94, objectFit: 'cover', borderRadius: 8, marginRight: 8, display: 'inline-block' }} />
+              ))}
+            </div>
+          ) : (
+            <div style={{ minHeight: 80, background: 'rgba(255,255,255,0.08)', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.5)', fontSize: 13 }}>ไม่มีภาพ</div>
+          )}
+        </div>
+
+        {/* 2. ระดับดาวที่พัก & เรทรีวิวที่พัก - แสดงเสมอ */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span className="plan-card-small" style={{ opacity: 0.9 }}>ระดับดาวที่พัก:</span>
+            {hotel.star_rating != null ? (
+              <span style={{ color: '#FFD700', fontSize: 15 }}>{'⭐'.repeat(Math.round(hotel.star_rating))} ({hotel.star_rating} ดาว)</span>
+            ) : (
+              <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)' }}>—</span>
+            )}
           </div>
-        )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span className="plan-card-small" style={{ opacity: 0.9 }}>เรทรีวิวที่พัก:</span>
+            {(hotel.visuals?.review_score != null || hotel.rating != null) ? (
+              <span style={{ fontSize: 13, background: '#4CAF50', color: 'white', padding: '3px 8px', borderRadius: 4 }}>
+                {(hotel.visuals?.review_score ?? hotel.rating)} / 5 ({(hotel.visuals?.review_count ?? 0) || 0} รีวิว)
+              </span>
+            ) : (
+              <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)' }}>—</span>
+            )}
+          </div>
+        </div>
 
         <div className="plan-card-section-body">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            {hotel.star_rating && (
-              <span style={{ color: '#FFD700', fontSize: 14 }}>{'⭐'.repeat(Math.round(hotel.star_rating))} ({hotel.star_rating})</span>
-            )}
-            {hotel.visuals?.review_score && (
-              <span style={{ fontSize: 12, background: '#4CAF50', color: 'white', padding: '2px 6px', borderRadius: 4 }}>
-                {hotel.visuals.review_score} / 5 ({hotel.visuals.review_count || 0} รีวิว)
-              </span>
-            )}
-          </div>
 
+          {/* 3. ที่อยู่ */}
           {(hotel.location?.address || hotel?.address) && (
             <div className="plan-card-small" style={{ marginBottom: 8, opacity: 0.9 }}>📍 {hotel.location?.address || hotel.address}</div>
           )}
 
-          {hotel.amenities && (
-            <div style={{ display: 'flex', gap: 12, marginBottom: 12, padding: 8, background: 'rgba(255,255,255,0.1)', borderRadius: 6, fontSize: 18 }}>
-              {hotel.amenities.has_wifi && <span title="Free Wi-Fi">📶</span>}
-              {hotel.amenities.has_pool && <span title="Swimming Pool">🏊</span>}
-              {hotel.amenities.has_fitness && <span title="Fitness Center">🏋️</span>}
-              {hotel.amenities.has_parking && <span title="Parking">🅿️</span>}
-              {hotel.amenities.has_spa && <span title="Spa">💆</span>}
-              {hotel.amenities.has_air_conditioning && <span title="Air Con">❄️</span>}
+          {/* 4. รูปแบบห้อง */}
+          {(hotel.booking?.room?.room_type || hotel.booking?.room?.description) && (
+            <div style={{ marginBottom: 8, paddingLeft: 8, borderLeft: '3px solid rgba(255,255,255,0.3)' }}>
+              <div style={{ fontWeight: 600, fontSize: 15 }}>🛏️ รูปแบบห้อง: {hotel.booking.room.room_type || hotel.booking.room.description || 'Standard'}</div>
+              {hotel.booking?.room?.bed_type && (
+                <div className="plan-card-small">{hotel.booking.room.bed_quantity ? `${hotel.booking.room.bed_quantity} x ${hotel.booking.room.bed_type}` : hotel.booking.room.bed_type}</div>
+              )}
+              {hotel.booking?.policies?.meal_plan && (
+                <div className="plan-card-small">🍽️ {hotel.booking.policies.meal_plan}</div>
+              )}
             </div>
           )}
 
-          <div style={{ marginBottom: 12, paddingLeft: 8, borderLeft: '3px solid rgba(255,255,255,0.3)' }}>
-            {hotel.booking?.room?.room_type && <div style={{ fontWeight: 600, fontSize: 15 }}>🛏️ {hotel.booking.room.room_type}</div>}
-            {hotel.booking?.room?.bed_type && <div className="plan-card-small">{hotel.booking.room.bed_quantity} x {hotel.booking.room.bed_type}</div>}
-            {hotel.booking?.policies?.meal_plan && <div className="plan-card-small">🍽️ {hotel.booking.policies.meal_plan}</div>}
-            {hotel.booking?.policies && (
-              <span style={{ display: 'inline-block', marginTop: 6, padding: '2px 6px', borderRadius: 4, fontSize: 11, fontWeight: 600, backgroundColor: hotel.booking.policies.is_refundable ? 'rgba(74, 222, 128, 0.2)' : 'rgba(248, 113, 113, 0.2)', color: hotel.booking.policies.is_refundable ? '#4ade80' : '#f87171' }}>
+          {/* 5. จำนวนวันพัก & วันเช็คอิน / เช็คเอาท์ */}
+          {(hotelNights != null || checkInStr || checkOutStr) && (
+            <div style={{ marginBottom: 8, fontSize: 14 }}>
+              {hotelNights != null && <span>📅 จำนวนคืน: {hotelNights} คืน</span>}
+              {checkInStr && <div className="plan-card-small">เช็คอิน: {checkInStr}</div>}
+              {checkOutStr && <div className="plan-card-small">เช็คเอาท์: {checkOutStr}</div>}
+            </div>
+          )}
+
+          {/* 6. ส่วนกลาง: Wi-Fi, สระว่ายน้ำ, อาหารเช้า/กลางวัน/เย็น, + original_list fallback */}
+          {(hasAnyAmenity || hotel?.amenities) && (
+            <div style={{ marginBottom: 12 }}>
+              <div className="plan-card-small" style={{ marginBottom: 4, opacity: 0.9 }}>ส่วนกลาง:</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: 8, background: 'rgba(255,255,255,0.1)', borderRadius: 6, fontSize: 16 }}>
+                {amenityLabels.length > 0 && amenityLabels.map((txt, i) => (
+                  <span key={i}>
+                    {txt === 'Wi-Fi' && '📶 '}
+                    {txt === 'สระว่ายน้ำ' && '🏊 '}
+                    {txt === 'อาหารเช้า' && '🍳 '}
+                    {txt === 'อาหารกลางวัน' && '☀️ '}
+                    {txt === 'อาหารเย็น' && '🌙 '}
+                    {txt === 'ฟิตเนส' && '🏋️ '}
+                    {txt === 'ที่จอดรถ' && '🅿️ '}
+                    {txt === 'สปา' && '💆 '}
+                    {txt === 'แอร์' && '❄️ '}
+                    {txt}
+                  </span>
+                ))}
+                {amenityLabels.length === 0 && (
+                  <>
+                    {hotel.amenities?.has_wifi && <span title="Wi-Fi">📶 Wi-Fi</span>}
+                    {hotel.amenities?.has_pool && <span title="สระว่ายน้ำ">🏊 สระว่ายน้ำ</span>}
+                    {hotel.amenities?.has_fitness && <span title="ฟิตเนส">🏋️ ฟิตเนส</span>}
+                    {hotel.amenities?.has_parking && <span title="ที่จอดรถ">🅿️ ที่จอดรถ</span>}
+                    {hotel.amenities?.has_spa && <span title="สปา">💆 สปา</span>}
+                    {hotel.amenities?.has_air_conditioning && <span title="แอร์">❄️ แอร์</span>}
+                  </>
+                )}
+                {originalList.length > 0 && (
+                  originalList.slice(0, 12).map((item, i) => (
+                    <span key={`orig-${i}`} style={{ fontSize: 14, opacity: 0.95 }}>{String(item)}</span>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* 7. นโยบายยกเลิก */}
+          {hotel.booking?.policies && (
+            <div style={{ marginBottom: 12 }}>
+              <span style={{ display: 'inline-block', padding: '2px 6px', borderRadius: 4, fontSize: 11, fontWeight: 600, backgroundColor: hotel.booking.policies.is_refundable ? 'rgba(74, 222, 128, 0.2)' : 'rgba(248, 113, 113, 0.2)', color: hotel.booking.policies.is_refundable ? '#4ade80' : '#f87171' }}>
                 {hotel.booking.policies.is_refundable ? '✅ ยกเลิกฟรี' : '❌ ห้ามยกเลิก'}
               </span>
-            )}
-          </div>
-
-          {hotel.booking?.pricing && (
-            <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.2)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontSize: 13, opacity: 0.8 }}>ราคาต่อคืน</span>
-                <span style={{ fontWeight: 600 }}>{formatMoney(hotel.booking.pricing.price_per_night, hotel.booking.pricing.currency)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontSize: 13, opacity: 0.8 }}>ภาษีและค่าธรรมเนียม</span>
-                <span style={{ fontSize: 13 }}>{formatMoney(hotel.booking.pricing.taxes_and_fees, hotel.booking.pricing.currency)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4, fontSize: 16 }}>
-                <span style={{ fontWeight: 600 }}>ราคารวม</span>
-                <span style={{ fontWeight: 700, color: '#81c784' }}>{formatMoney(hotel.booking.pricing.total_amount, hotel.booking.pricing.currency)}</span>
-              </div>
             </div>
           )}
 
-          {!hotel.booking && (
-            <>
-              <div style={{ fontWeight: 500 }}>{hotelName}</div>
-              <div className="plan-card-small">
-                {hotelNights != null ? `จำนวนคืน: ${hotelNights}` : ''}
-                {hotelBoard ? ` • แพ็กเกจ: ${hotelBoard}` : ''}
+          {/* 8. ราคาที่พัก / ราคาค่าธรรมเนียม / ราคารวมรวมค่าธรรมเนียมแล้ว */}
+          {(pricePerNight != null || taxesAndFees != null || totalAmount != null) && (
+            <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.2)' }}>
+              {pricePerNight != null && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                  <span style={{ fontSize: 13, opacity: 0.8 }}>ราคาที่พัก (ต่อคืน)</span>
+                  <span style={{ fontWeight: 600 }}>{formatPriceInThb(pricePerNight, pricingCurrency)}</span>
+                </div>
+              )}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <span style={{ fontSize: 13, opacity: 0.8 }}>ราคาค่าธรรมเนียม</span>
+                <span style={{ fontSize: 13 }}>{formatPriceInThb(taxesAndFees ?? 0, pricingCurrency)}</span>
               </div>
-              {(hotel?.location?.address || hotel?.address) && <div className="plan-card-small">ที่อยู่: {hotel.location?.address || hotel.address}</div>}
-              {hotelPrice && <div className="plan-card-small" style={{ marginTop: 4, fontWeight: 500 }}>ราคา: {hotelPrice}</div>}
-            </>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6, fontSize: 16 }}>
+                <span style={{ fontWeight: 600 }}>ราคาที่พักรวมค่าธรรมเนียมแล้ว</span>
+                <span style={{ fontWeight: 700, color: '#81c784' }}>{formatPriceInThb(totalAmount, pricingCurrency)}</span>
+              </div>
+            </div>
           )}
         </div>
       </div>

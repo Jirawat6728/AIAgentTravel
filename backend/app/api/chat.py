@@ -10,7 +10,7 @@ import asyncio
 import os
 from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Tuple
 from app.models import UserSession, TripPlan
 from app.models.trip_plan import SegmentStatus
 from app.engine.agent import TravelAgent
@@ -27,8 +27,53 @@ from app.services.tts_service import TTSService
 from app.services.live_audio_service import LiveAudioService
 from fastapi.responses import Response
 import base64
+import httpx
 
 logger = get_logger(__name__)
+
+
+async def _fetch_image_as_base64_data_url(url: str, timeout: float = 6.0) -> Optional[str]:
+    """Fetch image from URL and return as data URL (base64). Returns None on failure."""
+    if not url or not isinstance(url, str) or url.startswith("data:"):
+        return url if (url and url.startswith("data:")) else None
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            ct = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+            if "image" not in ct:
+                ct = "image/jpeg"
+            b64 = base64.b64encode(r.content).decode("ascii")
+            return f"data:{ct};base64,{b64}"
+    except Exception as e:
+        logger.debug(f"Failed to fetch image as base64: {e}")
+        return None
+
+
+async def _convert_hotel_image_urls_to_base64(slot_choices: List[Dict]) -> None:
+    """In-place: replace hotel.visuals.image_urls (HTTP URLs) with base64 data URLs (max 3 per hotel)."""
+    for choice in slot_choices:
+        if choice.get("category") != "hotel":
+            continue
+        hotel = choice.get("hotel") or {}
+        visuals = hotel.get("visuals") or {}
+        urls = visuals.get("image_urls") or []
+        if not urls or not isinstance(urls, list):
+            continue
+        data_urls = []
+        for url in urls[:3]:
+            if not url or not isinstance(url, str):
+                continue
+            if url.startswith("data:"):
+                data_urls.append(url)
+                continue
+            data_url = await _fetch_image_as_base64_data_url(url)
+            if data_url:
+                data_urls.append(data_url)
+        if data_urls:
+            if "visuals" not in choice["hotel"]:
+                choice["hotel"]["visuals"] = {}
+            choice["hotel"]["visuals"]["image_urls"] = data_urls
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -155,6 +200,9 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
     tags = option.get("tags")
     if not isinstance(tags, list):
         tags = []
+    # กรองแท็กที่ไม่ต้องการ (Amadeus, ราคาจริง, จองได้ทันที)
+    _HIDDEN_TAGS = {"Amadeus", "ราคาจริง", "จองได้ทันที"}
+    tags = [t for t in tags if t not in _HIDDEN_TAGS]
     recommended = bool(option.get("recommended", False))
     category = option.get("category")
     
@@ -164,8 +212,8 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
     elif category == "hotel": type_label = "ที่พัก"
     elif category == "transfer" or category == "transport": type_label = "การเดินทาง"
     
-    # Construct a rich title
-    tags_suffix = f" – {' '.join(tags)}" if tags else ""
+    # Construct a rich title (ไม่ append tags ใน title — แสดงแยกในแท็ก pills บนการ์ด)
+    tags_suffix = ""
     display_name = option.get("display_name", "Unknown Option")
     long_desc = option.get("description")
     
@@ -279,6 +327,12 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
                 last_to = mapped_segments[-1].get("to") or ""
                 if first_from and last_to:
                     ui_option["title"] = f"{type_label} {index + 1}: {first_from} → {last_to}{tags_suffix}"
+                # ส่ง direction ให้ frontend แสดงแท็ก ขาไป/ขากลับ
+                first_dir = mapped_segments[0].get("direction") or ""
+                if "ขาไป" in first_dir:
+                    ui_option["flight_direction"] = "outbound"
+                elif "ขากลับ" in first_dir:
+                    ui_option["flight_direction"] = "inbound"
             
             # Enhanced Info from Data Aggregator
             enhanced_info = raw_data.get("enhanced_info", {})
@@ -296,15 +350,20 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
             
             # Pass refund/change info to flight_details (separate key)
             ui_option["flight_details"] = {
-                "price_per_person": option.get("price_amount"), # Simplified
+                "price_per_person": option.get("price_amount"),  # Simplified
                 "changeable": enhanced_info.get("changeable"),
                 "refundable": enhanced_info.get("refundable"),
-                "hand_baggage": "1 กระเป๋าถือ (7 kg)", # Default
+                "change_fee": enhanced_info.get("change_fee") or ("ค่าธรรมเนียมตามเงื่อนไขสายการบิน" if enhanced_info.get("changeable") else None),
+                "hand_baggage": enhanced_info.get("hand_baggage") or "1 กระเป๋าถือ (7 kg)",
                 "checked_baggage": enhanced_info.get("baggage"),
-                "meals": "รวมอาหาร" if "BUSINESS" in str(enhanced_info.get("cabin")) else "อาหารว่าง/ซื้อเพิ่ม",
-                "seat_selection": "อาจมีค่าธรรมเนียม",
-                "wifi": "ตรวจสอบบนเครื่อง",
-                "promotions": [] # Placeholder
+                "meals": enhanced_info.get("meals") or ("รวมอาหาร" if "BUSINESS" in str(enhanced_info.get("cabin")) else "อาหารว่าง/ซื้อเพิ่ม"),
+                "seat_selection": enhanced_info.get("seat_selection") or "อาจมีค่าธรรมเนียม",
+                "seat_width": enhanced_info.get("seat_width"),
+                "wifi": enhanced_info.get("wifi") or "ตรวจสอบบนเครื่อง",
+                "power_outlet": enhanced_info.get("power_outlet") or "ตรวจสอบบนเครื่อง",
+                "co2_emissions_kg": enhanced_info.get("co2_emissions_kg"),  # from data_aggregator
+                "on_time_performance": enhanced_info.get("on_time_performance"),
+                "promotions": enhanced_info.get("promotions") or []
             }
 
             # Transit Visa Warning Logic + 🛂 Profile-based visa hint for search/planning
@@ -331,7 +390,7 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
         # Support for: 1. MergedHotelOption, 2. Google discovery, 3. Basic Amadeus
         
         if raw_data.get("source") == "amadeus_google_merged":
-            # 🧠 NEW: Handle Production-Grade Merged Hotel
+            # รวม Amadeus + Google — ตรงที่ Amadeus ไม่มี (รูป, รีวิว, ระดับดาว, ชื่อไทย) ใช้จาก Google แล้ว
             booking = raw_data.get("booking", {})
             pricing = booking.get("pricing", {})
             visuals = raw_data.get("visuals", {})
@@ -345,8 +404,22 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
                     hotel_total = float(hotel_total)
                 except (TypeError, ValueError):
                     hotel_total = pricing.get("total_amount")
+            hotel_name_merged = raw_data.get("hotel_name") or option.get("display_name") or ""
+            # Amenities + nights for frontend (ภาพ, ดาว, รูปแบบห้อง, จำนวนคืน, ส่วนกลาง, เช็คอิน/เอาท์, ราคาแยก/รวม)
+            amenities_raw = raw_data.get("amenities") or {}
+            if hasattr(amenities_raw, "model_dump"):
+                amenities_raw = amenities_raw.model_dump()
+            nights = None
+            if booking.get("check_in_date") and booking.get("check_out_date"):
+                try:
+                    from datetime import datetime
+                    d1 = datetime.strptime(booking["check_in_date"][:10], "%Y-%m-%d")
+                    d2 = datetime.strptime(booking["check_out_date"][:10], "%Y-%m-%d")
+                    nights = max(1, (d2 - d1).days)
+                except Exception:
+                    pass
             ui_option["hotel"] = {
-                "hotelName": raw_data.get("hotel_name"),
+                "hotelName": hotel_name_merged or None,
                 "address": addr,
                 "location": {"address": addr},
                 "price_total": hotel_total,
@@ -354,7 +427,12 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
                 "rating": visuals.get("review_score") or star,
                 "star_rating": star,
                 "visuals": visuals,
+                "amenities": amenities_raw,
+                "nights": nights,
                 "booking": {
+                    "check_in_date": booking.get("check_in_date"),
+                    "check_out_date": booking.get("check_out_date"),
+                    "guests": booking.get("guests"),
                     "room": booking.get("room", {}),
                     "policies": {
                         "meal_plan": booking.get("policies", {}).get("meal_plan"),
@@ -381,13 +459,23 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
             if booking.get("policies", {}).get("meal_plan"):
                 details.append(f"🍴 {booking['policies']['meal_plan']}")
             ui_option["details"] = details
-            hotel_name_short = (raw_data.get("hotel_name") or "")[:36]
+            hotel_name_short = (hotel_name_merged or "")[:36]
             if hotel_name_short:
                 ui_option["title"] = f"{type_label} {index + 1}: {hotel_name_short}{tags_suffix}"
 
         elif raw_data.get("google_place"):
+            # ข้อมูลจาก Google Places เท่านั้น (ไม่มี Amadeus)
             place = raw_data.get("google_place", {})
             addr = place.get("formatted_address") or ""
+            # Build image_urls from Google Place photos (Nearby/Text Search include photos)
+            image_urls = []
+            if settings.google_maps_api_key and place.get("photos"):
+                for p in place["photos"][:5]:
+                    ref = p.get("photo_reference")
+                    if ref:
+                        image_urls.append(
+                            f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference={ref}&key={settings.google_maps_api_key}"
+                        )
             ui_option["hotel"] = {
                 "hotelName": place.get("name") or ui_option["title"],
                 "cityCode": place.get("_resolved_city"),
@@ -399,6 +487,7 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
                 "visuals": {
                     "review_score": place.get("rating"),
                     "review_count": place.get("user_ratings_total"),
+                    "image_urls": image_urls,
                 },
             }
             ui_option["subtitle"] = "Google Places (ไม่ใช่ราคาจองจริง)"
@@ -406,31 +495,103 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
             if name_short:
                 ui_option["title"] = f"{type_label} {index + 1}: {name_short}{tags_suffix}"
         else:
+            # Raw Amadeus เท่านั้น (ไม่มี Google merge — ภาพ/รีวิว/ระดับดาวจะไม่มี; ใช้ได้จาก merge ใน data_aggregator)
             hotel_data = raw_data.get("hotel", {})
             offers = raw_data.get("offers", [])
             first_offer = offers[0] if offers else {}
             price_from_offer = first_offer.get("price", {}) if first_offer else {}
-            hotel_price_real = (price_from_offer.get("total") or price_from_offer.get("total_amount") or option.get("price_amount") or ui_option["price"])
-            if hotel_price_real is not None:
+            total_val = price_from_offer.get("total") or price_from_offer.get("total_amount") or option.get("price_amount") or ui_option["price"]
+            if total_val is not None:
                 try:
-                    hotel_price_real = float(hotel_price_real)
+                    hotel_price_real = float(total_val)
                 except (TypeError, ValueError):
                     hotel_price_real = ui_option["price"]
+            else:
+                hotel_price_real = ui_option["price"]
+            base_val = price_from_offer.get("base")
+            taxes_val = 0.0
+            if "taxes" in price_from_offer:
+                for t in price_from_offer.get("taxes", []):
+                    taxes_val += float(t.get("amount", 0))
+            elif base_val is not None and hotel_price_real is not None:
+                taxes_val = hotel_price_real - float(base_val)
+            check_in = first_offer.get("checkInDate") or first_offer.get("check_in_date") or raw_data.get("check_in_date")
+            check_out = first_offer.get("checkOutDate") or first_offer.get("check_out_date") or raw_data.get("check_out_date")
+            nights = None
+            if check_in and check_out:
+                try:
+                    from datetime import datetime
+                    d1 = datetime.strptime(str(check_in)[:10], "%Y-%m-%d")
+                    d2 = datetime.strptime(str(check_out)[:10], "%Y-%m-%d")
+                    nights = max(1, (d2 - d1).days)
+                except Exception:
+                    pass
+            room_est = first_offer.get("room", {}).get("typeEstimated", {}) or {}
+            room_type = room_est.get("category") or first_offer.get("room", {}).get("description", {}).get("text") or "Standard"
+            price_per_night = (hotel_price_real / nights) if (nights and nights > 0 and hotel_price_real is not None) else hotel_price_real
+            booking_obj = {
+                "check_in_date": check_in,
+                "check_out_date": check_out,
+                "guests": first_offer.get("guests", {}).get("adults", 1),
+                "room": {
+                    "room_type": room_type,
+                    "description": first_offer.get("room", {}).get("description", {}).get("text"),
+                    "bed_type": room_est.get("bedType"),
+                    "bed_quantity": room_est.get("beds", 1),
+                },
+                "policies": {"meal_plan": "Room Only", "is_refundable": False},
+                "pricing": {
+                    "price_per_night": round(price_per_night, 2) if price_per_night is not None else None,
+                    "taxes_and_fees": round(taxes_val, 2) if taxes_val else 0,
+                    "total_amount": hotel_price_real,
+                    "currency": price_from_offer.get("currency") or ui_option["currency"],
+                },
+            }
             addr = ", ".join(hotel_data.get("address", {}).get("lines", []))
+            name_from_raw = hotel_data.get("name") or raw_data.get("name") or option.get("display_name") or ""
+            raw_amenities = hotel_data.get("amenities", []) or []
+            tags_upper = [str(a).upper() for a in raw_amenities]
+            amenities_obj = {
+                "has_wifi": any("WIFI" in t for t in tags_upper),
+                "has_pool": any("POOL" in t or "SWIM" in t for t in tags_upper),
+                "has_fitness": any("GYM" in t or "FITNESS" in t for t in tags_upper),
+                "has_parking": any("PARKING" in t for t in tags_upper),
+                "has_spa": any("SPA" in t for t in tags_upper),
+                "has_air_conditioning": any("AIR" in t and "CONDITION" in t for t in tags_upper),
+                "original_list": raw_amenities[:15],
+            }
             ui_option["hotel"] = {
-                "hotelName": hotel_data.get("name") or ui_option["title"],
+                "hotelName": name_from_raw or ui_option["title"],
                 "cityCode": hotel_data.get("cityCode"),
                 "address": addr,
                 "location": {"address": addr},
                 "price_total": hotel_price_real,
                 "currency": ui_option["currency"],
                 "rating": hotel_data.get("rating"),
+                "star_rating": hotel_data.get("rating"),
+                "nights": nights,
+                "amenities": amenities_obj,
+                "booking": booking_obj,
             }
-            name_short = (hotel_data.get("name") or "")[:36]
+            name_short = (name_from_raw or "")[:36]
             if name_short:
                 ui_option["title"] = f"{type_label} {index + 1}: {name_short}{tags_suffix}"
 
-    elif category in ("transfer", "transport"):
+    # ✅ Hotel: fallback ชื่อโรงแรมจาก display_name ถ้า hotelName ยังเป็น generic (ที่พัก 1, ที่พัก 2, Unknown Hotel)
+    if category == "hotel" and ui_option.get("hotel"):
+        h = ui_option["hotel"]
+        name = (h.get("hotelName") or "").strip()
+        fallback = option.get("display_name") or raw_data.get("name") or raw_data.get("hotel_name")
+        use_fallback = fallback and str(fallback).strip() and (
+            not name or name == "Unknown Hotel" or (type_label and name.startswith(type_label))
+        )
+        if use_fallback:
+            h["hotelName"] = str(fallback).strip()
+            short = (str(fallback).strip())[:36]
+            if short:
+                ui_option["title"] = f"{type_label} {index + 1}: {short}{tags_suffix}"
+
+    if category in ("transfer", "transport"):
         raw_data = option.get("raw_data", {}) or option
         route_parts = []
         if option.get("display_name"):
@@ -485,7 +646,9 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
 
 
 async def _get_user_visa_profile(storage, user_id: str) -> Dict[str, Any]:
-    """Fetch user visa section from profile for flight/transfer visa filtering and warnings."""
+    """Fetch user visa section from profile for flight/transfer visa filtering and warnings.
+    Uses visa_records when present; falls back to legacy visa_type/visa_number. Includes
+    active_visas and visa_warnings (linked_passport) for agent/UI."""
     if not user_id or user_id == "anonymous" or not storage:
         return {}
     try:
@@ -498,15 +661,58 @@ async def _get_user_visa_profile(storage, user_id: str) -> Dict[str, Any]:
         user_doc = await users_collection.find_one({"user_id": user_id})
         if not user_doc:
             return {}
-        has_visa = bool(user_doc.get("visa_type") or user_doc.get("visa_number"))
+        from app.models.visa import (
+            ensure_visa_records_from_doc,
+            get_active_visas,
+            compute_visa_status,
+            get_linked_passport_warning,
+        )
+        visa_records = ensure_visa_records_from_doc(user_doc)
+        for v in visa_records:
+            v["status"] = compute_visa_status(v)
+        active_visas = get_active_visas(visa_records)
+        passport_numbers = [
+            p.get("passport_no") for p in (user_doc.get("passports") or [])
+            if p.get("passport_no")
+        ]
+        visa_warnings = []
+        for v in active_visas:
+            msg = get_linked_passport_warning(v, passport_numbers)
+            if msg:
+                visa_warnings.append({
+                    "country_code": v.get("country_code"),
+                    "linked_passport": v.get("linked_passport"),
+                    "message": msg,
+                })
+        # Legacy-style fields for backward compat (from first active or legacy)
+        first_active = active_visas[0] if active_visas else None
+        if first_active:
+            has_visa = True
+            visa_type = first_active.get("visa_type") or ""
+            visa_number = first_active.get("visa_number") or ""
+            visa_issuing_country = first_active.get("country_code") or ""
+            visa_expiry_date = first_active.get("expiry_date") or ""
+            visa_entry_type = "M" if (first_active.get("entries") or "").strip() == "Multiple" else "S"
+            visa_purpose = first_active.get("purpose") or "T"
+        else:
+            has_visa = bool(user_doc.get("visa_type") or user_doc.get("visa_number"))
+            visa_type = user_doc.get("visa_type") or ""
+            visa_number = user_doc.get("visa_number") or ""
+            visa_issuing_country = user_doc.get("visa_issuing_country") or ""
+            visa_expiry_date = user_doc.get("visa_expiry_date") or ""
+            visa_entry_type = user_doc.get("visa_entry_type") or "S"
+            visa_purpose = user_doc.get("visa_purpose") or "T"
         return {
             "has_visa": has_visa,
-            "visa_type": user_doc.get("visa_type") or "",
-            "visa_number": user_doc.get("visa_number") or "",
-            "visa_issuing_country": user_doc.get("visa_issuing_country") or "",
-            "visa_expiry_date": user_doc.get("visa_expiry_date") or "",
-            "visa_entry_type": user_doc.get("visa_entry_type") or "S",
-            "visa_purpose": user_doc.get("visa_purpose") or "T",
+            "visa_type": visa_type,
+            "visa_number": visa_number,
+            "visa_issuing_country": visa_issuing_country,
+            "visa_expiry_date": visa_expiry_date,
+            "visa_entry_type": visa_entry_type,
+            "visa_purpose": visa_purpose,
+            "visa_records": visa_records,
+            "active_visas": active_visas,
+            "visa_warnings": visa_warnings,
         }
     except Exception as e:
         logger.debug(f"Failed to get user visa profile for {user_id}: {e}")
@@ -572,16 +778,13 @@ async def _load_user_agent_preferences(storage, user_id: str) -> dict:
         "detailLevel": "medium",
         "chatLanguage": "th",
         "reinforcementLearning": True,
+        "learnFromMyChoices": True,
         "travelPreferences": {},
     }
     try:
-        users_collection = None
         if hasattr(storage, 'db') and storage.db:
-            users_collection = storage.db["users"]
-        elif hasattr(storage, 'users_collection') and storage.users_collection:
-            users_collection = storage.users_collection
-        if users_collection is not None:
-            user_data = await users_collection.find_one({"user_id": user_id})
+            from app.services.user_family_service import get_user_with_family
+            user_data = await get_user_with_family(storage.db, user_id)
             if user_data:
                 prefs = user_data.get("preferences") or {}
                 # Personal Tailor: derive broker profile from user document
@@ -595,8 +798,28 @@ async def _load_user_agent_preferences(storage, user_id: str) -> dict:
                     "detailLevel": prefs.get("detailLevel", defaults["detailLevel"]),
                     "chatLanguage": prefs.get("chatLanguage", defaults["chatLanguage"]),
                     "reinforcementLearning": prefs.get("reinforcementLearning", defaults["reinforcementLearning"]),
+                    "learnFromMyChoices": prefs.get("learnFromMyChoices", defaults["learnFromMyChoices"]),
                     "travelPreferences": merged_travel_prefs,
                 }
+        elif hasattr(storage, 'users_collection') and storage.users_collection:
+            from app.services.user_family_service import get_user_with_family
+            db = storage.db if hasattr(storage, 'db') and storage.db else None
+            if db:
+                user_data = await get_user_with_family(db, user_id)
+                if user_data:
+                    prefs = user_data.get("preferences") or {}
+                    broker_profile = _extract_broker_profile_from_user(user_data)
+                    explicit_prefs = prefs.get("travelPreferences") or {}
+                    merged_travel_prefs = {**broker_profile, **explicit_prefs}
+                    return {
+                        "agentPersonality": prefs.get("agentPersonality", defaults["agentPersonality"]),
+                        "responseStyle": prefs.get("responseStyle", defaults["responseStyle"]),
+                        "detailLevel": prefs.get("detailLevel", defaults["detailLevel"]),
+                        "chatLanguage": prefs.get("chatLanguage", defaults["chatLanguage"]),
+                        "reinforcementLearning": prefs.get("reinforcementLearning", defaults["reinforcementLearning"]),
+                        "learnFromMyChoices": prefs.get("learnFromMyChoices", defaults["learnFromMyChoices"]),
+                        "travelPreferences": merged_travel_prefs,
+                    }
     except Exception as e:
         logger.warning(f"Failed to load agent preferences for user {user_id}: {e}")
     return defaults
@@ -804,7 +1027,8 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
         destination_city = outbound_seg.requirements.get("destination")
         departure_date = outbound_seg.requirements.get("departure_date")
         adults = outbound_seg.requirements.get("adults", 1)
-        children = outbound_seg.requirements.get("children", 0)
+        children = outbound_seg.requirements.get("children", 0) or outbound_seg.requirements.get("children_2_11", 0)
+        infants = outbound_seg.requirements.get("infants", 0) or (outbound_seg.requirements.get("infants_with_seat", 0) + outbound_seg.requirements.get("infants_on_lap", 0))
         # Also try to get from selected_option if available
         if outbound_seg.selected_option:
             raw_data = outbound_seg.selected_option.get("raw_data", {})
@@ -824,7 +1048,9 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
         if not adults:
             adults = inbound_seg.requirements.get("adults", 1)
         if children == 0:
-            children = inbound_seg.requirements.get("children", 0)
+            children = inbound_seg.requirements.get("children", 0) or inbound_seg.requirements.get("children_2_11", 0)
+        if infants == 0:
+            infants = inbound_seg.requirements.get("infants", 0) or (inbound_seg.requirements.get("infants_with_seat", 0) + inbound_seg.requirements.get("infants_on_lap", 0))
     
     # Get from accommodation segments if flights don't have it (fallback)
     if not departure_date and all_accommodations:
@@ -864,7 +1090,19 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
     travel_slots["adults"] = adults
     travel_slots["guests"] = adults + children  # Total (alias for backward compat; frontend may use adults+children)
     travel_slots["children"] = children
+    travel_slots["children_2_11"] = children  # Alias for 4-type UI
     travel_slots["infants"] = infants
+    # ผู้โดยสาร 4 ประเภท: จาก segment requirements ถ้ามี
+    infants_ws = 0
+    infants_ol = 0
+    if plan.travel.flights.outbound and plan.travel.flights.outbound[0].requirements:
+        req = plan.travel.flights.outbound[0].requirements
+        infants_ws = req.get("infants_with_seat", 0) or 0
+        infants_ol = req.get("infants_on_lap", 0) or 0
+        if infants_ws == 0 and infants_ol == 0 and infants:
+            infants_ol = infants  # legacy: only total infants → assume on lap
+    travel_slots["infants_with_seat"] = infants_ws
+    travel_slots["infants_on_lap"] = infants_ol
     travel_slots["nights"] = nights
     
     # ✅ Add formatted data to travel_slots for SlotCards
@@ -875,7 +1113,7 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
     if transport_data:
         travel_slots["transport"] = transport_data
     
-    # 2. Build plan_choices/slot_choices จาก segment.options_pool (ข้อมูลจาก Redis/Amadeus) สำหรับ PlanChoiceCard
+    # 2. Build plan_choices/slot_choices จาก segment.options_pool — รวมทุก segment ที่มีตัวเลือก (ที่พัก + รถรับส่ง) เพื่อให้แสดง choice ได้
     slot_choices = []
     slot_intent = None
     def iter_all_segments():
@@ -887,35 +1125,51 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
             yield "accommodations", s
         for s in all_ground:
             yield "ground_transport", s
+
+    def intent_for_slot(slot_name: str) -> str:
+        if slot_name == "flights_outbound" or slot_name == "flights_inbound":
+            return "flight"
+        if "accommodation" in slot_name:
+            return "hotel"
+        if "ground" in slot_name:
+            return "transfer"
+        return "flight"
+
+    # รวบรวมตัวเลือกจากทุก segment ที่มี status SELECTING และ options_pool (ไม่ break แค่ slot แรก)
+    collected: List[Tuple[str, str, List[Dict]]] = []  # (slot_name, intent, mapped)
     for slot_name, segment in iter_all_segments():
         if segment.status != SegmentStatus.SELECTING or not (segment.options_pool and len(segment.options_pool) > 0):
             continue
         raw_choices = segment.options_pool
         mapped = [_map_option_for_frontend(opt, i, slot_context=slot_name, user_visa_profile=user_visa_profile) for i, opt in enumerate(raw_choices)]
-        if slot_name == "flights_outbound":
-            slot_choices = mapped
-            slot_intent = "flight"
-            break
-        if slot_name == "flights_inbound" and (not getattr(plan.travel, "trip_type", "round_trip") or plan.travel.trip_type == "round_trip"):
-            out_ok = all(s.status == SegmentStatus.CONFIRMED for s in plan.travel.flights.outbound)
-            if out_ok:
-                slot_choices = mapped
-                slot_intent = "flight"
+        if not mapped:
+            continue
+        intent = intent_for_slot(slot_name)
+        # เที่ยวบินขากลับ: แสดงเฉพาะเมื่อ outbound confirmed แล้ว (round_trip)
+        if slot_name == "flights_inbound":
+            if not (getattr(plan.travel, "trip_type", "round_trip") == "round_trip" and all(s.status == SegmentStatus.CONFIRMED for s in plan.travel.flights.outbound)):
+                continue
+        collected.append((slot_name, intent, mapped))
+
+    # ตามลำดับความสำคัญ: เที่ยวบินขาไป → ขากลับ → ที่พัก → รถรับส่ง
+    order = ["flights_outbound", "flights_inbound", "accommodations", "ground_transport"]
+    for slot_name in order:
+        for sn, intent, mapped in collected:
+            if sn == slot_name:
+                slot_choices.extend(mapped)
+                if slot_intent is None:
+                    slot_intent = intent
+                elif slot_intent != intent:
+                    slot_intent = "multi"  # หลายประเภท → frontend แสดงทั้งหมด
                 break
-        if slot_name == "accommodations":
-            slot_choices = mapped
-            slot_intent = "hotel"
-            break
-        if slot_name == "ground_transport":
-            slot_choices = mapped
-            slot_intent = "transfer"
-            break
+
+    # Fallback: ถ้ายังไม่มี (กรณี state ยังไม่ sync) ใช้ segment แรกที่เจอ
     if not slot_choices:
         for slot_name, segment in iter_all_segments():
             if segment.options_pool and len(segment.options_pool) > 0 and segment.status == SegmentStatus.SELECTING:
                 raw_choices = segment.options_pool
                 slot_choices = [_map_option_for_frontend(opt, i, slot_context=slot_name, user_visa_profile=user_visa_profile) for i, opt in enumerate(raw_choices)]
-                slot_intent = "flight" if "flight" in slot_name else "hotel" if "accommodation" in slot_name else "transfer"
+                slot_intent = intent_for_slot(slot_name)
                 break
 
     # 3. Determine if trip is ready for summary
@@ -1018,6 +1272,9 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
             logger.info(f"Retrieved cached options for session {session.session_id}: {cache_validation.get('summary', {})}")
         except Exception as cache_error:
             logger.warning(f"Failed to get cached options: {cache_error}")
+    
+    # ✅ แปลงภาพโรงแรมจาก URL เป็น base64 data URL เพื่อให้ frontend แสดงได้โดยไม่ติด CORS
+    await _convert_hotel_image_urls_to_base64(slot_choices)
     
     return {
         "trip_type": trip_type,
@@ -1232,6 +1489,7 @@ async def chat_stream(
                 })
                 # #endregion
                 
+                run_turn_error_hint = None  # ตั้งค่าเริ่มต้น (จะถูกเซ็ตเมื่อ run_turn return tuple หลัง exception)
                 task = asyncio.create_task(agent.run_turn(
                     session_id=session_id,
                     user_input=request.message,
@@ -1344,8 +1602,13 @@ async def chat_stream(
                 # #endregion
                 
                 result = await asyncio.wait_for(task, timeout=timeout_seconds)
-                # run_turn always returns str; auto_booked flag is stored on the session object
-                response_text = result if isinstance(result, str) else (result[0] if isinstance(result, tuple) else str(result))
+                # run_turn returns str หรือ (str, error_hint) เมื่อเกิด exception
+                if isinstance(result, tuple) and len(result) >= 2:
+                    response_text = result[0]
+                    run_turn_error_hint = result[1]
+                else:
+                    response_text = result if isinstance(result, str) else str(result)
+                    run_turn_error_hint = None
                 # Read auto_booked from session after run_turn completes
                 _session_after = await storage.get_session(session_id)
                 auto_booked = bool(getattr(_session_after, "_agent_auto_booked", False)) if _session_after else False
@@ -1483,6 +1746,8 @@ async def chat_stream(
                 "trip_title": updated_session.title if updated_session else None,
                 **metadata
             }
+            if run_turn_error_hint:
+                final_data["error_hint"] = run_turn_error_hint
             if mode == "agent":
                 final_data["auto_booked"] = auto_booked
                 if auto_booked:
@@ -1792,9 +2057,8 @@ async def get_history(
     x_user_id: Optional[str] = Header(None, alias="X-User-ID", description="User ID for session lookup (ต้องตรงกับตอนส่งข้อความ)"),
 ):
     """
-    Get chat history for a chat/trip
-    Supports both chat_id (primary) and trip_id (backward compatibility)
-    ใช้ user_id จาก X-User-ID (ถ้ามี) ก่อน cookie เพื่อให้ตรงกับ frontend ที่ส่ง header ตอนโหลดประวัติ
+    Get chat history for ONE chat/trip (แบบ GPT/Gemini — โหลดทีละแชท).
+    เฉพาะ user ที่ login (X-User-ID หรือ cookie) — ลด 429 จากการยิงหลาย request พร้อมกัน
     """
     from app.core.security import extract_user_id_from_request
     # ✅ ใช้ X-User-ID จาก frontend ก่อน เพื่อให้ตรงกับ user ที่แสดงในรายการแชท (ป้องกัน no history เมื่อ cookie กับ list ไม่ตรง)
@@ -1844,100 +2108,14 @@ async def get_history(
 
 
 @router.get("/histories")
-async def get_all_histories(
-    fastapi_request: Request,
-    chat_ids: str = "",
-    limit: int = 50,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-):
+async def get_all_histories_deprecated(fastapi_request: Request):
     """
-    Bulk fetch all chat histories in ONE MongoDB query using $in operator.
-    เรียกครั้งเดียวตอนเปิดแชท แทนการดึงแยกทีละแชท (cache-first architecture)
-    Returns: {"histories": {"chatId": [messages...]}}
+    Deprecated: Bulk fetch ถูกลบแล้ว — ใช้ GET /history/{chat_id} โหลดทีละแชท (เฉพาะ user ที่ login) เพื่อหลีกเลี่ยง 429.
     """
-    from app.core.security import extract_user_id_from_request
-    user_id = x_user_id or extract_user_id_from_request(fastapi_request) or "guest"
-
-    chat_id_list = [c.strip() for c in (chat_ids or "").split(",") if c.strip()]
-    if not chat_id_list:
-        return {"histories": {}}
-
-    # Cap at 100 chats to prevent overloading
-    chat_id_list = chat_id_list[:100]
-
-    try:
-        storage = MongoStorage()
-        if not storage.db:
-            await storage.connect()
-        conversations_col = storage.db["conversations"]
-
-        # ✅ Build all session_ids: user_id::chat_id
-        session_ids = [f"{user_id}::{cid}" for cid in chat_id_list]
-
-        # ✅ Single $in query — fetch ALL conversations at once (no N+1)
-        cursor = conversations_col.find(
-            {"session_id": {"$in": session_ids}, "user_id": user_id},
-            {"session_id": 1, "messages": 1}
-        )
-
-        # Map session_id → chat_id
-        session_to_chat = {f"{user_id}::{cid}": cid for cid in chat_id_list}
-
-        histories: dict = {}
-        async for doc in cursor:
-            sid = doc.get("session_id", "")
-            cid = session_to_chat.get(sid) or (sid.split("::")[-1] if "::" in sid else sid)
-            raw_msgs = (doc.get("messages") or [])[-limit:]
-            mapped = []
-            for msg in raw_msgs:
-                role = msg.get("role", "")
-                if role in ("tool_call", "tool_output"):
-                    continue  # skip internal tool messages
-                mapped.append({
-                    "id": str(msg.get("_id") or msg.get("id") or f"{cid}_{len(mapped)}"),
-                    "type": "bot" if role == "assistant" else "user",
-                    "text": msg.get("content"),
-                    "timestamp": msg.get("timestamp"),
-                    **(msg.get("metadata") or {}),
-                })
-            if mapped:
-                histories[cid] = mapped
-
-        # Fallback: try $regex query for chats stored with legacy session_id format
-        missing = [cid for cid in chat_id_list if cid not in histories]
-        for cid in missing[:20]:
-            doc = await conversations_col.find_one(
-                {"session_id": {"$regex": f"::{cid}$"}, "user_id": user_id},
-                {"session_id": 1, "messages": 1},
-            )
-            if not doc:
-                doc = await conversations_col.find_one(
-                    {"session_id": cid, "user_id": user_id},
-                    {"session_id": 1, "messages": 1},
-                )
-            if doc:
-                raw_msgs = (doc.get("messages") or [])[-limit:]
-                mapped = []
-                for msg in raw_msgs:
-                    role = msg.get("role", "")
-                    if role in ("tool_call", "tool_output"):
-                        continue
-                    mapped.append({
-                        "id": str(msg.get("_id") or msg.get("id") or f"{cid}_{len(mapped)}"),
-                        "type": "bot" if role == "assistant" else "user",
-                        "text": msg.get("content"),
-                        "timestamp": msg.get("timestamp"),
-                        **(msg.get("metadata") or {}),
-                    })
-                if mapped:
-                    histories[cid] = mapped
-
-        logger.info(f"Bulk histories: returned {len(histories)}/{len(chat_id_list)} chats for user={user_id}")
-        return {"histories": histories}
-
-    except Exception as e:
-        logger.error(f"get_all_histories error: {e}", exc_info=True)
-        return {"histories": {}, "error": str(e)}
+    raise HTTPException(
+        status_code=410,
+        detail="Bulk histories removed. Use GET /api/chat/history/{chat_id} to load one chat at a time (per logged-in user).",
+    )
 
 
 @router.get("/sessions")
@@ -2015,18 +2193,36 @@ async def get_user_sessions(
                 # ✅ If no conversation found, that's OK (new session) - don't skip the session
                 pass
             has_messages = conv_doc and conv_doc.get("messages") and len(conv_doc["messages"]) > 0
-            
+            msg_count = len(conv_doc.get("messages", [])) if conv_doc else 0
+
+            # ✅ Title: แบบ Gemini — จาก session.title หรือข้อความแรกของ user (ตัดสั้น) หรือ "การสนทนาใหม่"
+            title = (doc.get("title") or "").strip()
+            if not title and conv_doc:
+                messages = conv_doc.get("messages") or []
+                for m in messages:
+                    if (m.get("role") or "").lower() == "user":
+                        raw = (m.get("content") or m.get("text") or "").strip()
+                        if raw:
+                            title = raw[:50] + ("…" if len(raw) > 50 else "")
+                            break
+            if not title:
+                title = "การสนทนาใหม่"
+
+            last_ts = doc.get("last_updated") or doc.get("created_at")
+            last_updated_str = last_ts.isoformat() if last_ts else None
+            created_str = doc.get("created_at").isoformat() if doc.get("created_at") else None
+
             # ✅ SECURITY: Include user_id in response for frontend validation
             all_sessions.append({
                 "session_id": session_id,
                 "chat_id": chat_id,
                 "trip_id": doc.get("trip_id"),
                 "user_id": user_id,  # ✅ Include user_id for frontend validation
-                "title": doc.get("title") or "แชทใหม่",
-                "last_updated": doc.get("last_updated").isoformat() if doc.get("last_updated") else None,
-                "created_at": doc.get("created_at").isoformat() if doc.get("created_at") else None,
+                "title": title,
+                "last_updated": last_updated_str,
+                "created_at": created_str,
                 "has_messages": has_messages,
-                "message_count": len(conv_doc.get("messages", [])) if conv_doc else 0
+                "message_count": msg_count,
             })
         
         # Sort by last_updated descending
@@ -2153,6 +2349,14 @@ async def select_choice(request: dict, fastapi_request: Request):
             logger.error(f"Failed to save session to database after choice selection: session_id={session_id}")
         else:
             logger.info(f"Session saved successfully with trip_plan data: session_id={session_id}")
+            # 🎯 Selection preferences: บันทึก choice history (ใช้ร่วมกับ RL/ML)
+            if choice_data and isinstance(choice_data, dict):
+                try:
+                    from app.services.selection_preferences import record_choice
+                    slot_for_history = slot_type or "unknown"
+                    await record_choice(user_id, slot_for_history, choice_data, slot_type=slot_type)
+                except Exception as rec_err:
+                    logger.debug(f"Record choice for preferences (non-critical): {rec_err}")
             # Log what was saved for debugging
             confirmed_with_selection = []
             segments_with_options = []

@@ -14,7 +14,9 @@ import asyncio
 import json
 import time
 import hashlib
+import hmac
 import secrets
+import base64
 from datetime import datetime
 from pathlib import Path
 from starlette.requests import Request
@@ -26,6 +28,39 @@ from app.services.llm import LLMService
 from app.services.agent_monitor import agent_monitor
 
 logger = get_logger(__name__)
+
+# Cookie-based admin session (สำหรับหน้า login แทน Basic Auth popup)
+ADMIN_SESSION_COOKIE = "admin_session"
+ADMIN_SESSION_MAX_AGE = 86400 * 1  # 1 day
+
+
+def _admin_session_secret() -> bytes:
+    return (settings.admin_password or "admin-fallback").encode("utf-8")
+
+
+def create_admin_session_token() -> str:
+    """สร้าง signed token สำหรับ admin session cookie"""
+    expiry = str(int(time.time()) + ADMIN_SESSION_MAX_AGE)
+    payload = expiry + ":admin"
+    sig = hmac.new(_admin_session_secret(), payload.encode(), "sha256").hexdigest()[:32]
+    raw = f"{payload}.{sig}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def verify_admin_session_token(token: str) -> bool:
+    """ตรวจสอบ admin session token ว่าถูกต้องและยังไม่หมดอายุ"""
+    if not token or not settings.admin_password:
+        return False
+    try:
+        raw = base64.urlsafe_b64decode(token + "==")
+        payload, sig = raw.decode().rsplit(".", 1)
+        expected = hmac.new(_admin_session_secret(), payload.encode(), "sha256").hexdigest()[:32]
+        if not secrets.compare_digest(sig, expected):
+            return False
+        expiry_str = payload.split(":")[0]
+        return int(expiry_str) > int(time.time())
+    except Exception:
+        return False
 
 
 def serialize_datetime(obj: Any) -> Any:
@@ -46,8 +81,58 @@ def serialize_datetime(obj: Any) -> Any:
         return obj
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 security = HTTPBasic()
+security_optional = HTTPBasic(auto_error=False)
 
 START_TIME = time.time()
+
+
+def get_admin_login_html(error: bool = False) -> str:
+    """
+    หน้า login ของ Admin (แทน Basic Auth popup ของเบราว์เซอร์)
+    """
+    err_block = (
+        '<div class="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg mb-2">Invalid username or password.</div>'
+        if error else ""
+    )
+    return f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Login - AI Travel Agent</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 min-h-screen flex items-center justify-center font-sans">
+    <div class="w-full max-w-md">
+        <div class="bg-white rounded-2xl shadow-xl p-8 border border-slate-200">
+            <div class="text-center mb-8">
+                <h1 class="text-2xl font-bold text-slate-800">Admin Dashboard</h1>
+                <p class="text-sm text-slate-500 mt-1">AI Travel Agent — เข้าสู่ระบบเพื่อจัดการระบบ</p>
+            </div>
+            <form method="post" action="/admin/login" class="space-y-5">
+                {err_block}
+                <div>
+                    <label for="username" class="block text-sm font-medium text-slate-700 mb-1">Username</label>
+                    <input type="text" id="username" name="username" required
+                        class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        placeholder="admin" autocomplete="username">
+                </div>
+                <div>
+                    <label for="password" class="block text-sm font-medium text-slate-700 mb-1">Password</label>
+                    <input type="password" id="password" name="password" required
+                        class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        placeholder="••••••••" autocomplete="current-password">
+                </div>
+                <button type="submit"
+                    class="w-full py-2.5 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                    Sign in
+                </button>
+            </form>
+            <p class="text-xs text-slate-400 mt-4 text-center">Authorization required by this site</p>
+        </div>
+    </div>
+</body>
+</html>"""
 
 
 def get_admin_dashboard_html() -> str:
@@ -70,7 +155,10 @@ def get_admin_dashboard_html() -> str:
                 <h1 class="text-2xl font-bold text-gray-900">Admin Dashboard</h1>
                 <p class="text-sm text-gray-500">AI Travel Agent - Backend (แยกจาก Frontend)</p>
             </div>
-            <button onclick="refreshAll()" id="btnRefresh" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">รีเฟรช</button>
+            <div class="flex gap-2">
+                <button onclick="refreshAll()" id="btnRefresh" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">รีเฟรช</button>
+                <a href="/admin/logout" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">ออกจากระบบ</a>
+            </div>
         </header>
 
         <div id="error" class="hidden bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4"></div>
@@ -86,6 +174,16 @@ def get_admin_dashboard_html() -> str:
             </div>
         </div>
 
+        <div class="bg-white rounded-lg shadow mb-6 border-l-4 border-indigo-500">
+            <div class="px-6 py-4 border-b flex justify-between items-center">
+                <h2 class="text-lg font-bold text-gray-900">📊 ตัวชี้วัดผลความแม่นยำ / การเรียนรู้ AI (ต่อ User)</h2>
+                <button onclick="loadAILearningMetrics()" class="text-sm text-indigo-600 hover:underline">Refresh</button>
+            </div>
+            <div class="p-6">
+                <div id="aiLearningMetrics" class="text-sm space-y-4">กำลังโหลด...</div>
+            </div>
+        </div>
+
         <div class="bg-white rounded-lg shadow mb-6">
             <div class="px-6 py-4 border-b flex justify-between items-center">
                 <h2 class="text-lg font-bold text-gray-900">Recent Sessions</h2>
@@ -93,43 +191,6 @@ def get_admin_dashboard_html() -> str:
             </div>
             <div class="p-6 overflow-x-auto">
                 <div id="sessions" class="text-sm">กำลังโหลด...</div>
-            </div>
-        </div>
-
-        <div class="bg-white rounded-lg shadow mb-6">
-            <div class="px-6 py-4 border-b">
-                <h2 class="text-lg font-bold text-gray-900">Amadeus Data Viewer</h2>
-                <p class="text-sm text-gray-500 mt-1">ทดสอบค้นหาเที่ยวบิน/ที่พัก ผ่าน Amadeus API (ใช้ได้ทุกบัญชีที่เข้าสู่ระบบ)</p>
-                <p id="amadeusCurrentUser" class="text-sm text-gray-600 mt-1">กำลังโหลด...</p>
-            </div>
-            <div class="p-6">
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">ดึงข้อมูลจากข้อความ</label>
-                        <div class="flex gap-2">
-                            <input type="text" id="amadeusQuery" placeholder="เช่น เที่ยวบินจากกรุงเทพไปโอซาก้าวันที่ 2026-02-20" class="flex-1 border rounded px-3 py-2 text-sm">
-                            <button type="button" onclick="amadeusExtract()" class="px-3 py-2 bg-gray-600 text-white rounded text-sm hover:bg-gray-700">ดึงข้อมูล</button>
-                        </div>
-                    </div>
-                </div>
-                <div class="flex flex-wrap gap-3 mb-4">
-                    <input type="text" id="amadeusOrigin" placeholder="ต้นทาง (BKK หรือ Bangkok)" class="border rounded px-3 py-2 text-sm w-40">
-                    <input type="text" id="amadeusDest" placeholder="ปลายทาง (KIX หรือ Osaka)" class="border rounded px-3 py-2 text-sm w-40">
-                    <input type="date" id="amadeusDep" class="border rounded px-3 py-2 text-sm">
-                    <input type="date" id="amadeusRet" placeholder="วันกลับ (ไม่บังคับ)" class="border rounded px-3 py-2 text-sm">
-                    <input type="number" id="amadeusAdults" value="1" min="1" max="9" class="border rounded px-3 py-2 text-sm w-20">
-                    <span class="self-center text-sm text-gray-500">ผู้ใหญ่</span>
-                    <button type="button" onclick="amadeusSearch()" id="btnAmadeusSearch" class="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">ค้นหา Amadeus</button>
-                </div>
-                <div id="amadeusResult" class="hidden mt-4">
-                    <div class="flex justify-between items-center mb-2">
-                        <span class="text-sm font-medium text-gray-700">ผลลัพธ์</span>
-                        <button type="button" onclick="toggleAmadeusRaw()" class="text-xs text-blue-600 hover:underline">แสดง/ซ่อน Raw JSON</button>
-                    </div>
-                    <div id="amadeusSummary" class="text-sm text-gray-600 mb-2"></div>
-                    <pre id="amadeusRaw" class="hidden max-h-96 overflow-auto bg-gray-900 text-green-400 font-mono text-xs p-3 rounded"></pre>
-                </div>
-                <div id="amadeusError" class="hidden mt-4 p-3 bg-red-50 border border-red-200 rounded text-sm text-red-700"></div>
             </div>
         </div>
 
@@ -232,32 +293,6 @@ def get_admin_dashboard_html() -> str:
     <script>
         const API = window.location.origin;
         const opts = { credentials: 'include' };
-        let currentUserEmail = '';
-
-        async function loadCurrentUser() {
-            const el = document.getElementById('amadeusCurrentUser');
-            try {
-                const r = await fetch(API + '/api/auth/me', opts);
-                if (r.ok) {
-                    const d = await r.json();
-                    const user = d.user || d;
-                    currentUserEmail = user.email || '';
-                    el.textContent = currentUserEmail ? ('กำลังเข้าสู่ระบบด้วย ' + currentUserEmail) : 'ยังไม่ได้เข้าสู่ระบบ';
-                } else {
-                    currentUserEmail = '';
-                    el.textContent = 'ยังไม่ได้เข้าสู่ระบบ';
-                }
-            } catch (e) {
-                currentUserEmail = '';
-                el.textContent = 'โหลดข้อมูลผู้ใช้ไม่สำเร็จ';
-            }
-        }
-
-        function getAmadeusErrorMsg() {
-            return currentUserEmail
-                ? 'ไม่สามารถใช้ Amadeus Data Viewer ได้ในขณะนี้ กรุณาลองใหม่อีกครั้งหรือตรวจสอบการเข้าสู่ระบบ'
-                : 'กรุณาเข้าสู่ระบบเพื่อใช้ Amadeus Data Viewer';
-        }
 
         function showErr(msg) {
             const el = document.getElementById('error');
@@ -321,98 +356,73 @@ def get_admin_dashboard_html() -> str:
             }
         }
 
+        async function loadAILearningMetrics() {
+            const el = document.getElementById('aiLearningMetrics');
+            el.textContent = 'กำลังโหลด...';
+            try {
+                const r = await fetch(API + '/api/admin/ai-learning-metrics', opts);
+                if (!r.ok) { el.innerHTML = '<p class="text-red-600">โหลดไม่สำเร็จ: ' + r.status + '</p>'; return; }
+                const d = await r.json();
+                if (d.error) { el.innerHTML = '<p class="text-amber-600">' + d.error + '</p>'; return; }
+                const scores = d.scores || {};
+                const rl = d.rl || {};
+                const ch = d.choice_history || {};
+                const mem = d.memory || {};
+                const scoreVal = (rl.score_normalized_0_1 ?? scores.rl_score_normalized ?? 0);
+                const confVal = (rl.confidence_pct ?? scores.rl_confidence_pct ?? 0);
+                const scorePct = Math.round(scoreVal * 100);
+                const summaryHtml =
+                    '<div class="mb-4 p-4 bg-indigo-50 border border-indigo-200 rounded-lg">' +
+                    '<h3 class="font-semibold text-indigo-900 mb-3">📈 คะแนนและความมั่นใจ (จาก ML/RL)</h3>' +
+                    '<div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">' +
+                    '<div><span class="text-gray-600">คะแนน RL (0–1)</span><br><span class="text-xl font-bold text-indigo-700">' + scoreVal + '</span></div>' +
+                    '<div><span class="text-gray-600">คะแนน RL (%)</span><br><span class="text-xl font-bold text-indigo-700">' + scorePct + '%</span></div>' +
+                    '<div><span class="text-gray-600">ความมั่นใจ (สัดส่วนบวก)</span><br><span class="text-xl font-bold text-indigo-700">' + confVal + '%</span></div>' +
+                    '<div><span class="text-gray-600">ค่าเฉลี่ย reward (100 ล่าสุด)</span><br><span class="text-xl font-bold text-indigo-700">' + (rl.recent_avg_reward ?? 0) + '</span></div>' +
+                    '</div>' +
+                    (scores.description ? '<p class="text-xs text-gray-500 mt-2">' + scores.description + '</p>' : '') +
+                    '</div>';
+                el.innerHTML =
+                    summaryHtml +
+                    '<div class="grid grid-cols-1 md:grid-cols-3 gap-4">' +
+                    '<div class="border border-gray-200 rounded-lg p-4 bg-gray-50">' +
+                    '<h3 class="font-semibold text-gray-800 mb-2">🧠 Reinforcement Learning (RL)</h3>' +
+                    '<p class="text-gray-600 text-xs mb-2">' + (rl.description || '') + '</p>' +
+                    '<ul class="space-y-1 text-gray-700">' +
+                    '<li>ประวัติ reward: <strong>' + (rl.total_reward_records ?? 0) + '</strong> รายการ</li>' +
+                    '<li>Q-table: <strong>' + (rl.total_q_entries ?? 0) + '</strong> รายการ</li>' +
+                    '<li>User ที่มีข้อมูล RL: <strong>' + (rl.users_with_rewards ?? 0) + '</strong></li>' +
+                    '<li>คะแนน RL (normalized 0–1): <strong>' + scoreVal + '</strong></li>' +
+                    '<li>ความมั่นใจ (reward บวก): <strong>' + confVal + '%</strong></li>' +
+                    '</ul></div>' +
+                    '<div class="border border-gray-200 rounded-lg p-4 bg-gray-50">' +
+                    '<h3 class="font-semibold text-gray-800 mb-2">🎯 Choice History (Selection Preferences)</h3>' +
+                    '<p class="text-gray-600 text-xs mb-2">' + (ch.description || '') + '</p>' +
+                    '<ul class="space-y-1 text-gray-700">' +
+                    '<li>จำนวนการเลือกบันทึก: <strong>' + (ch.total_records ?? 0) + '</strong></li>' +
+                    '<li>User ที่มีประวัติเลือก: <strong>' + (ch.users_with_choices ?? 0) + '</strong></li>' +
+                    '</ul></div>' +
+                    '<div class="border border-gray-200 rounded-lg p-4 bg-gray-50">' +
+                    '<h3 class="font-semibold text-gray-800 mb-2">💡 Memory (ความจำระยะยาว)</h3>' +
+                    '<p class="text-gray-600 text-xs mb-2">' + (mem.description || '') + '</p>' +
+                    '<ul class="space-y-1 text-gray-700">' +
+                    '<li>ความจำทั้งหมด: <strong>' + (mem.total_memories ?? 0) + '</strong></li>' +
+                    '<li>User ที่มีความจำ: <strong>' + (mem.users_with_memories ?? 0) + '</strong></li>' +
+                    '</ul></div>' +
+                    '</div>';
+            } catch (e) {
+                el.innerHTML = '<p class="text-red-600">Error: ' + e.message + '</p>';
+            }
+        }
+
         function refreshAll() {
             document.getElementById('btnRefresh').disabled = true;
-            Promise.all([loadStatus(), loadSessions()]).finally(() => { document.getElementById('btnRefresh').disabled = false; });
-        }
-
-        async function amadeusExtract() {
-            const q = document.getElementById('amadeusQuery').value.trim();
-            if (!q) return;
-            try {
-                const r = await fetch(API + '/api/amadeus-viewer/extract-info', {
-                    ...opts,
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ query: q })
-                });
-                if (r.status === 401 || r.status === 403) {
-                    document.getElementById('amadeusError').textContent = getAmadeusErrorMsg();
-                    document.getElementById('amadeusError').classList.remove('hidden');
-                    return;
-                }
-                if (!r.ok) { document.getElementById('amadeusError').textContent = 'Error: ' + r.status; document.getElementById('amadeusError').classList.remove('hidden'); return; }
-                const d = await r.json();
-                document.getElementById('amadeusError').classList.add('hidden');
-                if (d.origin) document.getElementById('amadeusOrigin').value = d.origin;
-                if (d.destination) document.getElementById('amadeusDest').value = d.destination;
-                if (d.date) document.getElementById('amadeusDep').value = d.date;
-            } catch (e) {
-                document.getElementById('amadeusError').textContent = 'Extract failed: ' + e.message;
-                document.getElementById('amadeusError').classList.remove('hidden');
-            }
-        }
-
-        async function amadeusSearch() {
-            const origin = document.getElementById('amadeusOrigin').value.trim();
-            const dest = document.getElementById('amadeusDest').value.trim();
-            const dep = document.getElementById('amadeusDep').value;
-            const ret = document.getElementById('amadeusRet').value || null;
-            const adults = parseInt(document.getElementById('amadeusAdults').value, 10) || 1;
-            if (!origin || !dest || !dep) {
-                document.getElementById('amadeusError').textContent = 'กรุณากรอก ต้นทาง, ปลายทาง และวันเดินทาง';
-                document.getElementById('amadeusError').classList.remove('hidden');
-                return;
-            }
-            document.getElementById('btnAmadeusSearch').disabled = true;
-            document.getElementById('amadeusError').classList.add('hidden');
-            document.getElementById('amadeusResult').classList.add('hidden');
-            try {
-                const body = { origin, destination: dest, departure_date: dep, adults };
-                if (ret) body.return_date = ret;
-                const r = await fetch(API + '/api/amadeus-viewer/search', {
-                    ...opts,
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body)
-                });
-                if (r.status === 401 || r.status === 403) {
-                    document.getElementById('amadeusError').textContent = getAmadeusErrorMsg();
-                    document.getElementById('amadeusError').classList.remove('hidden');
-                    document.getElementById('btnAmadeusSearch').disabled = false;
-                    return;
-                }
-                if (!r.ok) {
-                    const err = await r.text();
-                    document.getElementById('amadeusError').textContent = 'Search failed: ' + r.status + ' ' + err;
-                    document.getElementById('amadeusError').classList.remove('hidden');
-                    document.getElementById('btnAmadeusSearch').disabled = false;
-                    return;
-                }
-                const data = await r.json();
-                document.getElementById('amadeusError').classList.add('hidden');
-                const s = data.summary || {};
-                document.getElementById('amadeusSummary').innerHTML =
-                    'เที่ยวบินขาออก: ' + (s.flights_count || 0) + ' | เที่ยวบินขากลับ: ' + (s.return_flights_count || 0) +
-                    ' | ที่พัก: ' + (s.hotels_count || 0) + ' | รถรับส่ง: ' + (s.transfers_count || 0) + ' | สถานที่: ' + (s.places_count || 0);
-                document.getElementById('amadeusRaw').textContent = JSON.stringify(data, null, 2);
-                document.getElementById('amadeusRaw').classList.add('hidden');
-                document.getElementById('amadeusResult').classList.remove('hidden');
-            } catch (e) {
-                document.getElementById('amadeusError').textContent = 'Search failed: ' + e.message;
-                document.getElementById('amadeusError').classList.remove('hidden');
-            }
-            document.getElementById('btnAmadeusSearch').disabled = false;
-        }
-
-        function toggleAmadeusRaw() {
-            const el = document.getElementById('amadeusRaw');
-            el.classList.toggle('hidden');
+            Promise.all([loadStatus(), loadSessions(), loadAILearningMetrics()]).finally(() => { document.getElementById('btnRefresh').disabled = false; });
         }
 
         loadStatus();
         loadSessions();
-        loadCurrentUser();
+        loadAILearningMetrics();
 
         // ============================================================
         // Notification Simulator JS
@@ -576,34 +586,36 @@ def get_admin_dashboard_html() -> str:
 </body>
 </html>"""
 
-# 🔒 Admin Authentication Helper
-def verify_admin_auth(credentials: HTTPBasicCredentials = Depends(security)) -> bool:
+# 🔒 Admin Authentication Helper — รองรับทั้ง Cookie (จากหน้า login) และ Basic Auth
+async def verify_admin_auth(
+    request: Request,
+    credentials: Optional[HTTPBasicCredentials] = Depends(security_optional),
+) -> bool:
     """
-    Verify admin password authentication
-    In production, use ADMIN_PASSWORD env var
+    ยืนยันตัวตนแอดมิน: ตรวจสอบ cookie (admin_session) ก่อน ถ้าไม่มีหรือไม่ถูกต้องจึงใช้ Basic Auth
     """
     if not settings.admin_require_auth:
-        return True  # Auth disabled
-    
+        return True
     if not settings.admin_password:
         logger.warning("Admin authentication required but ADMIN_PASSWORD not set. Allowing access.")
-        return True  # Allow if password not set (warning only)
-    
-    # Compare password (using constant-time comparison to prevent timing attacks)
-    provided = credentials.password.encode('utf-8')
-    expected = settings.admin_password.encode('utf-8')
-    
-    # Use secrets.compare_digest for constant-time comparison
-    if not secrets.compare_digest(provided, expected):
-        logger.warning(f"Admin authentication failed from {credentials.username}")
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid admin credentials",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    
-    logger.info(f"Admin authentication successful: {credentials.username}")
-    return True
+        return True
+    # 1) Cookie จากหน้า login
+    token = request.cookies.get(ADMIN_SESSION_COOKIE)
+    if token and verify_admin_session_token(token):
+        return True
+    # 2) Basic Auth (สำหรับ API client หรือเบราว์เซอร์ที่ยังใช้ popup)
+    if credentials:
+        provided = credentials.password.encode("utf-8")
+        expected = settings.admin_password.encode("utf-8")
+        if secrets.compare_digest(provided, expected):
+            logger.info(f"Admin authentication successful: {credentials.username}")
+            return True
+    logger.warning("Admin authentication failed (no valid cookie or Basic credentials)")
+    raise HTTPException(
+        status_code=401,
+        detail="Invalid admin credentials",
+        headers={"WWW-Authenticate": "Basic"},
+    )
 
 @router.get("/status")
 async def get_system_status(_auth: bool = Depends(verify_admin_auth)):
@@ -754,6 +766,79 @@ async def get_system_status(_auth: bool = Depends(verify_admin_auth)):
             "active_threads": process.num_threads()
         }
     }
+
+
+@router.get("/ai-learning-metrics")
+async def get_ai_learning_metrics(_auth: bool = Depends(verify_admin_auth)):
+    """
+    ตัวชี้วัดผลความแม่นยำและการเรียนรู้ AI ต่อผู้ใช้ (RL, Choice History, Memory)
+    """
+    try:
+        from app.storage.connection_manager import ConnectionManager
+        from app.services.selection_preferences import COLLECTION_CHOICE_HISTORY
+        mongo_manager = ConnectionManager.get_instance()
+        db = mongo_manager.get_mongo_database()
+        if db is None:
+            return {"error": "Database not available", "rl": {}, "choice_history": {}, "memory": {}, "scores": {}}
+        rl_rewards = db["user_feedback_history"]
+        rl_qtable = db["user_preference_scores"]
+        choice_col = db[COLLECTION_CHOICE_HISTORY]
+        memories_col = db["memories"]
+
+        total_rewards = await rl_rewards.count_documents({})
+        total_q = await rl_qtable.count_documents({})
+        users_with_rewards = len(await rl_rewards.distinct("user_id"))
+        users_with_q = len(await rl_qtable.distinct("user_id"))
+        recent_rewards = await rl_rewards.find({}).sort("created_at", -1).limit(100).to_list(length=100)
+        avg_reward = 0.0
+        if recent_rewards:
+            avg_reward = sum(r.get("reward", 0) for r in recent_rewards) / len(recent_rewards)
+        positive_count = sum(1 for r in recent_rewards if r.get("reward", 0) > 0)
+        reward_positive_ratio = (positive_count / len(recent_rewards) * 100) if recent_rewards else 0
+
+        total_choices = await choice_col.count_documents({})
+        users_with_choices = len(await choice_col.distinct("user_id"))
+
+        total_memories = await memories_col.count_documents({})
+        users_with_memories = len(await memories_col.distinct("user_id"))
+
+        # คะแนนและความมั่นใจจาก RL (normalize reward ~[-0.5,1] → 0-1, ความมั่นใจ = สัดส่วน reward บวก)
+        rl_score_normalized = round(max(0.0, min(1.0, (avg_reward + 0.5) / 1.5)), 3)
+        rl_confidence_pct = round(reward_positive_ratio, 1)
+
+        return {
+            "scores": {
+                "rl_score": round(avg_reward, 3),
+                "rl_score_normalized": rl_score_normalized,
+                "rl_confidence_pct": rl_confidence_pct,
+                "description": "คะแนน RL จากค่าเฉลี่ย reward (100 ล่าสุด); ความมั่นใจ = สัดส่วนการเลือกที่เป็นบวก (%)"
+            },
+            "rl": {
+                "total_reward_records": total_rewards,
+                "total_q_entries": total_q,
+                "users_with_rewards": users_with_rewards,
+                "users_with_q": users_with_q,
+                "recent_avg_reward": round(avg_reward, 3),
+                "recent_positive_ratio_pct": round(reward_positive_ratio, 1),
+                "score_normalized_0_1": rl_score_normalized,
+                "confidence_pct": rl_confidence_pct,
+                "description": "Reinforcement Learning: ประวัติการเลือก/ปฏิเสธและ Q-values ต่อ user"
+            },
+            "choice_history": {
+                "total_records": total_choices,
+                "users_with_choices": users_with_choices,
+                "description": "ประวัติการเลือกตัวเลือก (flight/hotel/transport) สำหรับสรุปความชอบ"
+            },
+            "memory": {
+                "total_memories": total_memories,
+                "users_with_memories": users_with_memories,
+                "description": "ความจำระยะยาวของ AI ต่อผู้ใช้ (memory consolidation)"
+            }
+        }
+    except Exception as e:
+        logger.warning(f"AI learning metrics failed: {e}", exc_info=True)
+        return {"error": str(e), "rl": {}, "choice_history": {}, "memory": {}, "scores": {}}
+
 
 @router.get("/logs")
 async def get_logs(lines: int = 100, _auth: bool = Depends(verify_admin_auth)):

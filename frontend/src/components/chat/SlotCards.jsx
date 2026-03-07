@@ -1,4 +1,5 @@
 import React from 'react';
+import { AIRLINE_NAMES } from '../../data/airlineNames';
 import '../bookings/TripSummaryUI.css';
 
 // Helper functions
@@ -50,13 +51,7 @@ function formatThaiDateTime(isoDateTime) {
 
 function getAirlineName(code) {
   if (!code) return 'Unknown';
-  const airlineNames = {
-    'TG': 'Thai Airways', 'FD': 'Thai AirAsia', 'SL': 'Thai Lion Air', 'PG': 'Bangkok Airways',
-    'VZ': 'Thai Vietjet Air', 'WE': 'Thai Smile', 'XJ': 'Thai AirAsia X', 'DD': 'Nok Air',
-    'SQ': 'Singapore Airlines', 'MH': 'Malaysia Airlines', 'CX': 'Cathay Pacific',
-    'JL': 'Japan Airlines', 'NH': 'All Nippon Airways', 'KE': 'Korean Air',
-  };
-  return airlineNames[code.toUpperCase()] || code;
+  return AIRLINE_NAMES[code.toUpperCase()] || code;
 }
 
 // Flight Slot Card
@@ -188,7 +183,7 @@ export function TransportSlotCard({ transport }) {
           <span className="slot-card-status">ยังไม่ได้เลือก</span>
         </div>
         <div className="slot-card-body">
-          <div className="slot-card-empty">พิมพ์ในแชทเพื่อเลือกการเดินทาง เช่น "ขอรถเช่า" หรือ "ขอรถไฟ"</div>
+          <div className="slot-card-empty">พิมพ์ในแชทเพื่อเลือกการเดินทาง เช่น "ขอรถเช่า"</div>
         </div>
       </div>
     );

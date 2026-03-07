@@ -2,10 +2,13 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import './AppHeader.css';
 import NotificationPanel from './NotificationPanel';
 import { useLanguage } from '../../context/LanguageContext';
+import { useFontSize } from '../../context/FontSizeContext';
+import { useTheme } from '../../context/ThemeContext';
 
-export default function AppHeader({ 
-  activeTab = 'ai', 
-  user = null, 
+export default function AppHeader({
+  activeTab = 'ai',
+  theme: themeProp,
+  user = null,
   onTabChange = () => {},
   onNavigateToBookings = null,
   onNavigateToAI = null,
@@ -26,6 +29,9 @@ export default function AppHeader({
   onClearAllNotifications = null
 }) {
   const { t } = useLanguage();
+  const fontSize = useFontSize();
+  const themeContext = useTheme();
+  const theme = themeProp ?? themeContext;
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   const [showUserPopup, setShowUserPopup] = useState(false);
   const notificationButtonRef = useRef(null);
@@ -138,7 +144,7 @@ export default function AppHeader({
   };
 
   return (
-    <header className="app-header">
+    <header className="app-header" data-theme={theme} data-font-size={fontSize}>
       <div className="app-header-content">
         <div className="app-logo-section" onClick={onNavigateToHome} style={{ cursor: 'pointer' }}>
           <div className="app-logo-icon">

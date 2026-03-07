@@ -72,8 +72,14 @@ class Settings:
         
         # Logging Configuration
         self.log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
-        log_file_str = os.getenv("LOG_FILE")
-        self.log_file: Optional[Path] = Path(log_file_str) if log_file_str else None
+        log_file_str = os.getenv("LOG_FILE", "").strip()
+        if log_file_str:
+            self.log_file: Optional[Path] = Path(log_file_str)
+        else:
+            # Default: data/logs/travel_agent.log (ใต้ backend) — ให้ Admin System Logs ใช้ได้แม้ไม่ตั้ง LOG_FILE
+            _log_dir = _BASE_DIR / "data" / "logs"
+            _log_dir.mkdir(parents=True, exist_ok=True)
+            self.log_file: Optional[Path] = _log_dir / "travel_agent.log"
         
         # Agent Configuration
         # Default true: ใช้ LangChain/LangGraph เป็นค่าเริ่มต้นของระบบ (ไม่ต้องตั้งใน .env)
@@ -92,9 +98,13 @@ class Settings:
         # Middleware timeout ต้องมากกว่า chat timeout อย่างน้อย 10s (buffer)
         self.chat_middleware_timeout: int = self.chat_timeout_agent + 15
         
-        # MongoDB Configuration
-        self.mongodb_uri: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-        self.mongodb_database: str = os.getenv("MONGODB_DATABASE", "travel_agent")
+        # MongoDB Configuration (MONGO_* = ปัจจุบัน, MONGODB_* = fallback)
+        self.mongodb_uri: str = (
+            os.getenv("MONGO_URI") or os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+        ).strip()
+        self.mongodb_database: str = (
+            os.getenv("MONGO_DB_NAME") or os.getenv("MONGODB_DATABASE", "travel_agent")
+        ).strip()
         
         # Authentication Configuration
         # Try GOOGLE_CLIENT_ID first, fallback to VITE_GOOGLE_CLIENT_ID (for shared .env)

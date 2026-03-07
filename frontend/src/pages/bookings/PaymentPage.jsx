@@ -4,11 +4,134 @@ import AppHeader from '../../components/common/AppHeader';
 import { useTheme } from '../../context/ThemeContext';
 import { useFontSize } from '../../context/FontSizeContext';
 import { loadOmiseScript, createTokenAsync } from '../../utils/omiseLoader';
+import { formatPriceInThb } from '../../utils/currency';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
+/** แปลง error จาก fetch (เช่น Failed to fetch) เป็นข้อความที่ผู้ใช้เข้าใจได้ */
+function toPaymentErrorMessage(err, fallback = 'เกิดข้อผิดพลาด') {
+  const msg = err?.message || '';
+  if (!msg) return fallback;
+  if (/failed to fetch|network error|load failed|network request failed/i.test(msg)) {
+    return 'เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ — กรุณาตรวจสอบว่า Backend (พอร์ต 8000) รันอยู่ และ VITE_API_BASE_URL ถูกต้อง หรือลองรีเฟรชหน้า';
+  }
+  return msg;
+}
+
+/** ดึงข้อมูลทริปจาก booking: ใช้ travel_slots ก่อน ถ้าไม่มีหรือไม่ครบ ให้ดึงจาก plan (รองรับ current_plan และ trip_plan format) */
+function getTripSummaryFromBooking(booking) {
+  const ts = booking?.travel_slots || {};
+  const plan = booking?.plan || {};
+  const travel = plan.travel || {};
+  const flights = travel.flights || {};
+  const outbound = flights.outbound || plan.flight?.outbound || [];
+  const inbound = flights.inbound || plan.flight?.inbound || [];
+  const acc = plan.accommodation || {};
+  const accSegments = acc.segments || plan.hotel?.segments || [];
+  const flightSegments = ts.flights || outbound.concat(inbound) || plan.flight?.segments || [];
+  const accommodations = ts.accommodations || accSegments || plan.hotel?.segments || [];
+
+  const firstOut = outbound[0] || flightSegments[0];
+  const firstIn = inbound[0] || flightSegments[flightSegments.length - 1];
+  const req = (seg) => seg?.requirements || {};
+  const depFromSeg = (seg) => seg && (req(seg).departure_date || seg?.departure_date);
+  const originFromSeg = (seg) => {
+    if (!seg) return '';
+    const r = req(seg);
+    const opt = seg?.selected_option;
+    const dep = opt?.raw_data?.itineraries?.[0]?.segments?.[0]?.departure;
+    return r?.origin || r?.from || dep?.iataCode || seg?.from || '';
+  };
+  const destFromSeg = (seg) => {
+    if (!seg) return '';
+    const r = req(seg);
+    const opt = seg?.selected_option;
+    const segs = opt?.raw_data?.itineraries?.[0]?.segments || [];
+    const arr = segs.length ? segs[segs.length - 1].arrival : null;
+    return r?.destination || r?.to || arr?.iataCode || seg?.to || '';
+  };
+
+  const origin = ts.origin_city || ts.origin || originFromSeg(firstOut) || originFromSeg(flightSegments[0]) || plan.flight?.origin || plan.flight?.origin_city || '';
+  const destination = ts.destination_city || ts.destination || destFromSeg(firstOut) || destFromSeg(firstIn) || destFromSeg(flightSegments[flightSegments.length - 1]) || plan.flight?.destination || plan.flight?.destination_city || '';
+  const departureDate = ts.departure_date || ts.start_date || depFromSeg(firstOut) || depFromSeg(flightSegments[0]) || plan.flight?.departure_date || '';
+  const returnDate = ts.return_date || ts.end_date || depFromSeg(firstIn) || plan.flight?.return_date || '';
+  const nights = ts.nights ?? accSegments[0]?.requirements?.nights ?? accSegments[0]?.nights ?? plan.hotel?.nights ?? (plan.hotel?.nights != null ? plan.hotel.nights : undefined);
+  const adults = ts.adults ?? ts.guests ?? 1;
+  const isAccommodationOnly = accommodations.length > 0 && flightSegments.length === 0;
+  const firstAcc = accommodations[0];
+  const hotelName = firstAcc?.selected_option?.hotel?.hotelName
+    || firstAcc?.selected_option?.hotel?.name
+    || firstAcc?.selected_option?.display_name
+    || firstAcc?.selected_option?.name
+    || firstAcc?.requirements?.location
+    || plan.hotel?.hotelName
+    || plan.hotel?.name
+    || plan.hotel?.display_name
+    || '';
+
+  return {
+    origin,
+    destination,
+    departureDate,
+    returnDate,
+    nights,
+    adults,
+    accommodations,
+    flights: flightSegments,
+    isAccommodationOnly,
+    hotelName,
+    travelSlots: { ...ts, origin_city: origin, destination_city: destination, departure_date: departureDate, return_date: returnDate, end_date: returnDate, nights, adults }
+  };
+}
+
+/** คำนวณยอดชำระจาก booking: ใช้ total_price ก่อน ถ้าเป็น 0 หรือไม่มี ให้รวมจาก plan (flight + hotel + transport) */
+function getBookingAmount(booking) {
+  const rawTotal = booking?.total_price;
+  const fromTotal = typeof rawTotal === 'string' ? parseFloat(rawTotal) : Number(rawTotal);
+  if (fromTotal != null && !isNaN(fromTotal) && fromTotal > 0) {
+    return Math.round(fromTotal * 100) / 100;
+  }
+  const plan = booking?.plan || {};
+  const pick = (obj, ...keys) => {
+    if (!obj || typeof obj !== 'object') return 0;
+    const key = keys.find((k) => obj[k] != null && obj[k] !== '');
+    const val = key != null ? obj[key] : null;
+    const n = typeof val === 'string' ? parseFloat(val) : Number(val);
+    return n != null && !isNaN(n) ? n : 0;
+  };
+  let sum = 0;
+  if (plan.total_price != null) {
+    const p = typeof plan.total_price === 'string' ? parseFloat(plan.total_price) : Number(plan.total_price);
+    if (!isNaN(p) && p > 0) return Math.round(p * 100) / 100;
+  }
+  const flightData = plan.flight || {};
+  sum += pick(flightData, 'price_total', 'price_amount', 'price', 'total_price');
+  const hotelData = plan.hotel || plan.accommodation || {};
+  const hotelPrice = pick(hotelData, 'price_total', 'price_amount', 'price', 'total_price');
+  if (hotelPrice > 0) {
+    sum += hotelPrice;
+  } else if (hotelData.nightly_rate != null) {
+    const nights = Number(booking?.travel_slots?.nights || booking?.travel_slots?.number_of_nights || 1) || 1;
+    sum += Number(hotelData.nightly_rate) * nights;
+  }
+  const transportData = plan.transport || plan.transfer || {};
+  sum += pick(transportData, 'price_total', 'price_amount', 'price', 'total_price');
+  if (sum <= 0 && (plan.travel?.flights || plan.flight?.segments)) {
+    const out = plan.travel?.flights?.outbound || plan.flight?.outbound || [];
+    const inv = plan.travel?.flights?.inbound || plan.flight?.inbound || [];
+    const segs = plan.flight?.segments || [...out, ...inv];
+    segs.forEach((seg) => {
+      const opt = seg?.selected_option;
+      if (opt) sum += pick(opt, 'price_amount', 'price_total', 'price');
+    });
+  }
+  return Math.round((sum || 0) * 100) / 100;
+}
+
 export default function PaymentPage({ 
   bookingId, 
+  tripId = null,
+  initialBooking = null,
   user, 
   onBack, 
   onPaymentSuccess,
@@ -24,8 +147,9 @@ export default function PaymentPage({
   const [error, setError] = useState(null);
   const [omiseLoaded, setOmiseLoaded] = useState(false);
   
-  // วิธีชำระเงิน: ใช้บัตรที่บันทึก หรือ บัตรใหม่
-  const [paymentMethod, setPaymentMethod] = useState('new'); // 'new' | 'saved'
+  // วิธีชำระเงิน: ใช้บัตรที่บันทึก | บัตรใหม่ | สแกน QR PromtPay
+  const [paymentMethod, setPaymentMethod] = useState('new'); // 'new' | 'saved' | 'promptpay'
+  const [promptpayResult, setPromptpayResult] = useState(null); // { authorize_uri, qr_download_uri, charge_id } หลังกดชำระด้วย PromtPay
   const [selectedSavedCardId, setSelectedSavedCardId] = useState(null);
   const [savedCards, setSavedCards] = useState([]); // โหลดจาก API GET /api/booking/saved-cards
   const [savedCardsCustomerId, setSavedCardsCustomerId] = useState(null);
@@ -53,6 +177,19 @@ export default function PaymentPage({
   const theme = useTheme();
   const fontSize = useFontSize();
 
+  // ใช้ initialBooking จาก My Bookings เพื่อแสดงยอด/ทริปทันที (ก่อนโหลดจาก API)
+  useEffect(() => {
+    if (!initialBooking) return;
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlBookingId = urlParams.get('booking_id') || urlParams.get('id');
+    const urlTripId = urlParams.get('trip_id') || urlParams.get('tripId');
+    const finalBookingId = bookingId || urlBookingId;
+    const finalTripId = tripId || urlTripId;
+    const idMatch = finalBookingId && String(initialBooking.booking_id || initialBooking._id || '') === String(finalBookingId);
+    const tripMatch = finalTripId && String(initialBooking.trip_id || '') === String(finalTripId);
+    if (idMatch || tripMatch) setBooking(initialBooking);
+  }, [initialBooking, bookingId, tripId]);
+
   // ที่อยู่ปัจจุบันจากโปรไฟล์ (มี address_line1 หรือ city ถือว่ามีที่อยู่)
   const userHasAddress = Boolean(
     user?.address_line1?.trim() || user?.city?.trim() || user?.postal_code?.trim()
@@ -69,22 +206,19 @@ export default function PaymentPage({
     : null;
 
   useEffect(() => {
-    // Get booking_id from URL if not provided as prop
     const urlParams = new URLSearchParams(window.location.search);
     const urlBookingId = urlParams.get('booking_id') || urlParams.get('id');
+    const urlTripId = urlParams.get('trip_id') || urlParams.get('tripId');
     const finalBookingId = bookingId || urlBookingId;
-    
-    if (finalBookingId) {
-      // Update bookingId if from URL
-      if (urlBookingId && !bookingId) {
-        // bookingId will be used from URL
-      }
+    const finalTripId = tripId || urlTripId;
+
+    if (finalBookingId || finalTripId) {
       loadBooking();
     } else {
-      setError('ไม่พบ Booking ID');
+      setError('ไม่พบ Booking ID หรือ Trip ID');
       setLoading(false);
     }
-    
+
     loadOmiseScript(API_BASE_URL).then(() => {
       setOmiseLoaded(true);
       setError(null);
@@ -92,7 +226,19 @@ export default function PaymentPage({
       console.error('Failed to load Omise:', err);
       setError('omise_load_failed');
     });
-  }, [bookingId]);
+  }, [bookingId, tripId]);
+
+  // โหลด booking อีกครั้งเมื่อ user พร้อม (ดึงจาก trip_id หรือ booking_id พร้อมราคาชำระเงิน)
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlBookingId = urlParams.get('booking_id') || urlParams.get('id');
+    const urlTripId = urlParams.get('trip_id') || urlParams.get('tripId');
+    const finalBookingId = bookingId || urlBookingId;
+    const finalTripId = tripId || urlTripId;
+    const uid = user?.user_id || user?.id;
+    if ((!finalBookingId && !finalTripId) || !uid) return;
+    loadBooking();
+  }, [user?.user_id, user?.id, bookingId, tripId]);
 
   const retryLoadOmise = () => {
     setError(null);
@@ -152,61 +298,109 @@ export default function PaymentPage({
     setLoading(true);
     setError(null);
     try {
-      // Get booking_id from URL if not provided as prop
       const urlParams = new URLSearchParams(window.location.search);
       const urlBookingId = urlParams.get('booking_id') || urlParams.get('id');
+      const urlTripId = urlParams.get('trip_id') || urlParams.get('tripId');
       const finalBookingId = bookingId || urlBookingId;
-      
-      if (!finalBookingId) {
-        setError('ไม่พบ Booking ID');
+      const finalTripId = tripId || urlTripId;
+
+      if (!finalBookingId && !finalTripId) {
+        setError('ไม่พบ Booking ID หรือ Trip ID');
         setLoading(false);
         return;
       }
-      
-      const headers = {
-        'Content-Type': 'application/json'
-      };
-      
+
+      const headers = { 'Content-Type': 'application/json' };
       const userId = user?.user_id || user?.id;
       if (userId) headers['X-User-ID'] = userId;
 
-      const res = await fetch(`${API_BASE_URL}/api/booking/list`, {
-        headers,
-        credentials: 'include',
-      });
-      
-      if (!res.ok) {
-        throw new Error(`HTTP Error: ${res.status}`);
-      }
-      
-      const data = await res.json();
-      
-      if (data?.ok && data.bookings) {
-        const foundBooking = data.bookings.find(b => 
-          b._id === finalBookingId || 
-          b.booking_id === finalBookingId ||
-          String(b._id) === String(finalBookingId)
+      // ถ้ามี trip_id: ดึงจาก GET /by-trip (ได้ booking + ราคาชำระเงิน)
+      if (finalTripId) {
+        const byTripRes = await fetch(
+          `${API_BASE_URL}/api/booking/by-trip?trip_id=${encodeURIComponent(finalTripId)}`,
+          { headers, credentials: 'include' }
         );
-        if (foundBooking) {
-          setBooking(foundBooking);
-          
-          // Pre-fill form with user data if available
-          if (user) {
-            setFormData(prev => ({
-              ...prev,
-              email: user.email || prev.email,
-              cardName: user.full_name || user.first_name || prev.cardName
-            }));
+        if (byTripRes.ok) {
+          const byTripData = await byTripRes.json();
+          if (byTripData?.ok && byTripData.booking) {
+            const b = byTripData.booking;
+            if (byTripData.amount != null && (b.total_price == null || Number(b.total_price) <= 0)) {
+              b.total_price = byTripData.amount;
+            }
+            setBooking(b);
+            if (user) {
+              setFormData(prev => ({
+                ...prev,
+                email: user.email || prev.email,
+                cardName: user.full_name || user.first_name || prev.cardName
+              }));
+            }
+            setLoading(false);
+            return;
+          }
+        }
+      }
+
+      // ถ้ามี booking_id: ดึงจาก GET /detail ก่อน (ได้ plan, travel_slots, total_price ครบ)
+      if (finalBookingId) {
+        const detailRes = await fetch(
+          `${API_BASE_URL}/api/booking/detail?booking_id=${encodeURIComponent(finalBookingId)}`,
+          { headers, credentials: 'include' }
+        );
+        if (detailRes.ok) {
+          const detailData = await detailRes.json();
+          if (detailData?.ok && detailData.booking) {
+            setBooking(detailData.booking);
+            if (user) {
+              setFormData(prev => ({
+                ...prev,
+                email: user.email || prev.email,
+                cardName: user.full_name || user.first_name || prev.cardName
+              }));
+            }
+            setLoading(false);
+            return;
+          }
+        }
+
+        // Fallback: ดึงจาก list แล้วหาใน array
+        const res = await fetch(`${API_BASE_URL}/api/booking/list`, {
+          headers,
+          credentials: 'include',
+        });
+        if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
+        const data = await res.json();
+
+        if (data?.ok && data.bookings) {
+          const foundBooking = data.bookings.find(b =>
+            b._id === finalBookingId ||
+            b.booking_id === finalBookingId ||
+            String(b._id) === String(finalBookingId)
+          );
+          if (foundBooking) {
+            const hasAmountOrPlan = (getBookingAmount(foundBooking) > 0) || !!foundBooking?.plan;
+            if (hasAmountOrPlan) {
+              setBooking(foundBooking);
+              if (user) {
+                setFormData(prev => ({
+                  ...prev,
+                  email: user.email || prev.email,
+                  cardName: user.full_name || user.first_name || prev.cardName
+                }));
+              }
+            }
+          } else {
+            setError('ไม่พบข้อมูลการจอง');
           }
         } else {
-          setError('ไม่พบข้อมูลการจอง');
+          setError('ไม่สามารถโหลดข้อมูลการจองได้');
         }
       } else {
-        setError('ไม่สามารถโหลดข้อมูลการจองได้');
+        setError('ไม่พบการจองของทริปนี้');
       }
     } catch (err) {
       console.error('[PaymentPage] Error loading booking:', err);
-      setError(err.message || 'เกิดข้อผิดพลาดในการเชื่อมต่อ');
+      setError(toPaymentErrorMessage(err, 'เกิดข้อผิดพลาดในการเชื่อมต่อ'));
     } finally {
       setLoading(false);
     }
@@ -346,6 +540,64 @@ export default function PaymentPage({
       return;
     }
 
+    if (paymentMethod === 'promptpay') {
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlBookingId = urlParams.get('booking_id') || urlParams.get('id');
+      const finalBookingId = [booking?.booking_id, booking?._id, bookingId, urlBookingId]
+        .map((v) => (v && typeof v === 'object' && v.$oid ? v.$oid : v))
+        .find((v) => v != null && String(v).trim() !== '');
+      const bookingIdStr = finalBookingId != null ? String(finalBookingId).trim() : '';
+      if (!bookingIdStr) {
+        setError('ไม่พบ Booking ID กรุณากลับไปเลือกการจองใหม่');
+        return;
+      }
+      const chargeAmount = getBookingAmount(booking);
+      if (chargeAmount < 20) {
+        setError('ยอดขั้นต่ำสำหรับ PromtPay คือ ฿20');
+        return;
+      }
+      setProcessing(true);
+      setError(null);
+      setPromptpayResult(null);
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        const uid = user?.user_id || user?.id;
+        if (uid) headers['X-User-ID'] = uid;
+        const chargeRes = await fetch(`${API_BASE_URL}/api/booking/create-charge`, {
+          method: 'POST',
+          headers,
+          credentials: 'include',
+          body: JSON.stringify({
+            booking_id: bookingIdStr,
+            amount: chargeAmount,
+            currency: (booking?.currency || 'THB').toUpperCase(),
+            payment_method: 'promptpay'
+          })
+        });
+        const chargeData = await chargeRes.json();
+        const getChargeError = (data) => {
+          const d = data?.detail;
+          if (typeof d === 'string') return d;
+          if (Array.isArray(d) && d.length > 0) return (d[0]?.msg || d[0]?.message) || d.map((e) => e.msg).filter(Boolean).join(', ');
+          if (d && typeof d === 'object' && d.message) return d.message;
+          return data?.error || 'สร้าง QR ไม่สำเร็จ';
+        };
+        if (!chargeRes.ok || !chargeData.ok) {
+          throw new Error(getChargeError(chargeData));
+        }
+        setPromptpayResult({
+          authorize_uri: chargeData.authorize_uri,
+          qr_download_uri: chargeData.qr_download_uri,
+          charge_id: chargeData.charge_id
+        });
+      } catch (err) {
+        setError(err.message || 'เกิดข้อผิดพลาด');
+      } finally {
+        setProcessing(false);
+      }
+      return;
+    }
+
     if (paymentMethod === 'saved') {
       if (!selectedSavedCardId || !savedCardsCustomerId) {
         setError('กรุณาเลือกบัตรที่บันทึกไว้');
@@ -375,7 +627,7 @@ export default function PaymentPage({
             booking_id: bookingIdStr,
             card_id: selectedSavedCardId,
             customer_id: savedCardsCustomerId,
-            amount: Number(booking?.total_price) || 0,
+            amount: getBookingAmount(booking),
             currency: (booking?.currency || 'THB').toUpperCase()
           })
         });
@@ -396,7 +648,7 @@ export default function PaymentPage({
           window.location.href = `/bookings?booking_id=${bookingIdStr}&payment_status=success`;
         }
       } catch (err) {
-        setError(err.message || 'เกิดข้อผิดพลาดในการชำระเงิน');
+        setError(toPaymentErrorMessage(err, 'เกิดข้อผิดพลาดในการชำระเงิน'));
       } finally {
         setProcessing(false);
       }
@@ -431,9 +683,10 @@ export default function PaymentPage({
       setError('ไม่พบ Booking ID กรุณากลับไปเลือกการจองใหม่');
       return;
     }
-    const chargeAmount = Math.round((Number(booking?.total_price) || 0) * 100) / 100;
+    const chargeAmount = getBookingAmount(booking);
     if (chargeAmount <= 0) {
-      setError('ยอดชำระไม่ถูกต้อง');
+      setError('ยอดชำระไม่ถูกต้อง — ไม่พบราคาในรายการจอง กรุณากลับไปตรวจสอบหรือติดต่อฝ่ายบริการ');
+      setProcessing(false);
       return;
     }
 
@@ -554,7 +807,7 @@ export default function PaymentPage({
 
     } catch (err) {
       console.error('[PaymentPage] Payment error:', err);
-      setError(err.message || 'เกิดข้อผิดพลาดในการชำระเงิน');
+      setError(toPaymentErrorMessage(err, 'เกิดข้อผิดพลาดในการชำระเงิน'));
       setProcessing(false);
     }
   };
@@ -613,12 +866,22 @@ export default function PaymentPage({
     );
   }
 
-  const travelSlots = booking?.travel_slots || {};
-  const origin = travelSlots.origin_city || travelSlots.origin || '';
-  const destination = travelSlots.destination_city || travelSlots.destination || '';
-  const departureDate = travelSlots.departure_date || '';
-  // ปัดยอดเป็น 2 ทศนิยมให้ตรงกับยอดที่ส่ง charge — แสดงและเรียกเก็บเท่ากัน
-  const amount = Math.round((Number(booking?.total_price) || 0) * 100) / 100;
+  const tripSummary = booking ? getTripSummaryFromBooking(booking) : null;
+  const travelSlots = tripSummary?.travelSlots || booking?.travel_slots || {};
+  const origin = tripSummary?.origin ?? travelSlots.origin_city ?? travelSlots.origin ?? '';
+  const destination = tripSummary?.destination ?? travelSlots.destination_city ?? travelSlots.destination ?? '';
+  const departureDate = tripSummary?.departureDate ?? travelSlots.departure_date ?? '';
+  const returnDate = tripSummary?.returnDate ?? travelSlots.return_date ?? travelSlots.end_date ?? '';
+  const accommodations = tripSummary?.accommodations ?? travelSlots.accommodations ?? [];
+  const flights = tripSummary?.flights ?? travelSlots.flights ?? [];
+  const isAccommodationOnly = tripSummary?.isAccommodationOnly ?? (accommodations.length > 0 && flights.length === 0);
+  const hotelName = tripSummary?.hotelName ?? (isAccommodationOnly && accommodations[0]
+    ? (accommodations[0]?.selected_option?.display_name || accommodations[0]?.selected_option?.name || accommodations[0]?.requirements?.location || '')
+    : '');
+  const nights = tripSummary?.nights ?? travelSlots.nights;
+  const adults = tripSummary?.adults ?? travelSlots.adults;
+
+  const amount = getBookingAmount(booking);
   const currency = booking?.currency || 'THB';
 
   return (
@@ -647,44 +910,36 @@ export default function PaymentPage({
             
             <div className="price-display">
               <div className="price-main">
-                {new Intl.NumberFormat('th-TH', {
-                  style: 'currency',
-                  currency: currency,
-                  minimumFractionDigits: 0,
-                }).format(amount)}
+                {formatPriceInThb(amount, currency)}
               </div>
               <div className="price-period">สำหรับการจองทริป</div>
+              {amount <= 0 && booking?.booking_id && (
+                <div className="price-period" style={{ marginTop: 6, fontSize: 12, opacity: 0.85 }}>
+                  ถ้าราคาเป็น ฿0 — ลองรีเฟรชหรือกลับไป My Bookings แล้วกดชำระเงินอีกครั้ง
+                </div>
+              )}
             </div>
             
             <div className="product-details">
-              <div className="product-name">✈️ {origin && destination ? `${origin} → ${destination}` : 'ทริป'}</div>
+              <div className="product-name">
+                {isAccommodationOnly && hotelName ? `🏨 ${hotelName}` : origin && destination ? `✈️ ${origin} → ${destination}` : (booking?.booking_id ? `✈️ ทริป #${String(booking.booking_id).slice(-6)}` : '✈️ ทริป')}
+              </div>
               <div className="product-description">
-                {departureDate && <div>วันเดินทาง: {departureDate}</div>}
-                {travelSlots.nights && <div>จำนวนคืน: {travelSlots.nights} คืน</div>}
-                {travelSlots.adults && <div>ผู้โดยสาร: {travelSlots.adults} ผู้ใหญ่</div>}
+                {departureDate && <div>{isAccommodationOnly ? 'เช็คอิน' : 'วันเดินทาง'}: {departureDate}</div>}
+                {(returnDate || travelSlots.return_date || travelSlots.end_date) && <div>{isAccommodationOnly ? 'เช็คเอาท์' : 'วันกลับ'}: {returnDate || travelSlots.return_date || travelSlots.end_date}</div>}
+                {(nights != null || travelSlots.nights) && <div>จำนวนคืน: {nights ?? travelSlots.nights} คืน</div>}
+                {(adults != null || travelSlots.adults) && <div>{isAccommodationOnly ? 'จำนวนผู้เข้าพัก' : 'ผู้โดยสาร'}: {adults ?? travelSlots.adults} ผู้ใหญ่</div>}
               </div>
             </div>
             
             <div className="price-breakdown">
               <div className="price-row">
                 <span>รวม</span>
-                <span>
-                  {new Intl.NumberFormat('th-TH', {
-                    style: 'currency',
-                    currency: currency,
-                    minimumFractionDigits: 0,
-                  }).format(amount)}
-                </span>
+                <span>{formatPriceInThb(amount, currency)}</span>
               </div>
               <div className="price-row total">
                 <span>ยอดรวมที่ต้องชำระวันนี้</span>
-                <span>
-                  {new Intl.NumberFormat('th-TH', {
-                    style: 'currency',
-                    currency: currency,
-                    minimumFractionDigits: 0,
-                  }).format(amount)}
-                </span>
+                <span>{formatPriceInThb(amount, currency)}</span>
               </div>
             </div>
           </div>
@@ -744,11 +999,58 @@ export default function PaymentPage({
                         type="radio"
                         name="paymentMethod"
                         checked={paymentMethod === 'new'}
-                        onChange={() => { setPaymentMethod('new'); setError(null); }}
+                        onChange={() => { setPaymentMethod('new'); setError(null); setPromptpayResult(null); }}
                       />
                       <span>ใช้บัตรใหม่</span>
                     </label>
+                    <label className="payment-method-option">
+                      <input
+                        type="radio"
+                        name="paymentMethod"
+                        checked={paymentMethod === 'promptpay'}
+                        onChange={() => { setPaymentMethod('promptpay'); setError(null); setPromptpayResult(null); }}
+                      />
+                      <span>สแกน QR PromtPay <span style={{ fontSize: '0.85em', opacity: 0.85 }}>(ขั้นต่ำ ฿20)</span></span>
+                    </label>
                   </div>
+
+                  {paymentMethod === 'promptpay' && promptpayResult && (
+                    <div className="promptpay-qr-box" style={{ marginTop: 16, padding: 20, background: 'var(--surface, #f8fafc)', borderRadius: 12, border: '1px solid var(--border, #e2e8f0)' }}>
+                      <div className="section-title" style={{ marginBottom: 12 }}>สแกน QR เพื่อชำระด้วย PromtPay</div>
+                      <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 16 }}>
+                        เปิดแอปธนาคารแล้วสแกน QR ด้านล่าง หรือกดปุ่มเพื่อเปิดหน้าชำระ
+                      </p>
+                      {promptpayResult.qr_download_uri && (
+                        <div style={{ marginBottom: 16, textAlign: 'center' }}>
+                          <img
+                            src={promptpayResult.qr_download_uri}
+                            alt="QR PromtPay"
+                            style={{ maxWidth: 220, height: 'auto', border: '1px solid var(--border)' }}
+                          />
+                        </div>
+                      )}
+                      {promptpayResult.authorize_uri && (
+                        <a
+                          href={promptpayResult.authorize_uri}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="btn-primary"
+                          style={{ display: 'inline-block', padding: '12px 24px', borderRadius: 8, textDecoration: 'none', fontWeight: 600 }}
+                        >
+                          เปิดลิงก์เพื่อสแกน / ชำระ
+                        </a>
+                      )}
+                      <button
+                        type="button"
+                        className="btn-add-card-inline"
+                        style={{ marginLeft: 12 }}
+                        onClick={() => setPromptpayResult(null)}
+                      >
+                        สร้าง QR ใหม่
+                      </button>
+                    </div>
+                  )}
+
                   {paymentMethod === 'saved' && savedCards.length > 0 && (
                       <div className="saved-cards-list">
                         {(() => {
@@ -1083,13 +1385,9 @@ export default function PaymentPage({
               <button
                 type="submit"
                 className="btn-submit"
-                disabled={processing || amount <= 0 || (paymentMethod === 'new' && !omiseLoaded) || (paymentMethod === 'saved' && (!selectedSavedCardId || !savedCardsCustomerId))}
+                disabled={processing || (paymentMethod === 'promptpay' ? amount < 20 : amount <= 0) || (paymentMethod === 'new' && !omiseLoaded) || (paymentMethod === 'saved' && (!selectedSavedCardId || !savedCardsCustomerId))}
               >
-                {processing ? 'กำลังประมวลผล...' : `ชำระเงิน ${new Intl.NumberFormat('th-TH', {
-                  style: 'currency',
-                  currency: currency,
-                  minimumFractionDigits: 0,
-                }).format(amount)}`}
+                {processing ? 'กำลังประมวลผล...' : paymentMethod === 'promptpay' ? `สร้าง QR PromtPay — ${formatPriceInThb(amount, currency)}` : `ชำระเงิน ${formatPriceInThb(amount, currency)}`}
               </button>
               <p className="payment-powered-by">Powered by Omise</p>
             </form>

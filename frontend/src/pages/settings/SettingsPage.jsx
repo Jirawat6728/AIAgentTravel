@@ -115,7 +115,8 @@ export default function SettingsPage({
     detailLevel: 'medium',
     reinforcementLearning: true,
     agentPersonality: 'agency',
-    
+    travelPreferences: {},
+
     // Booking Preferences
     defaultPaymentMethod: user?.payment_method || '',
     
@@ -160,10 +161,11 @@ export default function SettingsPage({
   useEffect(() => {
     // Load settings from user preferences (ไม่ให้ preferences เขียนทับ emailVerified/authProvider — ใช้ค่าจาก backend เท่านั้น)
     if (user?.preferences) {
-      const { emailVerified: _ev, authProvider: _ap, ...prefs } = user.preferences;
+      const { emailVerified: _ev, authProvider: _ap, travelPreferences: _tp, ...prefs } = user.preferences;
       setSettings(prev => ({
         ...prev,
         ...prefs,
+        travelPreferences: typeof _tp === 'object' && _tp !== null ? { ..._tp } : prev.travelPreferences || {},
         emailVerified: user?.email_verified ?? prev.emailVerified,
         authProvider: user?.auth_provider ?? prev.authProvider,
       }));
@@ -224,7 +226,7 @@ export default function SettingsPage({
   const handleClickAddCard = () => {
     Swal.fire({
       title: '💳 เพิ่มบัตรใหม่',
-      customClass: { popup: 'add-card-popup' },
+      customClass: { popup: `add-card-popup add-card-popup--${theme}` },
       html: `
         <div style="text-align: left;">
           <div class="add-card-field">
@@ -253,6 +255,8 @@ export default function SettingsPage({
       cancelButtonText: 'ยกเลิก',
       width: 440,
       didOpen: () => {
+        const container = document.querySelector('.swal2-container');
+        if (container) container.setAttribute('data-theme', theme);
         const input = document.getElementById('swal-card-number');
         const display = document.getElementById('swal-card-type-display');
         if (!input || !display) return;
@@ -401,6 +405,24 @@ export default function SettingsPage({
 
   const THEME_KEYS = ['fontSize', 'language'];
   const AI_AGENT_KEYS = ['chatLanguage', 'responseStyle', 'detailLevel', 'reinforcementLearning', 'agentPersonality'];
+
+  const handleTravelPreferenceChange = (key, value) => {
+    const next = {
+      ...settings,
+      travelPreferences: { ...(settings.travelPreferences || {}), [key]: value === '' || value == null ? undefined : value },
+    };
+    setSettings(next);
+    setAiSaveStatus(null);
+    setAiSaveError(null);
+    savePreferencesToBackend(next).then(() => {
+      setAiSaveStatus('saved');
+      setTimeout(() => setAiSaveStatus(null), 2000);
+    }).catch((err) => {
+      setAiSaveError(err.message || 'บันทึกไม่สำเร็จ');
+      setAiSaveStatus('error');
+      setTimeout(() => { setAiSaveStatus(null); setAiSaveError(null); }, 3000);
+    });
+  };
 
   const handleSettingChange = (key, value) => {
     const next = { ...settings, [key]: value };
@@ -1423,16 +1445,18 @@ export default function SettingsPage({
         </div>
       </div>
 
-      <div className="settings-item">
+      <div className="settings-item settings-item-personality">
         <div className="settings-item-label">
           <label>{t('settings.agentPersonality')}</label>
           <small>{t('settings.agentPersonalityDesc')}</small>
         </div>
-        <div className="settings-item-control">
+        <div className="settings-item-control settings-item-control-personality">
           <select
-            value={settings.agentPersonality}
+            value={settings.agentPersonality ?? 'agency'}
             onChange={(e) => handleSettingChange('agentPersonality', e.target.value)}
-            className="form-select"
+            className="form-select form-select-personality"
+            aria-label={t('settings.agentPersonality')}
+            title={(() => { const tpl = agentPersonalityTemplates[settings.agentPersonality ?? 'agency']; return tpl ? `${tpl.name} - ${tpl.description}` : undefined; })()}
           >
             {Object.entries(agentPersonalityTemplates).map(([key, template]) => (
               <option key={key} value={key}>
@@ -1440,8 +1464,12 @@ export default function SettingsPage({
               </option>
             ))}
           </select>
+          <small className="settings-item-hint" style={{ display: 'block', marginTop: 6, color: 'var(--content-text-muted, #64748b)', fontSize: 13 }}>
+            {t('settings.agentPersonalityHint')}
+          </small>
         </div>
       </div>
+
     </div>
   );
 

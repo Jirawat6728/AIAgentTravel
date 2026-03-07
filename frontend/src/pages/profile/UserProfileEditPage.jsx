@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Swal from 'sweetalert2';
 import { formatCardNumber, getCardType, validateCardNumber } from '../../utils/cardUtils';
 import { loadOmiseScript, createTokenAsync } from '../../utils/omiseLoader';
@@ -9,6 +9,43 @@ import AppHeader from '../../components/common/AppHeader';
 import { useTheme } from '../../context/ThemeContext';
 import { useFontSize } from '../../context/FontSizeContext';
 import { useLanguage } from '../../context/LanguageContext';
+
+/** แปลง YYYY-MM-DD (จาก API) เป็น DD/MM/YYYY สำหรับแสดง/กรอก */
+function formatYyyyMmDdToDdMmYyyy(yyyyMmDd) {
+  if (!yyyyMmDd || typeof yyyyMmDd !== 'string') return '';
+  const m = yyyyMmDd.trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (!m) return yyyyMmDd;
+  const [, y, mo, d] = m;
+  return `${d.padStart(2, '0')}/${mo.padStart(2, '0')}/${y}`;
+}
+
+/** แปลงข้อความ DD/MM/YYYY หรือ D/M/YYYY เป็น YYYY-MM-DD (สำหรับส่ง API) คืน '' ถ้าไม่สมบูรณ์หรือไม่ถูกต้อง */
+function parseDdMmYyyyToYyyyMmDd(input) {
+  if (!input || typeof input !== 'string') return '';
+  const s = input.trim().replace(/\s/g, '');
+  const parts = s.split(/[/-]/);
+  if (parts.length !== 3) return '';
+  let [d, m, y] = parts;
+  d = d.padStart(2, '0');
+  m = m.padStart(2, '0');
+  if (y.length === 2) y = parseInt(y, 10) >= 50 ? `19${y}` : `20${y}`;
+  if (y.length !== 4) return '';
+  const yyyy = parseInt(y, 10), mm = parseInt(m, 10), dd = parseInt(d, 10);
+  if (isNaN(yyyy) || isNaN(mm) || isNaN(dd)) return '';
+  if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return '';
+  const date = new Date(yyyy, mm - 1, dd);
+  if (date.getFullYear() !== yyyy || date.getMonth() !== mm - 1 || date.getDate() !== dd) return '';
+  return `${yyyy}-${m}-${d}`;
+}
+
+/** จัดรูปแบบข้อความที่กรอกให้เป็น dd/mm/yyyy (ใส่ / ขั้นอัตโนมัติ) รับได้ทั้งตัวเลขล้วนหรือมี / อยู่แล้ว */
+function formatDobInputWithSlashes(input) {
+  if (!input || typeof input !== 'string') return '';
+  const digits = input.replace(/\D/g, '').slice(0, 8);
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+  return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4, 8)}`;
+}
 
 const PROFILE_SECTION_IDS = ['personal', 'passport', 'visa', 'address_emergency', 'family', 'cards'];
 
@@ -60,9 +97,24 @@ export default function UserProfileEditPage({
   });
 
   const [errors, setErrors] = useState({});
+  const dobPickerRef = useRef(null);
+  const [dobDisplay, setDobDisplay] = useState(''); // แสดงในช่องวันเกิดเป็น dd/mm/yyyy
   const [isSaving, setIsSaving] = useState(false);
   const [previewImage, setPreviewImage] = useState(null);
   const [hasVisa, setHasVisa] = useState(false); // State สำหรับตรวจสอบว่ามี visa หรือไม่
+  const [hasPassport, setHasPassport] = useState(null); // true=มี, false=ไม่มี, null=ยังไม่เลือก
+  // หนังสือเดินทางหลายเล่ม (Multi-Passport)
+  const [passports, setPassports] = useState([]); // [{ id, passport_no, passport_type, ..., status, is_primary }, ...]
+  const [editingPassportId, setEditingPassportId] = useState(null); // กำลังแก้ไขเล่มไหน (null = ไม่ได้แก้)
+  const [passportForm, setPassportForm] = useState({ passport_no: '', passport_type: 'N', passport_issue_date: '', passport_expiry: '', passport_issuing_country: 'TH', nationality: 'TH', passport_given_names: '', passport_surname: '', place_of_birth: '', status: 'active', is_primary: false });
+  const [passportFormErrors, setPassportFormErrors] = useState({});
+  const [passportWarnings, setPassportWarnings] = useState([]); // จาก API
+  // วีซ่าหลายประเทศ/หลายประเภท (Multi-Visa)
+  const [visaRecords, setVisaRecords] = useState([]); // [{ id, country_code, visa_type, expiry_date, entries, linked_passport, ... }, ...]
+  const [editingVisaId, setEditingVisaId] = useState(null); // null | 'new' | uuid
+  const [visaForm, setVisaForm] = useState({ country_code: '', visa_type: 'B1/B2', visa_number: '', issue_date: '', expiry_date: '', entries: 'Multiple', purpose: 'T', linked_passport: '' });
+  const [visaFormErrors, setVisaFormErrors] = useState({});
+  const [visaWarnings, setVisaWarnings] = useState([]); // จาก API (linked_passport ไม่ตรงกับพาสปอร์ตปัจจุบัน)
   // ผู้จองร่วม (สมาชิกในครอบครัว) - ช่องกรอกละเอียดเท่าผู้จองหลัก
   const emptyFamilyForm = () => ({
     type: 'adult',
@@ -73,6 +125,7 @@ export default function UserProfileEditPage({
     date_of_birth: '',
     gender: '',
     national_id: '',
+    has_passport: false, // true = มีหนังสือเดินทาง, false = ไม่มี
     passport_no: '',
     passport_expiry: '',
     passport_issue_date: '',
@@ -82,6 +135,8 @@ export default function UserProfileEditPage({
     place_of_birth: '',
     passport_type: 'N',
     nationality: 'TH',
+    passports: [], // หนังสือเดินทางหลายเล่ม (pattern เดียวกับผู้จองหลัก)
+    visa_records: [], // วีซ่าหลายประเทศ (pattern เดียวกับผู้จองหลัก)
     // ที่อยู่: same_as_main = ตามผู้จองหลัก, own = กรอกเอง (default)
     address_option: 'own',
     address_line1: '',
@@ -91,10 +146,21 @@ export default function UserProfileEditPage({
     postal_code: '',
     country: 'TH',
   });
+  const emptyPassportForm = () => ({ passport_no: '', passport_type: 'N', passport_issue_date: '', passport_expiry: '', passport_issuing_country: 'TH', nationality: 'TH', passport_given_names: '', passport_surname: '', place_of_birth: '', status: 'active', is_primary: false });
+  const emptyVisaForm = () => ({ country_code: '', visa_type: 'B1/B2', visa_number: '', issue_date: '', expiry_date: '', entries: 'Multiple', purpose: 'T', linked_passport: '' });
   const [family, setFamily] = useState([]);
   const [editingFamilyId, setEditingFamilyId] = useState(null);
   const [familyForm, setFamilyForm] = useState(emptyFamilyForm());
   const [familyFormErrors, setFamilyFormErrors] = useState({});
+  // ผู้จองร่วม: หนังสือเดินทางหลายเล่ม + วีซ่าหลายประเทศ (pattern เดียวกับผู้จองหลัก)
+  const [editingFamilyPassportId, setEditingFamilyPassportId] = useState(null); // null | 'new' | id
+  const [familyPassportForm, setFamilyPassportForm] = useState(emptyPassportForm());
+  const [familyPassportFormErrors, setFamilyPassportFormErrors] = useState({});
+  const [editingFamilyVisaId, setEditingFamilyVisaId] = useState(null); // null | 'new' | id
+  const [familyVisaForm, setFamilyVisaForm] = useState(emptyVisaForm());
+  const [familyVisaFormErrors, setFamilyVisaFormErrors] = useState({});
+  const [newMemberIds, setNewMemberIds] = useState(new Set()); // id ของสมาชิกที่เพิ่มใหม่ (ยังไม่อยู่บน server)
+  const [familySaving, setFamilySaving] = useState(false); // กำลัง save/delete family
   const [activeSection, setActiveSection] = useState('personal');
   const [showDeletePopup, setShowDeletePopup] = useState(false);
 
@@ -169,10 +235,22 @@ export default function UserProfileEditPage({
               emergency_contact_email: updatedUser.emergency_contact_email || '',
               hotel_number_of_guests: updatedUser.hotel_number_of_guests || 1,
             });
+            setDobDisplay(formatYyyyMmDdToDdMmYyyy(updatedUser.dob || ''));
             
             // ตรวจสอบว่ามี visa หรือไม่
             const hasVisaData = !!(updatedUser.visa_type || updatedUser.visa_number);
             setHasVisa(hasVisaData);
+            // หนังสือเดินทางหลายเล่ม: ใช้ passports จาก API (backend ส่งมาแล้ว หรือแปลงจาก legacy)
+            const passportsList = Array.isArray(updatedUser.passports) ? updatedUser.passports : [];
+            setPassports(passportsList);
+            setPassportWarnings(Array.isArray(updatedUser.passport_warnings) ? updatedUser.passport_warnings : []);
+            const hasPassportData = passportsList.length > 0 || !!(updatedUser.passport_no || updatedUser.passport_expiry);
+            setHasPassport(hasPassportData ? true : null);
+            // วีซ่าหลายประเทศ
+            const visaList = Array.isArray(updatedUser.visa_records) ? updatedUser.visa_records : [];
+            setVisaRecords(visaList);
+            setVisaWarnings(Array.isArray(updatedUser.visa_warnings) ? updatedUser.visa_warnings : []);
+            setHasVisa(visaList.length > 0 || !!(updatedUser.visa_type || updatedUser.visa_number));
             
             // ✅ Update localStorage with fresh data
             localStorage.setItem("user_data", JSON.stringify(updatedUser));
@@ -210,9 +288,10 @@ export default function UserProfileEditPage({
 
   // แสดง popup กรอกข้อมูลบัตร (ไม่โหลด Omise)
   const handleClickAddCard = () => {
+    const currentTheme = typeof theme !== 'undefined' ? theme : 'light';
     Swal.fire({
       title: '💳 เพิ่มบัตรใหม่',
-      customClass: { popup: 'add-card-popup' },
+      customClass: { popup: `add-card-popup add-card-popup--${currentTheme}` },
       html: `
         <div style="text-align: left;">
           <div class="add-card-field">
@@ -241,6 +320,8 @@ export default function UserProfileEditPage({
       cancelButtonText: 'ยกเลิก',
       width: 440,
       didOpen: () => {
+        const container = document.querySelector('.swal2-container');
+        if (container) container.setAttribute('data-theme', currentTheme);
         const input = document.getElementById('swal-card-number');
         const display = document.getElementById('swal-card-type-display');
         if (!input || !display) return;
@@ -390,6 +471,7 @@ export default function UserProfileEditPage({
   // Initialize form with user data (fallback to prop if backend fetch fails)
   useEffect(() => {
     if (user) {
+      setDobDisplay(formatYyyyMmDdToDdMmYyyy(user.dob || ''));
       const fullName = (user.name || user.full_name || '').trim();
       const parts = fullName.split(/\s+/).filter(Boolean);
       const first_name = parts[0] || '';
@@ -470,8 +552,11 @@ export default function UserProfileEditPage({
         };
       });
       
-      // ตรวจสอบว่ามี visa หรือไม่ (ถ้ามี visa_type หรือ visa_number แสดงว่ามี visa)
-      const hasVisaData = !!(user.visa_type || user.visa_number);
+      // วีซ่าหลายประเทศ: ใช้ visa_records จาก API
+      const visaList = Array.isArray(user.visa_records) ? user.visa_records : [];
+      setVisaRecords(visaList);
+      setVisaWarnings(Array.isArray(user.visa_warnings) ? user.visa_warnings : []);
+      const hasVisaData = visaList.length > 0 || !!(user.visa_type || user.visa_number);
       setHasVisa(hasVisaData);
       setFamily(Array.isArray(user.family) ? user.family : []);
       
@@ -523,6 +608,401 @@ export default function UserProfileEditPage({
         return newErrors;
       });
     }
+  };
+
+  // Handler สำหรับปุ่ม มี / ไม่มี passport
+  const handleHasPassportChange = (value) => {
+    setHasPassport(value);
+    if (value === false) {
+      setPassports([]);
+      setEditingPassportId(null);
+      setPassportForm({ passport_no: '', passport_type: 'N', passport_issue_date: '', passport_expiry: '', passport_issuing_country: 'TH', nationality: 'TH', passport_given_names: '', passport_surname: '', place_of_birth: '', status: 'active', is_primary: false });
+      setFormData(prev => ({
+        ...prev,
+        passport_no: '',
+        passport_expiry: '',
+        passport_issue_date: '',
+        passport_issuing_country: 'TH',
+        passport_given_names: '',
+        passport_surname: '',
+        place_of_birth: '',
+        passport_type: 'N',
+      }));
+      setErrors(prev => {
+        const newErrors = { ...prev };
+        delete newErrors.passport_no;
+        delete newErrors.passport_expiry;
+        delete newErrors.passport_issue_date;
+        delete newErrors.passport_issuing_country;
+        delete newErrors.passport_given_names;
+        delete newErrors.passport_surname;
+        delete newErrors.place_of_birth;
+        return newErrors;
+      });
+    }
+  };
+
+  const makePassportId = () => (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `pp_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`);
+
+  const validatePassportForm = (p) => {
+    const err = {};
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // เลขหนังสือเดินทาง (บังคับ)
+    if (!p.passport_no || !p.passport_no.trim()) {
+      err.passport_no = 'กรุณากรอกเลขหนังสือเดินทาง';
+    } else {
+      const no = p.passport_no.trim();
+      if (no.length < 6) err.passport_no = 'เลขหนังสือเดินทางต้องมีอย่างน้อย 6 ตัวอักษร';
+      else if (no.length > 20) err.passport_no = 'เลขหนังสือเดินทางต้องไม่เกิน 20 ตัวอักษร';
+      else if (!/^[A-Z0-9]+$/i.test(no)) err.passport_no = 'เลขหนังสือเดินทางต้องเป็นตัวอักษรภาษาอังกฤษและตัวเลขเท่านั้น';
+    }
+
+    // วันออก (ถ้ากรอก ต้องรูปแบบถูก และไม่ใช่วันในอนาคต)
+    if (p.passport_issue_date && p.passport_issue_date.trim()) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(p.passport_issue_date.trim())) {
+        err.passport_issue_date = 'รูปแบบวันออกไม่ถูกต้อง (YYYY-MM-DD)';
+      } else {
+        const issue = new Date(p.passport_issue_date);
+        if (isNaN(issue.getTime())) err.passport_issue_date = 'วันออกไม่ถูกต้อง';
+        else if (issue > today) err.passport_issue_date = 'วันออกไม่สามารถเป็นวันในอนาคตได้';
+      }
+    }
+
+    // วันหมดอายุ (บังคับเมื่อมีเลขหนังสือเดินทาง)
+    if (p.passport_no && p.passport_no.trim()) {
+      if (!p.passport_expiry || !p.passport_expiry.trim()) {
+        err.passport_expiry = 'กรุณากรอกวันหมดอายุ';
+      } else {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(p.passport_expiry.trim())) {
+          err.passport_expiry = 'รูปแบบวันหมดอายุไม่ถูกต้อง (YYYY-MM-DD)';
+        } else {
+          const expiry = new Date(p.passport_expiry);
+          if (isNaN(expiry.getTime())) {
+            err.passport_expiry = 'วันหมดอายุไม่ถูกต้อง';
+          } else {
+            if (expiry < today) err.passport_expiry = 'หนังสือเดินทางหมดอายุแล้ว กรุณาเตรียมต่ออายุ';
+            else if (p.passport_issue_date && p.passport_issue_date.trim()) {
+              const issue = new Date(p.passport_issue_date);
+              if (!isNaN(issue.getTime()) && expiry <= issue) err.passport_expiry = 'วันหมดอายุต้องหลังวันออกหนังสือเดินทาง';
+              else if (!isNaN(issue.getTime())) {
+                const yearsDiff = (expiry - issue) / (1000 * 60 * 60 * 24 * 365);
+                if (yearsDiff > 15) err.passport_expiry = 'หนังสือเดินทางไม่ควรมีอายุมากกว่า 15 ปี';
+              }
+            }
+          }
+        }
+      }
+    } else if (p.passport_expiry && p.passport_expiry.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(p.passport_expiry.trim())) {
+      err.passport_expiry = 'รูปแบบวันหมดอายุไม่ถูกต้อง (YYYY-MM-DD)';
+    }
+
+    // ชื่อตามหนังสือเดินทาง (อังกฤษ) — บังคับเมื่อมีเลขพาสปอร์ต
+    if (p.passport_no && p.passport_no.trim()) {
+      if (!p.passport_given_names || !p.passport_given_names.trim()) {
+        err.passport_given_names = 'กรุณากรอกชื่อตามหนังสือเดินทาง (อังกฤษ)';
+      } else {
+        const name = p.passport_given_names.trim();
+        if (!/^[A-Za-z\s\-'\.]+$/.test(name)) err.passport_given_names = 'ชื่อต้องเป็นตัวอักษรภาษาอังกฤษเท่านั้น';
+        else if (name.length < 2) err.passport_given_names = 'ชื่อต้องมีอย่างน้อย 2 ตัวอักษร';
+        else if (name.length > 100) err.passport_given_names = 'ชื่อต้องไม่เกิน 100 ตัวอักษร';
+      }
+    }
+
+    // นามสกุลตามหนังสือเดินทาง (อังกฤษ) — บังคับเมื่อมีเลขพาสปอร์ต
+    if (p.passport_no && p.passport_no.trim()) {
+      if (!p.passport_surname || !p.passport_surname.trim()) {
+        err.passport_surname = 'กรุณากรอกนามสกุลตามหนังสือเดินทาง (อังกฤษ)';
+      } else {
+        const name = p.passport_surname.trim();
+        if (!/^[A-Za-z\s\-'\.]+$/.test(name)) err.passport_surname = 'นามสกุลต้องเป็นตัวอักษรภาษาอังกฤษเท่านั้น';
+        else if (name.length < 2) err.passport_surname = 'นามสกุลต้องมีอย่างน้อย 2 ตัวอักษร';
+        else if (name.length > 100) err.passport_surname = 'นามสกุลต้องไม่เกิน 100 ตัวอักษร';
+      }
+    }
+
+    // สถานที่เกิด (ถ้ากรอก จำกัดความยาว)
+    if (p.place_of_birth && p.place_of_birth.trim() && p.place_of_birth.trim().length > 150) {
+      err.place_of_birth = 'สถานที่เกิดต้องไม่เกิน 150 ตัวอักษร';
+    }
+
+    // ประเภท — ต้องเป็น N, O, D, S
+    if (p.passport_type && !['N', 'O', 'D', 'S'].includes(p.passport_type)) {
+      err.passport_type = 'ประเภทหนังสือเดินทางไม่ถูกต้อง';
+    }
+
+    return err;
+  };
+
+  const addPassport = () => {
+    setPassportFormErrors({});
+    setPassportForm(emptyPassportForm());
+    setEditingPassportId('new');
+  };
+
+  const startEditPassport = (entry) => {
+    setPassportFormErrors({});
+    setPassportForm({
+      passport_no: entry.passport_no || '',
+      passport_type: entry.passport_type || 'N',
+      passport_issue_date: entry.passport_issue_date || '',
+      passport_expiry: entry.passport_expiry || '',
+      passport_issuing_country: entry.passport_issuing_country || 'TH',
+      nationality: entry.nationality || 'TH',
+      passport_given_names: entry.passport_given_names || '',
+      passport_surname: entry.passport_surname || '',
+      place_of_birth: entry.place_of_birth || '',
+      status: entry.status || 'active',
+      is_primary: !!entry.is_primary,
+    });
+    setEditingPassportId(entry.id);
+  };
+
+  const savePassportEdit = () => {
+    const err = validatePassportForm(passportForm);
+    if (Object.keys(err).length > 0) {
+      setPassportFormErrors(err);
+      return;
+    }
+    setPassportFormErrors({});
+    const entry = {
+      id: editingPassportId === 'new' ? makePassportId() : editingPassportId,
+      ...passportForm,
+      is_primary: passportForm.is_primary || (passports.length === 0 && editingPassportId === 'new'),
+    };
+    if (editingPassportId === 'new') {
+      setPassports(prev => {
+        const next = prev.map(p => ({ ...p, is_primary: false }));
+        next.push(entry);
+        return next;
+      });
+    } else {
+      setPassports(prev => prev.map(p => p.id === editingPassportId ? { ...p, ...entry } : (entry.is_primary ? { ...p, is_primary: false } : p)));
+    }
+    setEditingPassportId(null);
+    setPassportForm(emptyPassportForm());
+  };
+
+  const cancelPassportEdit = () => {
+    setEditingPassportId(null);
+    setPassportForm(emptyPassportForm());
+    setPassportFormErrors({});
+  };
+
+  const setPrimaryPassport = (id) => {
+    setPassports(prev => prev.map(p => ({ ...p, is_primary: p.id === id })));
+  };
+
+  const deletePassport = (id) => {
+    setPassports(prev => {
+      const next = prev.filter(p => p.id !== id);
+      const hadPrimary = prev.find(p => p.id === id)?.is_primary;
+      if (hadPrimary && next.length > 0 && !next.some(p => p.is_primary)) next[0].is_primary = true;
+      return next;
+    });
+    if (editingPassportId === id) cancelPassportEdit();
+  };
+
+  // ── วีซ่าหลายประเทศ (Multi-Visa) ─────────────────────────────────────────
+  const makeVisaId = () => (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `visa_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`);
+
+  const validateVisaForm = (f) => {
+    const err = {};
+    if (!(f.country_code || '').trim()) err.country_code = 'กรุณาเลือกประเทศปลายทาง/ประเทศที่ออกวีซ่า';
+    if (!(f.expiry_date || '').trim()) err.expiry_date = 'กรุณากรอกวันหมดอายุวีซ่า';
+    else if (!/^\d{4}-\d{2}-\d{2}$/.test(f.expiry_date.trim())) err.expiry_date = 'รูปแบบวันหมดอายุไม่ถูกต้อง (YYYY-MM-DD)';
+    if (f.issue_date && f.issue_date.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(f.issue_date.trim())) err.issue_date = 'รูปแบบวันออกวีซ่าไม่ถูกต้อง (YYYY-MM-DD)';
+    if (f.issue_date && f.expiry_date) {
+      const issue = new Date(f.issue_date);
+      const expiry = new Date(f.expiry_date);
+      if (!isNaN(issue.getTime()) && !isNaN(expiry.getTime()) && expiry < issue) err.expiry_date = 'วันหมดอายุต้องไม่ก่อนวันออกวีซ่า';
+    }
+    if (f.visa_number && f.visa_number.trim()) {
+      if (f.visa_number.trim().length < 5) err.visa_number = 'เลขที่วีซ่าต้องมีอย่างน้อย 5 ตัวอักษร';
+      else if (f.visa_number.trim().length > 50) err.visa_number = 'เลขที่วีซ่าต้องไม่เกิน 50 ตัวอักษร';
+      else if (!/^[A-Z0-9\-]+$/i.test(f.visa_number.trim())) err.visa_number = 'เลขที่วีซ่าต้องเป็นตัวอักษรภาษาอังกฤษและตัวเลขเท่านั้น';
+    }
+    return err;
+  };
+
+  const addVisa = () => {
+    setVisaFormErrors({});
+    setVisaForm(emptyVisaForm());
+    setEditingVisaId('new');
+  };
+
+  const startEditVisa = (entry) => {
+    setVisaFormErrors({});
+    setVisaForm({
+      country_code: entry.country_code || '',
+      visa_type: entry.visa_type || 'B1/B2',
+      visa_number: entry.visa_number || '',
+      issue_date: entry.issue_date || '',
+      expiry_date: entry.expiry_date || '',
+      entries: (entry.entries || 'Multiple').trim() === 'Single' ? 'Single' : 'Multiple',
+      purpose: entry.purpose || 'T',
+      linked_passport: entry.linked_passport || '',
+    });
+    setEditingVisaId(entry.id);
+  };
+
+  const saveVisaEdit = () => {
+    const err = validateVisaForm(visaForm);
+    if (Object.keys(err).length > 0) {
+      setVisaFormErrors(err);
+      return;
+    }
+    setVisaFormErrors({});
+    const entry = {
+      id: editingVisaId === 'new' ? makeVisaId() : editingVisaId,
+      country_code: (visaForm.country_code || '').trim(),
+      visa_type: (visaForm.visa_type || 'B1/B2').trim(),
+      visa_number: visaForm.visa_number ? visaForm.visa_number.trim() : null,
+      issue_date: visaForm.issue_date ? visaForm.issue_date.trim() : null,
+      expiry_date: (visaForm.expiry_date || '').trim(),
+      entries: (visaForm.entries || 'Multiple').trim() === 'Single' ? 'Single' : 'Multiple',
+      purpose: (visaForm.purpose || 'T').trim() || 'T',
+      linked_passport: visaForm.linked_passport ? visaForm.linked_passport.trim() : null,
+    };
+    if (editingVisaId === 'new') {
+      setVisaRecords(prev => [...prev, entry]);
+    } else {
+      setVisaRecords(prev => prev.map(v => v.id === editingVisaId ? { ...v, ...entry } : v));
+    }
+    setEditingVisaId(null);
+    setVisaForm(emptyVisaForm());
+  };
+
+  const cancelVisaEdit = () => {
+    setEditingVisaId(null);
+    setVisaForm(emptyVisaForm());
+    setVisaFormErrors({});
+  };
+
+  const deleteVisa = (id) => {
+    setVisaRecords(prev => prev.filter(v => v.id !== id));
+    if (editingVisaId === id) cancelVisaEdit();
+  };
+
+  // ── ผู้จองร่วม: หนังสือเดินทางหลายเล่ม + วีซ่า (pattern เดียวกับผู้จองหลัก) ─────
+  const addFamilyPassport = () => {
+    setFamilyPassportFormErrors({});
+    setFamilyPassportForm(emptyPassportForm());
+    setEditingFamilyPassportId('new');
+  };
+  const startEditFamilyPassport = (entry) => {
+    setFamilyPassportFormErrors({});
+    setFamilyPassportForm({
+      passport_no: entry.passport_no || '',
+      passport_type: entry.passport_type || 'N',
+      passport_issue_date: entry.passport_issue_date || '',
+      passport_expiry: entry.passport_expiry || '',
+      passport_issuing_country: entry.passport_issuing_country || 'TH',
+      nationality: entry.nationality || 'TH',
+      passport_given_names: entry.passport_given_names || '',
+      passport_surname: entry.passport_surname || '',
+      place_of_birth: entry.place_of_birth || '',
+      status: entry.status || 'active',
+      is_primary: !!entry.is_primary,
+    });
+    setEditingFamilyPassportId(entry.id);
+  };
+  const saveFamilyPassportEdit = () => {
+    const err = validatePassportForm(familyPassportForm);
+    if (Object.keys(err).length > 0) {
+      setFamilyPassportFormErrors(err);
+      return;
+    }
+    setFamilyPassportFormErrors({});
+    const list = familyForm.passports || [];
+    const entry = {
+      id: editingFamilyPassportId === 'new' ? makePassportId() : editingFamilyPassportId,
+      ...familyPassportForm,
+      is_primary: familyPassportForm.is_primary || (list.length === 0 && editingFamilyPassportId === 'new'),
+    };
+    if (editingFamilyPassportId === 'new') {
+      setFamilyForm(f => ({ ...f, passports: [...(f.passports || []).map(p => ({ ...p, is_primary: false })), entry] }));
+    } else {
+      setFamilyForm(f => ({
+        ...f,
+        passports: (f.passports || []).map(p => p.id === editingFamilyPassportId ? { ...p, ...entry } : (entry.is_primary ? { ...p, is_primary: false } : p)),
+      }));
+    }
+    setEditingFamilyPassportId(null);
+    setFamilyPassportForm(emptyPassportForm());
+  };
+  const cancelFamilyPassportEdit = () => {
+    setEditingFamilyPassportId(null);
+    setFamilyPassportForm(emptyPassportForm());
+    setFamilyPassportFormErrors({});
+  };
+  const deleteFamilyPassport = (id) => {
+    setFamilyForm(f => {
+      const next = (f.passports || []).filter(p => p.id !== id);
+      const hadPrimary = (f.passports || []).find(p => p.id === id)?.is_primary;
+      if (hadPrimary && next.length > 0 && !next.some(p => p.is_primary)) next[0] = { ...next[0], is_primary: true };
+      return { ...f, passports: next };
+    });
+    if (editingFamilyPassportId === id) cancelFamilyPassportEdit();
+  };
+  const setPrimaryFamilyPassport = (id) => {
+    setFamilyForm(f => ({ ...f, passports: (f.passports || []).map(p => ({ ...p, is_primary: p.id === id })) }));
+  };
+
+  const addFamilyVisa = () => {
+    setFamilyVisaFormErrors({});
+    setFamilyVisaForm(emptyVisaForm());
+    setEditingFamilyVisaId('new');
+  };
+  const startEditFamilyVisa = (entry) => {
+    setFamilyVisaFormErrors({});
+    setFamilyVisaForm({
+      country_code: entry.country_code || '',
+      visa_type: entry.visa_type || 'B1/B2',
+      visa_number: entry.visa_number || '',
+      issue_date: entry.issue_date || '',
+      expiry_date: entry.expiry_date || '',
+      entries: (entry.entries || 'Multiple').trim() === 'Single' ? 'Single' : 'Multiple',
+      purpose: entry.purpose || 'T',
+      linked_passport: entry.linked_passport || '',
+    });
+    setEditingFamilyVisaId(entry.id);
+  };
+  const saveFamilyVisaEdit = () => {
+    const err = validateVisaForm(familyVisaForm);
+    if (Object.keys(err).length > 0) {
+      setFamilyVisaFormErrors(err);
+      return;
+    }
+    setFamilyVisaFormErrors({});
+    const entry = {
+      id: editingFamilyVisaId === 'new' ? makeVisaId() : editingFamilyVisaId,
+      country_code: (familyVisaForm.country_code || '').trim(),
+      visa_type: (familyVisaForm.visa_type || 'B1/B2').trim(),
+      visa_number: familyVisaForm.visa_number ? familyVisaForm.visa_number.trim() : null,
+      issue_date: familyVisaForm.issue_date ? familyVisaForm.issue_date.trim() : null,
+      expiry_date: (familyVisaForm.expiry_date || '').trim(),
+      entries: (familyVisaForm.entries || 'Multiple').trim() === 'Single' ? 'Single' : 'Multiple',
+      purpose: (familyVisaForm.purpose || 'T').trim() || 'T',
+      linked_passport: familyVisaForm.linked_passport ? familyVisaForm.linked_passport.trim() : null,
+    };
+    if (editingFamilyVisaId === 'new') {
+      setFamilyForm(f => ({ ...f, visa_records: [...(f.visa_records || []), entry] }));
+    } else {
+      setFamilyForm(f => ({ ...f, visa_records: (f.visa_records || []).map(v => v.id === editingFamilyVisaId ? { ...v, ...entry } : v) }));
+    }
+    setEditingFamilyVisaId(null);
+    setFamilyVisaForm(emptyVisaForm());
+  };
+  const cancelFamilyVisaEdit = () => {
+    setEditingFamilyVisaId(null);
+    setFamilyVisaForm(emptyVisaForm());
+    setFamilyVisaFormErrors({});
+  };
+  const deleteFamilyVisa = (id) => {
+    setFamilyForm(f => ({ ...f, visa_records: (f.visa_records || []).filter(v => v.id !== id) }));
+    if (editingFamilyVisaId === id) cancelFamilyVisaEdit();
   };
 
   // ✅ Thai National ID Checksum Validation (Production-ready)
@@ -579,26 +1059,26 @@ export default function UserProfileEditPage({
       newErrors.last_name = 'นามสกุลต้องไม่เกิน 50 ตัวอักษร';
     }
 
-    // ✅ Optional - First Name (Thai)
-    if (formData.first_name_th && formData.first_name_th.trim()) {
-      if (!validateThaiName(formData.first_name_th)) {
-        newErrors.first_name_th = 'ชื่อต้องเป็นภาษาไทยเท่านั้น';
-      } else if (formData.first_name_th.trim().length < 2) {
-        newErrors.first_name_th = 'ชื่อต้องมีอย่างน้อย 2 ตัวอักษร';
-      } else if (formData.first_name_th.trim().length > 50) {
-        newErrors.first_name_th = 'ชื่อต้องไม่เกิน 50 ตัวอักษร';
-      }
+    // ✅ Required - First Name (Thai)
+    if (!formData.first_name_th || !formData.first_name_th.trim()) {
+      newErrors.first_name_th = 'กรุณากรอกชื่อ (ภาษาไทย)';
+    } else if (!validateThaiName(formData.first_name_th)) {
+      newErrors.first_name_th = 'ชื่อต้องเป็นภาษาไทยเท่านั้น';
+    } else if (formData.first_name_th.trim().length < 2) {
+      newErrors.first_name_th = 'ชื่อต้องมีอย่างน้อย 2 ตัวอักษร';
+    } else if (formData.first_name_th.trim().length > 50) {
+      newErrors.first_name_th = 'ชื่อต้องไม่เกิน 50 ตัวอักษร';
     }
 
-    // ✅ Optional - Last Name (Thai)
-    if (formData.last_name_th && formData.last_name_th.trim()) {
-      if (!validateThaiName(formData.last_name_th)) {
-        newErrors.last_name_th = 'นามสกุลต้องเป็นภาษาไทยเท่านั้น';
-      } else if (formData.last_name_th.trim().length < 2) {
-        newErrors.last_name_th = 'นามสกุลต้องมีอย่างน้อย 2 ตัวอักษร';
-      } else if (formData.last_name_th.trim().length > 50) {
-        newErrors.last_name_th = 'นามสกุลต้องไม่เกิน 50 ตัวอักษร';
-      }
+    // ✅ Required - Last Name (Thai)
+    if (!formData.last_name_th || !formData.last_name_th.trim()) {
+      newErrors.last_name_th = 'กรุณากรอกนามสกุล (ภาษาไทย)';
+    } else if (!validateThaiName(formData.last_name_th)) {
+      newErrors.last_name_th = 'นามสกุลต้องเป็นภาษาไทยเท่านั้น';
+    } else if (formData.last_name_th.trim().length < 2) {
+      newErrors.last_name_th = 'นามสกุลต้องมีอย่างน้อย 2 ตัวอักษร';
+    } else if (formData.last_name_th.trim().length > 50) {
+      newErrors.last_name_th = 'นามสกุลต้องไม่เกิน 50 ตัวอักษร';
     }
 
     // ✅ Email Validation (Enhanced)
@@ -620,33 +1100,40 @@ export default function UserProfileEditPage({
       }
     }
 
-    // ✅ Date of Birth Validation
-    if (formData.dob) {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(formData.dob)) {
-        newErrors.dob = 'รูปแบบวันเกิดไม่ถูกต้อง (YYYY-MM-DD)';
+    // ✅ Required - Date of Birth (formData.dob เก็บเป็น YYYY-MM-DD จาก parse dd/mm/yyyy)
+    if (!formData.dob || !formData.dob.trim()) {
+      newErrors.dob = 'กรุณากรอกวันเกิด';
+    } else if (!/^\d{4}-\d{2}-\d{2}$/.test(formData.dob)) {
+      newErrors.dob = 'รูปแบบวันเกิดไม่ถูกต้อง (dd/mm/yyyy)';
+    } else {
+      const birthDate = new Date(formData.dob);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      
+      if (isNaN(birthDate.getTime())) {
+        newErrors.dob = 'วันเกิดไม่ถูกต้อง';
+      } else if (birthDate > today) {
+        newErrors.dob = 'วันเกิดไม่สามารถเป็นวันอนาคตได้';
       } else {
-        const birthDate = new Date(formData.dob);
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
+        const age = today.getFullYear() - birthDate.getFullYear();
+        const monthDiff = today.getMonth() - birthDate.getMonth();
+        const actualAge = monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate()) ? age - 1 : age;
         
-        if (isNaN(birthDate.getTime())) {
-          newErrors.dob = 'วันเกิดไม่ถูกต้อง';
-        } else if (birthDate > today) {
-          newErrors.dob = 'วันเกิดไม่สามารถเป็นวันอนาคตได้';
-        } else {
-          const age = today.getFullYear() - birthDate.getFullYear();
-          const monthDiff = today.getMonth() - birthDate.getMonth();
-          const actualAge = monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate()) ? age - 1 : age;
-          
-          if (actualAge > 120) {
-            newErrors.dob = 'อายุไม่ถูกต้อง (เกิน 120 ปี)';
-          }
+        if (actualAge > 120) {
+          newErrors.dob = 'อายุไม่ถูกต้อง (เกิน 120 ปี)';
         }
       }
     }
 
-    // ✅ Thai National ID Validation (13 digits with checksum)
-    if (formData.national_id && formData.national_id.trim()) {
+    // ✅ Required - Gender
+    if (!formData.gender || !formData.gender.trim()) {
+      newErrors.gender = 'กรุณาเลือกเพศ';
+    }
+
+    // ✅ Required - Thai National ID (13 digits with checksum)
+    if (!formData.national_id || !formData.national_id.trim()) {
+      newErrors.national_id = 'กรุณากรอกเลขบัตรประจำตัวประชาชน';
+    } else {
       const cleanedID = formData.national_id.replace(/[-\s]/g, '');
       if (cleanedID.length !== 13) {
         newErrors.national_id = 'เลขบัตรประชาชนต้องมี 13 หลัก';
@@ -656,10 +1143,11 @@ export default function UserProfileEditPage({
         newErrors.national_id = 'เลขบัตรประชาชนไม่ถูกต้อง (checksum ไม่ผ่าน)';
       }
     }
-    // ✅ Passport validation (Production-ready for international flights)
+    // ✅ Passport validation — ข้ามเมื่อใช้รายการหลายเล่ม (passports array)
     const hasPassportInfo = formData.passport_no || formData.passport_expiry;
+    const useMultiPassport = hasPassport === true && passports.length > 0;
     
-    if (hasPassportInfo) {
+    if (!useMultiPassport && hasPassportInfo) {
       // Passport number validation
       if (formData.passport_no) {
         if (formData.passport_no.length < 6) {
@@ -734,45 +1222,38 @@ export default function UserProfileEditPage({
       }
     }
 
-    // ✅ Visa validation (Production-ready)
-    if (formData.visa_number && formData.visa_number.trim()) {
-      const cleanedVisaNumber = formData.visa_number.trim();
-      if (cleanedVisaNumber.length < 5) {
-        newErrors.visa_number = 'เลขที่วีซ่าต้องมีอย่างน้อย 5 ตัวอักษร';
-      } else if (cleanedVisaNumber.length > 50) {
-        newErrors.visa_number = 'เลขที่วีซ่าต้องไม่เกิน 50 ตัวอักษร';
-      } else if (!/^[A-Z0-9\-]+$/i.test(cleanedVisaNumber)) {
-        newErrors.visa_number = 'เลขที่วีซ่าต้องเป็นตัวอักษรภาษาอังกฤษและตัวเลขเท่านั้น';
+    // ✅ Visa validation — ข้ามเมื่อใช้รายการหลายวีซ่า (visaRecords) เพราะ validate ในฟอร์มเพิ่ม/แก้ไขแล้ว
+    if (visaRecords.length === 0) {
+      if (formData.visa_number && formData.visa_number.trim()) {
+        const cleanedVisaNumber = formData.visa_number.trim();
+        if (cleanedVisaNumber.length < 5) {
+          newErrors.visa_number = 'เลขที่วีซ่าต้องมีอย่างน้อย 5 ตัวอักษร';
+        } else if (cleanedVisaNumber.length > 50) {
+          newErrors.visa_number = 'เลขที่วีซ่าต้องไม่เกิน 50 ตัวอักษร';
+        } else if (!/^[A-Z0-9\-]+$/i.test(cleanedVisaNumber)) {
+          newErrors.visa_number = 'เลขที่วีซ่าต้องเป็นตัวอักษรภาษาอังกฤษและตัวเลขเท่านั้น';
+        }
       }
-    }
-    
-    if (formData.visa_expiry_date && !/^\d{4}-\d{2}-\d{2}$/.test(formData.visa_expiry_date)) {
-      newErrors.visa_expiry_date = 'รูปแบบวันหมดอายุวีซ่าไม่ถูกต้อง (YYYY-MM-DD)';
-    }
-    if (formData.visa_issue_date && !/^\d{4}-\d{2}-\d{2}$/.test(formData.visa_issue_date)) {
-      newErrors.visa_issue_date = 'รูปแบบวันออกวีซ่าไม่ถูกต้อง (YYYY-MM-DD)';
-    }
-    
-    // ✅ Validate visa expiry is after issue date
-    if (formData.visa_issue_date && formData.visa_expiry_date) {
-      const issueDate = new Date(formData.visa_issue_date);
-      const expiryDate = new Date(formData.visa_expiry_date);
-      if (isNaN(issueDate.getTime()) || isNaN(expiryDate.getTime())) {
-        newErrors.visa_expiry_date = 'วันที่ไม่ถูกต้อง';
-      } else if (expiryDate <= issueDate) {
-        newErrors.visa_expiry_date = 'วันหมดอายุวีซ่าต้องหลังวันออกวีซ่า';
+      if (formData.visa_expiry_date && !/^\d{4}-\d{2}-\d{2}$/.test(formData.visa_expiry_date)) {
+        newErrors.visa_expiry_date = 'รูปแบบวันหมดอายุวีซ่าไม่ถูกต้อง (YYYY-MM-DD)';
       }
-    }
-    
-    // ✅ Validate visa expiry is not in the past
-    if (formData.visa_expiry_date) {
-      const expiryDate = new Date(formData.visa_expiry_date);
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      if (isNaN(expiryDate.getTime())) {
-        newErrors.visa_expiry_date = 'วันหมดอายุวีซ่าไม่ถูกต้อง';
-      } else if (expiryDate < today) {
-        newErrors.visa_expiry_date = 'วีซ่าหมดอายุแล้ว กรุณาต่ออายุหรือกรอกวีซ่าใหม่';
+      if (formData.visa_issue_date && formData.visa_issue_date.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(formData.visa_issue_date)) {
+        newErrors.visa_issue_date = 'รูปแบบวันออกวีซ่าไม่ถูกต้อง (YYYY-MM-DD)';
+      }
+      if (formData.visa_issue_date && formData.visa_expiry_date) {
+        const issueDate = new Date(formData.visa_issue_date);
+        const expiryDate = new Date(formData.visa_expiry_date);
+        if (!isNaN(issueDate.getTime()) && !isNaN(expiryDate.getTime()) && expiryDate <= issueDate) {
+          newErrors.visa_expiry_date = 'วันหมดอายุวีซ่าต้องหลังวันออกวีซ่า';
+        }
+      }
+      if (formData.visa_expiry_date) {
+        const expiryDate = new Date(formData.visa_expiry_date);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        if (!isNaN(expiryDate.getTime()) && expiryDate < today) {
+          newErrors.visa_expiry_date = 'วีซ่าหมดอายุแล้ว กรุณาต่ออายุหรือกรอกวีซ่าใหม่';
+        }
       }
     }
 
@@ -823,6 +1304,32 @@ export default function UserProfileEditPage({
     }
 
     setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  /** ตรวจสอบเฉพาะที่อยู่ + ติดต่อฉุกเฉิน — ใช้เมื่อบันทึกจากหมวด "ที่อยู่" โดยไม่บังคับข้อมูลส่วนตัว */
+  const validateAddressAndEmergency = () => {
+    const newErrors = {};
+    if (formData.address_line1 && formData.address_line1.trim().length > 200) {
+      newErrors.address_line1 = 'ที่อยู่บรรทัดที่ 1 ต้องไม่เกิน 200 ตัวอักษร';
+    }
+    if (formData.subDistrict && formData.subDistrict.trim().length > 100) newErrors.subDistrict = 'ตำบล/แขวงต้องไม่เกิน 100 ตัวอักษร';
+    if (formData.district && formData.district.trim().length > 100) newErrors.district = 'อำเภอ/เขตต้องไม่เกิน 100 ตัวอักษร';
+    if (formData.province && formData.province.trim().length > 100) newErrors.province = 'จังหวัดต้องไม่เกิน 100 ตัวอักษร';
+    if (formData.postal_code && formData.postal_code.trim()) {
+      const cleaned = formData.postal_code.replace(/[-\s]/g, '');
+      if (formData.country === 'TH' && cleaned.length !== 5) newErrors.postal_code = 'รหัสไปรษณีย์ไทยต้องมี 5 หลัก';
+      else if (!/^\d+$/.test(cleaned)) newErrors.postal_code = 'รหัสไปรษณีย์ต้องเป็นตัวเลขเท่านั้น';
+      else if (cleaned.length > 10) newErrors.postal_code = 'รหัสไปรษณีย์ต้องไม่เกิน 10 หลัก';
+    }
+    if (!formData.country) newErrors.country = 'กรุณาเลือกประเทศ';
+    if (formData.emergency_contact_email && formData.emergency_contact_email.trim() && !validateEmail(formData.emergency_contact_email)) {
+      newErrors.emergency_contact_email = 'รูปแบบอีเมลไม่ถูกต้อง';
+    }
+    if (formData.hotel_number_of_guests && (formData.hotel_number_of_guests < 1 || formData.hotel_number_of_guests > 20)) {
+      newErrors.hotel_number_of_guests = 'จำนวนผู้เข้าพักต้องอยู่ระหว่าง 1-20 คน';
+    }
+    setErrors(prev => ({ ...prev, ...newErrors }));
     return Object.keys(newErrors).length === 0;
   };
 
@@ -897,11 +1404,18 @@ export default function UserProfileEditPage({
     const base = emptyFamilyForm();
     const newMember = { id: makeId(), ...base, type };
     setFamily(prev => [...prev, newMember]);
+    setNewMemberIds(prev => new Set(prev).add(newMember.id));
     setFamilyForm({ ...base, type });
     setEditingFamilyId(newMember.id);
   };
   const startEditFamily = (member) => {
     setFamilyFormErrors({});
+    setEditingFamilyPassportId(null);
+    setEditingFamilyVisaId(null);
+    const memberPassports = Array.isArray(member.passports) ? member.passports : [];
+    const memberVisaRecords = Array.isArray(member.visa_records) ? member.visa_records : [];
+    const hasPassportLegacy = !!(member.passport_no && String(member.passport_no).trim());
+    const hasPassport = member.has_passport !== undefined ? !!member.has_passport : (memberPassports.length > 0 || hasPassportLegacy);
     setFamilyForm({
       type: member.type || 'adult',
       first_name: member.first_name || '',
@@ -911,6 +1425,7 @@ export default function UserProfileEditPage({
       date_of_birth: member.date_of_birth || '',
       gender: member.gender || '',
       national_id: member.national_id || '',
+      has_passport: hasPassport,
       passport_no: member.passport_no || '',
       passport_expiry: member.passport_expiry || '',
       passport_issue_date: member.passport_issue_date || '',
@@ -920,6 +1435,8 @@ export default function UserProfileEditPage({
       place_of_birth: member.place_of_birth || '',
       passport_type: member.passport_type || 'N',
       nationality: member.nationality || 'TH',
+      passports: memberPassports,
+      visa_records: memberVisaRecords,
       address_option: member.address_option || 'own',
       address_line1: member.address_line1 || '',
       subDistrict: member.subDistrict || '',
@@ -957,7 +1474,7 @@ export default function UserProfileEditPage({
     }
     if (f.date_of_birth && f.date_of_birth.trim()) {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(f.date_of_birth.trim())) {
-        err.date_of_birth = 'รูปแบบวันเกิดไม่ถูกต้อง (YYYY-MM-DD)';
+        err.date_of_birth = 'รูปแบบวันเกิดไม่ถูกต้อง (dd/mm/yyyy)';
       } else {
         const birth = new Date(f.date_of_birth);
         const today = new Date();
@@ -976,29 +1493,12 @@ export default function UserProfileEditPage({
       else if (!/^\d{13}$/.test(cleaned)) err.national_id = 'เลขบัตรประชาชนต้องเป็นตัวเลขเท่านั้น';
       else if (!validateThaiNationalID(cleaned)) err.national_id = 'เลขบัตรประชาชนไม่ถูกต้อง (checksum ไม่ผ่าน)';
     }
-    if (f.passport_no && f.passport_no.trim()) {
-      if (f.passport_no.trim().length < 6) err.passport_no = 'เลขหนังสือเดินทางต้องมีอย่างน้อย 6 ตัวอักษร';
-      else if (!/^[A-Z0-9]+$/i.test(f.passport_no.trim())) err.passport_no = 'เลขหนังสือเดินทางต้องเป็นตัวอักษรและตัวเลขเท่านั้น';
-    }
-    if (f.passport_issue_date && f.passport_issue_date.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(f.passport_issue_date.trim())) {
-      err.passport_issue_date = 'รูปแบบวันออกหนังสือเดินทางไม่ถูกต้อง (YYYY-MM-DD)';
-    }
-    if (f.passport_expiry && f.passport_expiry.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(f.passport_expiry.trim())) {
-      err.passport_expiry = 'รูปแบบวันหมดอายุไม่ถูกต้อง (YYYY-MM-DD)';
-    }
-    if (f.passport_issue_date && f.passport_expiry) {
-      const issue = new Date(f.passport_issue_date);
-      const expiry = new Date(f.passport_expiry);
-      if (!isNaN(issue.getTime()) && !isNaN(expiry.getTime()) && expiry <= issue) {
-        err.passport_expiry = 'วันหมดอายุต้องหลังวันออกหนังสือเดินทาง';
-      }
-    }
-    if (!err.passport_expiry && f.passport_expiry && f.passport_expiry.trim() && /^\d{4}-\d{2}-\d{2}$/.test(f.passport_expiry.trim())) {
-      const expiry = new Date(f.passport_expiry);
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      if (!isNaN(expiry.getTime()) && expiry < today) {
-        err.passport_expiry = 'หนังสือเดินทางหมดอายุแล้ว';
+    // หนังสือเดินทาง (ผู้จองร่วม): เมื่อเลือก "มี" ต้องมีรายการอย่างน้อย 1 เล่ม (pattern เดียวกับผู้จองหลัก)
+    const hasPassport = f.has_passport === true || (f.passport_no && f.passport_no.trim()) || (f.passports && f.passports.length > 0);
+    if (hasPassport) {
+      const list = f.passports || [];
+      if (list.length === 0) {
+        err.passports = 'กรุณาเพิ่มหนังสือเดินทางอย่างน้อย 1 เล่ม หรือกด "บันทึก" ที่ฟอร์มเพิ่มหนังสือเดินทาง';
       }
     }
     // ที่อยู่ (เมื่อเลือกกรอกเอง): รหัสไปรษณีย์ไทย 5 หลัก
@@ -1024,7 +1524,7 @@ export default function UserProfileEditPage({
     return { valid: true };
   };
 
-  const saveFamilyEdit = () => {
+  const saveFamilyEdit = async () => {
     if (!editingFamilyId) return;
     const err = validateFamilyForm(familyForm);
     if (Object.keys(err).length > 0) {
@@ -1032,29 +1532,115 @@ export default function UserProfileEditPage({
       return;
     }
     setFamilyFormErrors({});
-    setFamily(prev => prev.map(m => m.id === editingFamilyId ? { ...m, ...familyForm } : m));
-    setEditingFamilyId(null);
-    setFamilyForm(emptyFamilyForm());
+    const isNew = newMemberIds.has(editingFamilyId);
+    const payload = { ...familyForm, id: editingFamilyId };
+    setFamilySaving(true);
+    try {
+      const url = `${API_BASE_URL}/api/auth/family${isNew ? '' : `/${editingFamilyId}`}`;
+      const res = await fetch(url, {
+        method: isNew ? 'POST' : 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!data?.ok) throw new Error(data?.detail || 'บันทึกไม่สำเร็จ');
+      setFamily(data.family || []);
+      if (isNew) setNewMemberIds(prev => { const s = new Set(prev); s.delete(editingFamilyId); return s; });
+      setEditingFamilyId(null);
+      setFamilyForm(emptyFamilyForm());
+      setEditingFamilyPassportId(null);
+      setEditingFamilyVisaId(null);
+      if (onRefreshUser) onRefreshUser();
+    } catch (e) {
+      console.error('Error saving family member:', e);
+      setFamilyFormErrors({ _form: e.message || 'บันทึกไม่สำเร็จ' });
+      Swal.fire({ icon: 'error', title: 'เกิดข้อผิดพลาด', text: e.message || 'บันทึกไม่สำเร็จ', confirmButtonText: 'ตกลง' });
+    } finally {
+      setFamilySaving(false);
+    }
   };
   const cancelFamilyEdit = () => {
     setFamilyFormErrors({});
+    setEditingFamilyPassportId(null);
+    setEditingFamilyVisaId(null);
     const id = editingFamilyId;
     setEditingFamilyId(null);
     if (id) {
       const member = family.find(m => m.id === id);
-      if (member && !member.first_name && !member.last_name) setFamily(prev => prev.filter(m => m.id !== id));
+      if (member && !member.first_name && !member.last_name) {
+        setFamily(prev => prev.filter(m => m.id !== id));
+        setNewMemberIds(prev => { const s = new Set(prev); s.delete(id); return s; });
+      }
     }
     setFamilyForm(emptyFamilyForm());
   };
-  const deleteFamilyMember = (id) => {
-    setFamily(prev => prev.filter(m => m.id !== id));
-    if (editingFamilyId === id) setEditingFamilyId(null);
+  const deleteFamilyMember = async (id) => {
+    const isNew = newMemberIds.has(id);
+    if (isNew) {
+      setFamily(prev => prev.filter(m => m.id !== id));
+      setNewMemberIds(prev => { const s = new Set(prev); s.delete(id); return s; });
+      if (editingFamilyId === id) { setEditingFamilyId(null); setFamilyForm(emptyFamilyForm()); }
+      return;
+    }
+    setFamilySaving(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/auth/family/${id}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (!data?.ok) throw new Error(data?.detail || 'ลบไม่สำเร็จ');
+      setFamily(data.family || []);
+      if (editingFamilyId === id) { setEditingFamilyId(null); setFamilyForm(emptyFamilyForm()); }
+      if (onRefreshUser) onRefreshUser();
+    } catch (e) {
+      console.error('Error deleting family member:', e);
+      Swal.fire({ icon: 'error', title: 'เกิดข้อผิดพลาด', text: e.message || 'ลบไม่สำเร็จ', confirmButtonText: 'ตกลง' });
+    } finally {
+      setFamilySaving(false);
+    }
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
+
+    // เมื่ออยู่หมวด "ที่อยู่และติดต่อฉุกเฉิน" ให้บันทึกเฉพาะที่อยู่ + ติดต่อฉุกเฉินได้ โดยไม่บังคับข้อมูลส่วนตัว
+    if (activeSection === 'address_emergency') {
+      if (!validateAddressAndEmergency()) return;
+      setIsSaving(true);
+      try {
+        const payload = {
+          address_line1: formData.address_line1 || '',
+          subDistrict: formData.subDistrict || '',
+          district: formData.district || '',
+          province: formData.province || '',
+          postal_code: formData.postal_code || '',
+          country: formData.country || 'TH',
+          emergency_contact_name: formData.emergency_contact_name || '',
+          emergency_contact_phone: formData.emergency_contact_phone || '',
+          emergency_contact_relation: formData.emergency_contact_relation || '',
+          emergency_contact_email: formData.emergency_contact_email || '',
+          hotel_number_of_guests: formData.hotel_number_of_guests ?? 1,
+        };
+        await onSave(payload);
+        await Swal.fire({ icon: 'success', title: 'บันทึกสำเร็จ', text: 'บันทึกที่อยู่และติดต่อฉุกเฉินเรียบร้อยแล้ว', confirmButtonText: 'ตกลง' });
+      } catch (error) {
+        console.error('Error saving address:', error);
+        await Swal.fire({ icon: 'error', title: 'เกิดข้อผิดพลาด', text: 'เกิดข้อผิดพลาดในการบันทึก: ' + (error.message || 'Unknown error'), confirmButtonText: 'ตกลง' });
+      } finally {
+        setIsSaving(false);
+      }
+      return;
+    }
+
     if (!validate()) {
+      return;
+    }
+
+    if (hasPassport === true && passports.length === 0) {
+      setActiveSection('passport');
+      Swal.fire({ icon: 'warning', title: 'กรุณาเพิ่มหนังสือเดินทาง', text: 'คุณเลือก "มี" แต่ยังไม่ได้เพิ่มเล่มใด — กรุณากด "เพิ่มหนังสือเดินทางอีกเล่ม" แล้วกรอกข้อมูล หรือเปลี่ยนเป็น "ไม่มี"', confirmButtonText: 'ตกลง' });
       return;
     }
 
@@ -1090,9 +1676,28 @@ export default function UserProfileEditPage({
       }
     }
     
+    // ถ้ากำลังแก้ไขวีซ่าแต่ยังไม่กดบันทึก → แจ้งให้บันทึกรายการนั้นก่อน
+    if (editingVisaId) {
+      const visaErr = validateVisaForm(visaForm);
+      if (Object.keys(visaErr).length > 0) {
+        setVisaFormErrors(visaErr);
+        setActiveSection('visa');
+        Swal.fire({
+          icon: 'warning',
+          title: 'กรุณากรอกข้อมูลวีซ่าให้ครบ',
+          text: 'กรุณากรอกข้อมูลวีซ่าให้ครบและถูกต้อง แล้วกด "บันทึก" ที่รายการที่กำลังแก้ไขก่อน',
+          confirmButtonText: 'ตกลง',
+        });
+        return;
+      }
+    }
+
     setIsSaving(true);
     try {
-      await onSave({ ...formData, family });
+      const payload = { ...formData };
+      if (hasPassport === true && passports.length > 0) payload.passports = passports;
+      payload.visa_records = visaRecords; // ส่งรายการวีซ่าทุกครั้ง (backend จะแทนที่)
+      await onSave(payload); // family แยก API; passports ส่งเป็น array เมื่อมีหลายเล่ม
       await Swal.fire({
         icon: 'success',
         title: 'บันทึกสำเร็จ',
@@ -1468,7 +2073,7 @@ export default function UserProfileEditPage({
             <div className="form-row">
               <div className="form-group">
                 <label htmlFor="first_name_th" className="form-label">
-                  ชื่อ (ภาษาไทย)
+                  ชื่อ (ภาษาไทย) <span className="required">*</span>
                 </label>
                 <input
                   type="text"
@@ -1484,7 +2089,7 @@ export default function UserProfileEditPage({
 
               <div className="form-group">
                 <label htmlFor="last_name_th" className="form-label">
-                  นามสกุล (ภาษาไทย)
+                  นามสกุล (ภาษาไทย) <span className="required">*</span>
                 </label>
                 <input
                   type="text"
@@ -1501,7 +2106,7 @@ export default function UserProfileEditPage({
 
             {/* บัตรประชาชน (National ID) */}
             <div className="form-group" style={{ marginBottom: '1rem' }}>
-              <label htmlFor="national_id" className="form-label">เลขบัตรประจำตัวประชาชน</label>
+              <label htmlFor="national_id" className="form-label">เลขบัตรประจำตัวประชาชน <span className="required">*</span></label>
               <input
                 type="text"
                 id="national_id"
@@ -1556,20 +2161,62 @@ export default function UserProfileEditPage({
 
             <div className="form-row">
               <div className="form-group">
-                <label htmlFor="dob" className="form-label">วันเกิด</label>
-                <input
-                  type="date"
-                  id="dob"
-                  name="dob"
-                  value={formData.dob}
-                  onChange={handleChange}
-                  className={`form-input ${errors.dob ? 'error' : ''}`}
-                />
+                <label htmlFor="dob" className="form-label">วันเกิด <span className="required">*</span></label>
+                <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                  <input
+                    type="text"
+                    id="dob"
+                    name="dob"
+                    placeholder="dd/mm/yyyy"
+                    value={dobDisplay}
+                    onChange={(e) => {
+                      const formatted = formatDobInputWithSlashes(e.target.value);
+                      setDobDisplay(formatted);
+                      const parsed = parseDdMmYyyyToYyyyMmDd(formatted);
+                      setFormData(prev => ({ ...prev, dob: parsed }));
+                      if (parsed) {
+                        const today = new Date(); today.setHours(0, 0, 0, 0);
+                        if (new Date(parsed) > today) setErrors(prev => ({ ...prev, dob: 'วันเกิดไม่สามารถเป็นวันอนาคตได้' }));
+                        else setErrors(prev => { const next = { ...prev }; delete next.dob; return next; });
+                      }
+                    }}
+                    className={`form-input ${errors.dob ? 'error' : ''}`}
+                    style={{ flex: 1 }}
+                  />
+                  <input
+                    ref={dobPickerRef}
+                    type="date"
+                    aria-hidden="true"
+                    tabIndex={-1}
+                    max={(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.toISOString().slice(0, 10); })()}
+                    value={formData.dob || ''}
+                    onChange={(e) => {
+                      const val = e.target.value || '';
+                      setFormData(prev => ({ ...prev, dob: val }));
+                      setDobDisplay(formatYyyyMmDdToDdMmYyyy(val));
+                      if (val) {
+                        const today = new Date(); today.setHours(0, 0, 0, 0);
+                        if (new Date(val) > today) setErrors(prev => ({ ...prev, dob: 'วันเกิดไม่สามารถเป็นวันอนาคตได้' }));
+                        else setErrors(prev => { const next = { ...prev }; delete next.dob; return next; });
+                      }
+                    }}
+                    style={{ position: 'absolute', opacity: 0, width: 0, height: 0, pointerEvents: 'none' }}
+                  />
+                  <button
+                    type="button"
+                    title="เลือกวันที่"
+                    onClick={() => dobPickerRef.current?.showPicker?.() || dobPickerRef.current?.click?.()}
+                    style={{ marginLeft: 8, padding: '8px 10px', background: '#f0f0f0', border: '1px solid #ddd', borderRadius: 6, cursor: 'pointer' }}
+                    tabIndex={0}
+                  >
+                    📅
+                  </button>
+                </div>
                 {errors.dob && <span className="error-message">{errors.dob}</span>}
               </div>
 
               <div className="form-group">
-                <label htmlFor="gender" className="form-label">เพศ</label>
+                <label htmlFor="gender" className="form-label">เพศ <span className="required">*</span></label>
                 <select
                   id="gender"
                   name="gender"
@@ -1594,332 +2241,319 @@ export default function UserProfileEditPage({
           <div id="section-passport" className="form-section">
             <h3 className="form-section-title">🛂 ข้อมูลหนังสือเดินทาง (สำหรับเที่ยวบินระหว่างประเทศ)</h3>
             
-            {/* Passport Number & Type */}
-            <div className="form-row">
-              <div className="form-group">
-                <label htmlFor="passport_no" className="form-label">
-                  เลขหนังสือเดินทาง <span className="required">*</span>
-                </label>
-                <input
-                  type="text"
-                  id="passport_no"
-                  name="passport_no"
-                  value={formData.passport_no}
-                  onChange={handleChange}
-                  className={`form-input ${errors.passport_no ? 'error' : ''}`}
-                  placeholder="A12345678"
-                  maxLength="20"
-                  autoComplete="passport"
-                />
-                {errors.passport_no && <span className="error-message">{errors.passport_no}</span>}
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="passport_type" className="form-label">ประเภทหนังสือเดินทาง</label>
-                <select
-                  id="passport_type"
-                  name="passport_type"
-                  value={formData.passport_type}
-                  onChange={handleChange}
-                  className="form-input"
+            {/* ปุ่ม มี / ไม่มี passport */}
+            <div className="form-group" style={{ marginBottom: '20px', padding: '12px', background: '#f9fafb', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
+              <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => handleHasPassportChange(true)}
+                  className={`passport-toggle-btn ${hasPassport === true ? 'active' : ''}`}
+                  style={{
+                    padding: '10px 24px',
+                    borderRadius: '8px',
+                    border: `2px solid ${hasPassport === true ? '#2563eb' : '#e2e8f0'}`,
+                    background: hasPassport === true ? '#2563eb' : '#fff',
+                    color: hasPassport === true ? '#fff' : '#64748b',
+                    fontSize: '16px',
+                    fontWeight: '600',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s ease',
+                  }}
                 >
-                  <option value="N">ทั่วไป (Normal)</option>
-                  <option value="D">ทางการทูต (Diplomatic)</option>
-                  <option value="O">ราชการ (Official)</option>
-                  <option value="S">บริการ (Service)</option>
-                </select>
+                  มี
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleHasPassportChange(false)}
+                  className={`passport-toggle-btn ${hasPassport === false ? 'active' : ''}`}
+                  style={{
+                    padding: '10px 24px',
+                    borderRadius: '8px',
+                    border: `2px solid ${hasPassport === false ? '#2563eb' : '#e2e8f0'}`,
+                    background: hasPassport === false ? '#2563eb' : '#fff',
+                    color: hasPassport === false ? '#fff' : '#64748b',
+                    fontSize: '16px',
+                    fontWeight: '600',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s ease',
+                  }}
+                >
+                  ไม่มี
+                </button>
               </div>
+              {hasPassport === false && (
+                <small className="form-hint" style={{ display: 'block', marginTop: '10px', padding: '8px', background: '#fef3c7', borderRadius: '6px', color: '#92400e' }}>
+                  💡 เที่ยวบินในประเทศสามารถใช้บัตรประชาชนได้ — เมื่อมีหนังสือเดินทางแล้วสามารถกลับมากรอกได้
+                </small>
+              )}
             </div>
 
-            {/* Issue Date & Expiry Date */}
-            <div className="form-row">
-              <div className="form-group">
-                <label htmlFor="passport_issue_date" className="form-label">วันออกหนังสือเดินทาง</label>
-                <input
-                  type="date"
-                  id="passport_issue_date"
-                  name="passport_issue_date"
-                  value={formData.passport_issue_date}
-                  onChange={handleChange}
-                  className={`form-input ${errors.passport_issue_date ? 'error' : ''}`}
-                />
-                {errors.passport_issue_date && <span className="error-message">{errors.passport_issue_date}</span>}
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="passport_expiry" className="form-label">
-                  วันหมดอายุ <span className="required">*</span>
-                </label>
-                <input
-                  type="date"
-                  id="passport_expiry"
-                  name="passport_expiry"
-                  value={formData.passport_expiry}
-                  onChange={handleChange}
-                  className={`form-input ${errors.passport_expiry ? 'error' : ''}`}
-                />
-                {errors.passport_expiry && <span className="error-message">{errors.passport_expiry}</span>}
-                <small className="form-hint">หนังสือเดินทางต้องเหลืออายุอย่างน้อย 6 เดือนก่อนเดินทาง</small>
-              </div>
-            </div>
-
-            {/* Issuing Country & Nationality */}
-            <div className="form-row">
-              <div className="form-group">
-                <label htmlFor="passport_issuing_country" className="form-label">ประเทศที่ออกหนังสือเดินทาง</label>
-                <select
-                  id="passport_issuing_country"
-                  name="passport_issuing_country"
-                  value={formData.passport_issuing_country}
-                  onChange={handleChange}
-                  className="form-input"
-                >
-                  {countries.map(country => (
-                    <option key={country.code} value={country.code}>{country.name}</option>
+            {/* หนังสือเดินทางหลายเล่ม: รายการ + เพิ่ม/แก้ไข/ลบ/ใช้เป็นค่าเริ่มต้น */}
+            {hasPassport === true && (
+            <>
+            {passportWarnings.length > 0 && (
+              <div style={{ marginBottom: '16px', padding: '12px', background: '#fef3c7', borderRadius: '8px', border: '1px solid #f59e0b' }}>
+                <strong style={{ color: '#92400e' }}>⚠️ แจ้งเตือน</strong>
+                <ul style={{ margin: '8px 0 0', paddingLeft: '20px', color: '#92400e' }}>
+                  {passportWarnings.map((w, i) => (
+                    <li key={i}>{w.passport_no ? `${w.passport_no}: ${w.message}` : w.message}</li>
                   ))}
-                </select>
+                </ul>
               </div>
+            )}
 
-              <div className="form-group">
-                <label htmlFor="nationality" className="form-label">
-                  สัญชาติ <span className="required">*</span>
-                </label>
-                <select
-                  id="nationality"
-                  name="nationality"
-                  value={formData.nationality}
-                  onChange={handleChange}
-                  className="form-input"
-                >
-                  {countries.map(country => (
-                    <option key={country.code} value={country.code}>{country.name}</option>
-                  ))}
-                </select>
+            {passports.length === 0 && !editingPassportId && (
+              <p style={{ color: '#6b7280', marginBottom: '12px' }}>ยังไม่มีหนังสือเดินทาง — กดปุ่มด้านล่างเพื่อเพิ่มเล่มแรก</p>
+            )}
+
+            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+              {passports.map((p) => (
+                <li key={p.id} style={{ marginBottom: '12px', padding: '12px', background: '#f9fafb', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                    <div>
+                      <span style={{ fontWeight: 600, color: '#111827' }}>{p.passport_no}</span>
+                      <span style={{ marginLeft: '8px', fontSize: '12px', color: '#6b7280' }}>
+                        {p.passport_type === 'N' && 'ทั่วไป'}
+                        {p.passport_type === 'O' && 'ราชการ'}
+                        {p.passport_type === 'D' && 'ทูต'}
+                        {p.passport_type === 'S' && 'บริการ'}
+                        {p.passport_expiry && ` • หมดอายุ ${p.passport_expiry}`}
+                      </span>
+                      {p.is_primary && (
+                        <span style={{ marginLeft: '8px', fontSize: '11px', padding: '2px 6px', borderRadius: '4px', background: '#2563eb', color: '#fff' }}>ใช้เป็นค่าเริ่มต้น</span>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      {!p.is_primary && (
+                        <button type="button" onClick={() => setPrimaryPassport(p.id)} style={{ padding: '6px 10px', fontSize: '12px', border: '1px solid #2563eb', borderRadius: '6px', background: '#eff6ff', color: '#2563eb' }}>ใช้เป็นค่าเริ่มต้น</button>
+                      )}
+                      <button type="button" onClick={() => startEditPassport(p)} style={{ padding: '6px 10px', fontSize: '12px', border: '1px solid #d1d5db', borderRadius: '6px', background: '#fff', color: '#374151' }}>แก้ไข</button>
+                      <button type="button" onClick={() => deletePassport(p.id)} style={{ padding: '6px 10px', fontSize: '12px', border: '1px solid #fecaca', borderRadius: '6px', background: '#fef2f2', color: '#dc2626' }}>ลบ</button>
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+
+            {editingPassportId ? (
+              <div style={{ marginTop: '16px', padding: '16px', background: '#f0f9ff', borderRadius: '8px', border: '1px solid #0ea5e9' }}>
+                <h4 style={{ marginTop: 0, marginBottom: '12px' }}>{editingPassportId === 'new' ? 'เพิ่มหนังสือเดินทาง' : 'แก้ไขหนังสือเดินทาง'}</h4>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">เลขหนังสือเดินทาง <span className="required">*</span></label>
+                    <input type="text" value={passportForm.passport_no} onChange={(e) => setPassportForm(f => ({ ...f, passport_no: e.target.value }))} className={`form-input ${passportFormErrors.passport_no ? 'error' : ''}`} placeholder="A12345678" maxLength="20" />
+                    {passportFormErrors.passport_no && <span className="error-message">{passportFormErrors.passport_no}</span>}
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">ประเภท</label>
+                    <select value={passportForm.passport_type} onChange={(e) => setPassportForm(f => ({ ...f, passport_type: e.target.value }))} className="form-input">
+                      <option value="N">ทั่วไป</option><option value="D">ทูต</option><option value="O">ราชการ</option><option value="S">บริการ</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">วันออก</label>
+                    <input type="date" value={passportForm.passport_issue_date} onChange={(e) => setPassportForm(f => ({ ...f, passport_issue_date: e.target.value }))} className={`form-input ${passportFormErrors.passport_issue_date ? 'error' : ''}`} />
+                    {passportFormErrors.passport_issue_date && <span className="error-message">{passportFormErrors.passport_issue_date}</span>}
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">วันหมดอายุ <span className="required">*</span></label>
+                    <input type="date" value={passportForm.passport_expiry} onChange={(e) => setPassportForm(f => ({ ...f, passport_expiry: e.target.value }))} className={`form-input ${passportFormErrors.passport_expiry ? 'error' : ''}`} />
+                    {passportFormErrors.passport_expiry && <span className="error-message">{passportFormErrors.passport_expiry}</span>}
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">ประเทศที่ออก</label>
+                    <select value={passportForm.passport_issuing_country} onChange={(e) => setPassportForm(f => ({ ...f, passport_issuing_country: e.target.value }))} className="form-input">
+                      {countries.map(c => (<option key={c.code} value={c.code}>{c.name}</option>))}
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">สัญชาติ</label>
+                    <select value={passportForm.nationality} onChange={(e) => setPassportForm(f => ({ ...f, nationality: e.target.value }))} className="form-input">
+                      {countries.map(c => (<option key={c.code} value={c.code}>{c.name}</option>))}
+                    </select>
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">ชื่อตามเล่ม (อังกฤษ) <span className="required">*</span></label>
+                    <input type="text" value={passportForm.passport_given_names} onChange={(e) => setPassportForm(f => ({ ...f, passport_given_names: e.target.value }))} className={`form-input ${passportFormErrors.passport_given_names ? 'error' : ''}`} placeholder="First name" />
+                    {passportFormErrors.passport_given_names && <span className="error-message">{passportFormErrors.passport_given_names}</span>}
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">นามสกุลตามเล่ม (อังกฤษ) <span className="required">*</span></label>
+                    <input type="text" value={passportForm.passport_surname} onChange={(e) => setPassportForm(f => ({ ...f, passport_surname: e.target.value }))} className={`form-input ${passportFormErrors.passport_surname ? 'error' : ''}`} placeholder="Last name" />
+                    {passportFormErrors.passport_surname && <span className="error-message">{passportFormErrors.passport_surname}</span>}
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">สถานที่เกิด</label>
+                  <input type="text" value={passportForm.place_of_birth} onChange={(e) => setPassportForm(f => ({ ...f, place_of_birth: e.target.value }))} className={`form-input ${passportFormErrors.place_of_birth ? 'error' : ''}`} placeholder="เมือง, ประเทศ" maxLength="150" />
+                  {passportFormErrors.place_of_birth && <span className="error-message">{passportFormErrors.place_of_birth}</span>}
+                </div>
+                {editingPassportId === 'new' && (
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px', cursor: 'pointer' }}>
+                    <input type="checkbox" checked={passportForm.is_primary} onChange={(e) => setPassportForm(f => ({ ...f, is_primary: e.target.checked }))} />
+                    <span>ใช้เป็นค่าเริ่มต้นตอนจอง</span>
+                  </label>
+                )}
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button type="button" onClick={savePassportEdit} className="btn-primary" style={{ padding: '8px 16px' }}>บันทึก</button>
+                  <button type="button" onClick={cancelPassportEdit} className="btn-secondary" style={{ padding: '8px 16px' }}>ยกเลิก</button>
+                </div>
               </div>
-            </div>
+            ) : (
+              <button type="button" onClick={addPassport} style={{ marginTop: '12px', padding: '10px 20px', borderRadius: '8px', border: '1px solid #2563eb', background: '#eff6ff', color: '#2563eb', fontWeight: 600, cursor: 'pointer' }}>
+                + เพิ่มหนังสือเดินทางอีกเล่ม
+              </button>
+            )}
 
-            {/* Passport Name (English) */}
-            <div className="form-row">
-              <div className="form-group">
-                <label htmlFor="passport_given_names" className="form-label">
-                  ชื่อตามหนังสือเดินทาง (ภาษาอังกฤษ) <span className="required">*</span>
-                </label>
-                <input
-                  type="text"
-                  id="passport_given_names"
-                  name="passport_given_names"
-                  value={formData.passport_given_names}
-                  onChange={handleChange}
-                  className={`form-input ${errors.passport_given_names ? 'error' : ''}`}
-                  placeholder="First Name and Middle Name"
-                  autoComplete="given-name"
-                />
-                {errors.passport_given_names && <span className="error-message">{errors.passport_given_names}</span>}
-                <small className="form-hint">กรุณากรอกตามที่ปรากฏในหนังสือเดินทาง (ภาษาอังกฤษ)</small>
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="passport_surname" className="form-label">
-                  นามสกุลตามหนังสือเดินทาง (ภาษาอังกฤษ) <span className="required">*</span>
-                </label>
-                <input
-                  type="text"
-                  id="passport_surname"
-                  name="passport_surname"
-                  value={formData.passport_surname}
-                  onChange={handleChange}
-                  className={`form-input ${errors.passport_surname ? 'error' : ''}`}
-                  placeholder="Last Name / Surname"
-                  autoComplete="family-name"
-                />
-                {errors.passport_surname && <span className="error-message">{errors.passport_surname}</span>}
-                <small className="form-hint">กรุณากรอกตามที่ปรากฏในหนังสือเดินทาง (ภาษาอังกฤษ)</small>
-              </div>
-            </div>
-
-            {/* Place of Birth */}
-            <div className="form-group">
-              <label htmlFor="place_of_birth" className="form-label">สถานที่เกิด</label>
-              <input
-                type="text"
-                id="place_of_birth"
-                name="place_of_birth"
-                value={formData.place_of_birth}
-                onChange={handleChange}
-                className={`form-input ${errors.place_of_birth ? 'error' : ''}`}
-                placeholder="กรุงเทพมหานคร, ประเทศไทย"
-                autoComplete="birth-place"
-                maxLength="100"
-              />
-              {errors.place_of_birth && <span className="error-message">{errors.place_of_birth}</span>}
-              <small className="form-hint">ระบุเมืองและประเทศ เช่น กรุงเทพมหานคร, ประเทศไทย หรือ Bangkok, Thailand</small>
-            </div>
+            <small className="form-hint" style={{ display: 'block', marginTop: '12px' }}>รองรับหลายเล่ม (หลายสัญชาติ/ประเภท) — เล่มที่ตั้งเป็น &quot;ใช้เป็นค่าเริ่มต้น&quot; จะถูกใช้ตอนจองตั๋ว</small>
+            </>
+            )}
           </div>
           )}
 
-          {/* ข้อมูลวีซ่า - หมวดแยก */}
+          {/* ข้อมูลวีซ่า - รายการหลายประเทศ/หลายประเภท (Multi-Visa) */}
           {activeSection === 'visa' && (
           <div id="section-visa" className="form-section">
             <h3 className="form-section-title">🛂 ข้อมูลวีซ่า (สำหรับเที่ยวบินระหว่างประเทศ)</h3>
-            
-            {/* Checkbox สำหรับเลือกว่ามี Visa หรือไม่ */}
-            <div className="form-group" style={{ marginBottom: '20px', padding: '12px', background: '#f9fafb', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
-              <div style={{ display: 'flex', gap: '24px', alignItems: 'center' }}>
-                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', fontSize: '16px', fontWeight: '500' }}>
-                  <input
-                    type="radio"
-                    name="has_visa_option"
-                    checked={hasVisa === true}
-                    onChange={(e) => e.target.checked && handleHasVisaChange({ target: { checked: true } })}
-                    style={{ marginRight: '8px', width: '18px', height: '18px', cursor: 'pointer' }}
-                  />
-                  <span>มี Visa</span>
-                </label>
-                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', fontSize: '16px', fontWeight: '500' }}>
-                  <input
-                    type="radio"
-                    name="has_visa_option"
-                    checked={hasVisa === false}
-                    onChange={(e) => e.target.checked && handleHasVisaChange({ target: { checked: false } })}
-                    style={{ marginRight: '8px', width: '18px', height: '18px', cursor: 'pointer' }}
-                  />
-                  <span>ไม่มี Visa</span>
-                </label>
-              </div>
-              <small className="form-hint" style={{ display: 'block', marginTop: '8px', padding: '8px', background: '#e3f2fd', borderRadius: '6px', color: '#1565c0' }}>
-                💡 หากคุณมีวีซ่าที่ถูกต้องสำหรับประเทศปลายทางหรือประเทศที่ต้องผ่านทาง (Transit) กรุณาเลือก "มี Visa" และกรอกข้อมูลด้านล่าง เพื่อให้ระบบตรวจสอบและแจ้งเตือนอัตโนมัติ
-              </small>
-            </div>
+            <p style={{ color: '#374151', marginBottom: '16px' }}>หนึ่งคนมีวีซ่าได้หลายประเทศ — กรอกแต่ละรายการแล้วผูกกับเล่มพาสปอร์ตที่ลงวีซ่า เพื่อให้ระบบแจ้งเตือนและ AI ใช้ตรวจสอบตอนจอง</p>
 
-            {/* แสดงฟอร์มข้อมูลวีซ่าเฉพาะเมื่อ hasVisa === true */}
-            {hasVisa && (
-              <>
-                {/* Visa Type & Number */}
+            {visaWarnings.length > 0 && (
+              <div style={{ marginBottom: '16px', padding: '12px', background: '#fef3c7', borderRadius: '8px', border: '1px solid #f59e0b' }}>
+                <strong style={{ color: '#92400e' }}>⚠️ แจ้งเตือน</strong>
+                <ul style={{ margin: '8px 0 0', paddingLeft: '20px', color: '#92400e' }}>
+                  {visaWarnings.map((w, i) => (
+                    <li key={i}>{w.message}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {visaRecords.length === 0 && !editingVisaId && (
+              <p style={{ color: '#6b7280', marginBottom: '12px' }}>ยังไม่มีรายการวีซ่า — กดปุ่มด้านล่างเพื่อเพิ่ม</p>
+            )}
+
+            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+              {visaRecords.map((v) => {
+                const countryName = countries.find(c => c.code === v.country_code)?.name || v.country_code;
+                const isExpired = v.status === 'Expired' || (v.expiry_date && new Date(v.expiry_date) < new Date());
+                return (
+                  <li key={v.id} style={{ marginBottom: '12px', padding: '12px', background: isExpired ? '#fef2f2' : '#f9fafb', borderRadius: '8px', border: `1px solid ${isExpired ? '#fecaca' : '#e5e7eb'}` }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                      <div>
+                        <span style={{ fontWeight: 600, color: '#111827' }}>{countryName}</span>
+                        <span style={{ marginLeft: '8px', fontSize: '12px', color: '#6b7280' }}>
+                          {v.visa_type} • หมดอายุ {v.expiry_date || '-'} • {v.entries === 'Single' ? 'ครั้งเดียว' : 'หลายครั้ง'}
+                          {v.linked_passport && ` • ผูกกับพาสปอร์ต ${v.linked_passport}`}
+                        </span>
+                        {isExpired && (
+                          <span style={{ marginLeft: '8px', fontSize: '11px', padding: '2px 6px', borderRadius: '4px', background: '#dc2626', color: '#fff' }}>หมดอายุ</span>
+                        )}
+                      </div>
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <button type="button" onClick={() => startEditVisa(v)} style={{ padding: '6px 10px', fontSize: '12px', border: '1px solid #d1d5db', borderRadius: '6px', background: '#fff', color: '#374151' }}>แก้ไข</button>
+                        <button type="button" onClick={() => deleteVisa(v.id)} style={{ padding: '6px 10px', fontSize: '12px', border: '1px solid #fecaca', borderRadius: '6px', background: '#fef2f2', color: '#dc2626' }}>ลบ</button>
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+
+            {editingVisaId ? (
+              <div style={{ marginTop: '16px', padding: '16px', background: '#f0f9ff', borderRadius: '8px', border: '1px solid #0ea5e9' }}>
+                <h4 style={{ marginTop: 0, marginBottom: '12px' }}>{editingVisaId === 'new' ? 'เพิ่มวีซ่า' : 'แก้ไขวีซ่า'}</h4>
                 <div className="form-row">
                   <div className="form-group">
-                    <label htmlFor="visa_type" className="form-label">ประเภทวีซ่า</label>
-                    <select
-                      id="visa_type"
-                      name="visa_type"
-                      value={formData.visa_type}
-                      onChange={handleChange}
-                      className="form-input"
-                    >
-                      <option value="">-- เลือกประเภทวีซ่า --</option>
+                    <label className="form-label">ประเทศปลายทาง/ประเทศที่ออกวีซ่า <span className="required">*</span></label>
+                    <select value={visaForm.country_code} onChange={(e) => setVisaForm(f => ({ ...f, country_code: e.target.value }))} className={`form-input ${visaFormErrors.country_code ? 'error' : ''}`}>
+                      <option value="">-- เลือกประเทศ --</option>
+                      {countries.map(c => (<option key={c.code} value={c.code}>{c.name}</option>))}
+                    </select>
+                    {visaFormErrors.country_code && <span className="error-message">{visaFormErrors.country_code}</span>}
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">ประเภทวีซ่า</label>
+                    <select value={visaForm.visa_type} onChange={(e) => setVisaForm(f => ({ ...f, visa_type: e.target.value }))} className="form-input">
+                      <option value="B1/B2">B1/B2 (สหรัฐ)</option>
+                      <option value="L">L (จีน ท่องเที่ยว)</option>
                       <option value="TOURIST">ท่องเที่ยว (Tourist)</option>
                       <option value="BUSINESS">ธุรกิจ (Business)</option>
-                      <option value="STUDENT">นักเรียน/นักศึกษา (Student)</option>
+                      <option value="STUDENT">นักเรียน (Student)</option>
                       <option value="WORK">ทำงาน (Work)</option>
                       <option value="TRANSIT">ผ่านทาง (Transit)</option>
-                      <option value="VISA_FREE">Visa-Free Entry</option>
-                      <option value="ETA">Electronic Travel Authorization (ETA/eTA)</option>
-                      <option value="EVISA">Electronic Visa (eVisa)</option>
-                      <option value="OTHER">อื่นๆ (Other)</option>
+                      <option value="EVISA">eVisa</option>
+                      <option value="ETA">ETA/eTA</option>
+                      <option value="OTHER">อื่นๆ</option>
                     </select>
                   </div>
-
-                  <div className="form-group">
-                    <label htmlFor="visa_number" className="form-label">เลขที่วีซ่า</label>
-                    <input
-                      type="text"
-                      id="visa_number"
-                      name="visa_number"
-                      value={formData.visa_number}
-                      onChange={handleChange}
-                      className={`form-input ${errors.visa_number ? 'error' : ''}`}
-                      placeholder="V123456789"
-                      maxLength="50"
-                    />
-                    {errors.visa_number && <span className="error-message">{errors.visa_number}</span>}
-                  </div>
                 </div>
-
-                {/* Visa Issuing Country & Purpose */}
                 <div className="form-row">
                   <div className="form-group">
-                    <label htmlFor="visa_issuing_country" className="form-label">ประเทศที่ออกวีซ่า</label>
-                    <select
-                      id="visa_issuing_country"
-                      name="visa_issuing_country"
-                      value={formData.visa_issuing_country}
-                      onChange={handleChange}
-                      className="form-input"
-                    >
-                      <option value="">-- เลือกประเทศ --</option>
-                      {countries.map(country => (
-                        <option key={country.code} value={country.code}>{country.name}</option>
+                    <label className="form-label">วันหมดอายุ <span className="required">*</span></label>
+                    <input type="date" value={visaForm.expiry_date} onChange={(e) => setVisaForm(f => ({ ...f, expiry_date: e.target.value }))} className={`form-input ${visaFormErrors.expiry_date ? 'error' : ''}`} />
+                    {visaFormErrors.expiry_date && <span className="error-message">{visaFormErrors.expiry_date}</span>}
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">วันออกวีซ่า</label>
+                    <input type="date" value={visaForm.issue_date} onChange={(e) => setVisaForm(f => ({ ...f, issue_date: e.target.value }))} className={`form-input ${visaFormErrors.issue_date ? 'error' : ''}`} />
+                    {visaFormErrors.issue_date && <span className="error-message">{visaFormErrors.issue_date}</span>}
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">การเข้าประเทศ</label>
+                    <select value={visaForm.entries} onChange={(e) => setVisaForm(f => ({ ...f, entries: e.target.value }))} className="form-input">
+                      <option value="Single">ครั้งเดียว (Single Entry)</option>
+                      <option value="Multiple">หลายครั้ง (Multiple Entry)</option>
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">วัตถุประสงค์</label>
+                    <select value={visaForm.purpose} onChange={(e) => setVisaForm(f => ({ ...f, purpose: e.target.value }))} className="form-input">
+                      <option value="T">ท่องเที่ยว</option>
+                      <option value="B">ธุรกิจ</option>
+                      <option value="S">ศึกษา</option>
+                      <option value="W">ทำงาน</option>
+                      <option value="TR">ผ่านทาง</option>
+                      <option value="O">อื่นๆ</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">เลขที่วีซ่า (ถ้ามี)</label>
+                    <input type="text" value={visaForm.visa_number} onChange={(e) => setVisaForm(f => ({ ...f, visa_number: e.target.value }))} className={`form-input ${visaFormErrors.visa_number ? 'error' : ''}`} placeholder="V123456789" maxLength="50" />
+                    {visaFormErrors.visa_number && <span className="error-message">{visaFormErrors.visa_number}</span>}
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">ผูกกับพาสปอร์ตเล่ม</label>
+                    <select value={visaForm.linked_passport} onChange={(e) => setVisaForm(f => ({ ...f, linked_passport: e.target.value }))} className="form-input">
+                      <option value="">-- ไม่ระบุ / เล่มอื่น --</option>
+                      {passports.filter(p => p.passport_no).map(p => (
+                        <option key={p.id} value={p.passport_no}>{p.passport_no}{p.is_primary ? ' (ค่าเริ่มต้น)' : ''}</option>
                       ))}
                     </select>
-                  </div>
-
-                  <div className="form-group">
-                    <label htmlFor="visa_purpose" className="form-label">วัตถุประสงค์ในการเดินทาง</label>
-                    <select
-                      id="visa_purpose"
-                      name="visa_purpose"
-                      value={formData.visa_purpose}
-                      onChange={handleChange}
-                      className="form-input"
-                    >
-                      <option value="T">ท่องเที่ยว (Tourism)</option>
-                      <option value="B">ธุรกิจ (Business)</option>
-                      <option value="S">ศึกษา (Study)</option>
-                      <option value="W">ทำงาน (Work)</option>
-                      <option value="TR">ผ่านทาง (Transit)</option>
-                      <option value="O">อื่นๆ (Other)</option>
-                    </select>
+                    <small className="form-hint">วีซ่าลงในเล่มไหน ให้เลือกเล่มนั้น — ถ้าเป็นเล่มเก่าที่หมดอายุแล้ว ระบบจะเตือนให้พกเล่มนั้นไปด้วย</small>
                   </div>
                 </div>
-
-                {/* Visa Issue Date & Expiry Date */}
-                <div className="form-row">
-                  <div className="form-group">
-                    <label htmlFor="visa_issue_date" className="form-label">วันออกวีซ่า</label>
-                    <input
-                      type="date"
-                      id="visa_issue_date"
-                      name="visa_issue_date"
-                      value={formData.visa_issue_date}
-                      onChange={handleChange}
-                      className={`form-input ${errors.visa_issue_date ? 'error' : ''}`}
-                    />
-                    {errors.visa_issue_date && <span className="error-message">{errors.visa_issue_date}</span>}
-                  </div>
-
-                  <div className="form-group">
-                    <label htmlFor="visa_expiry_date" className="form-label">
-                      วันหมดอายุวีซ่า <span className="required">*</span> (ถ้ามี)
-                    </label>
-                    <input
-                      type="date"
-                      id="visa_expiry_date"
-                      name="visa_expiry_date"
-                      value={formData.visa_expiry_date}
-                      onChange={handleChange}
-                      className={`form-input ${errors.visa_expiry_date ? 'error' : ''}`}
-                    />
-                    {errors.visa_expiry_date && <span className="error-message">{errors.visa_expiry_date}</span>}
-                    <small className="form-hint">กรุณาตรวจสอบวันหมดอายุวีซ่าก่อนเดินทาง</small>
-                  </div>
+                <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+                  <button type="button" onClick={saveVisaEdit} className="btn-primary" style={{ padding: '8px 16px' }}>บันทึก</button>
+                  <button type="button" onClick={cancelVisaEdit} className="btn-secondary" style={{ padding: '8px 16px' }}>ยกเลิก</button>
                 </div>
-
-                {/* Visa Entry Type */}
-                <div className="form-group">
-                  <label htmlFor="visa_entry_type" className="form-label">ประเภทการเข้าประเทศ</label>
-                  <select
-                    id="visa_entry_type"
-                    name="visa_entry_type"
-                    value={formData.visa_entry_type}
-                    onChange={handleChange}
-                    className="form-input"
-                  >
-                    <option value="S">ครั้งเดียว (Single Entry)</option>
-                    <option value="M">หลายครั้ง (Multiple Entry)</option>
-                  </select>
-                  <small className="form-hint">Single Entry = เข้าได้ 1 ครั้ง, Multiple Entry = เข้าได้หลายครั้ง</small>
-                </div>
-              </>
+              </div>
+            ) : (
+              <button type="button" onClick={addVisa} style={{ marginTop: '12px', padding: '10px 20px', borderRadius: '8px', border: '1px solid #2563eb', background: '#eff6ff', color: '#2563eb', fontWeight: 600, cursor: 'pointer' }}>
+                + เพิ่มวีซ่า
+              </button>
             )}
+
+            <small className="form-hint" style={{ display: 'block', marginTop: '12px' }}>รองรับหลายประเทศ/หลายประเภท — AI จะใช้ข้อมูลนี้ตรวจสอบและแจ้งเตือนเมื่อจองเที่ยวบินระหว่างประเทศหรือมี Transit</small>
           </div>
           )}
 
@@ -2110,10 +2744,30 @@ export default function UserProfileEditPage({
               เพิ่มชื่อผู้ใหญ่หรือเด็กที่มักเดินทางด้วย ตอนจองมากกว่า 1 คนจะเลือกจากรายการนี้ได้
             </p>
             <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
-              <button type="button" className="btn-secondary" onClick={() => addFamilyMember('adult')} style={{ padding: '8px 16px', borderRadius: '8px', border: '1px solid #3b82f6', background: '#eff6ff', color: '#1d4ed8', fontWeight: 500 }}>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => addFamilyMember('adult')}
+                disabled={!!editingFamilyId}
+                title={editingFamilyId ? 'กรุณาบันทึกรายการที่กำลังแก้ไขก่อน' : undefined}
+                style={{
+                  padding: '8px 16px', borderRadius: '8px', border: '1px solid #3b82f6', background: '#eff6ff', color: '#1d4ed8', fontWeight: 500,
+                  opacity: editingFamilyId ? 0.5 : 1, cursor: editingFamilyId ? 'not-allowed' : 'pointer'
+                }}
+              >
                 + เพิ่มผู้ใหญ่
               </button>
-              <button type="button" className="btn-secondary" onClick={() => addFamilyMember('child')} style={{ padding: '8px 16px', borderRadius: '8px', border: '1px solid #10b981', background: '#ecfdf5', color: '#059669', fontWeight: 500 }}>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => addFamilyMember('child')}
+                disabled={!!editingFamilyId}
+                title={editingFamilyId ? 'กรุณาบันทึกรายการที่กำลังแก้ไขก่อน' : undefined}
+                style={{
+                  padding: '8px 16px', borderRadius: '8px', border: '1px solid #10b981', background: '#ecfdf5', color: '#059669', fontWeight: 500,
+                  opacity: editingFamilyId ? 0.5 : 1, cursor: editingFamilyId ? 'not-allowed' : 'pointer'
+                }}
+              >
                 + เพิ่มเด็ก
               </button>
             </div>
@@ -2154,7 +2808,17 @@ export default function UserProfileEditPage({
                           <div className="form-row" style={{ flexWrap: 'wrap', gap: '12px' }}>
                             <div className="form-group" style={{ minWidth: '140px' }}>
                               <label className="form-label">วันเกิด</label>
-                              <input type="date" value={familyForm.date_of_birth} onChange={(e) => setFamilyForm(f => ({ ...f, date_of_birth: e.target.value }))} className={`form-input ${familyFormErrors.date_of_birth ? 'error' : ''}`} />
+                              <input
+                                type="text"
+                                placeholder="dd/mm/yyyy"
+                                value={formatYyyyMmDdToDdMmYyyy(familyForm.date_of_birth)}
+                                onChange={(e) => {
+                                  const formatted = formatDobInputWithSlashes(e.target.value);
+                                  const parsed = parseDdMmYyyyToYyyyMmDd(formatted);
+                                  setFamilyForm(f => ({ ...f, date_of_birth: parsed }));
+                                }}
+                                className={`form-input ${familyFormErrors.date_of_birth ? 'error' : ''}`}
+                              />
                               {familyFormErrors.date_of_birth && <span className="error-message">{familyFormErrors.date_of_birth}</span>}
                             </div>
                             <div className="form-group" style={{ minWidth: '100px' }}>
@@ -2172,63 +2836,134 @@ export default function UserProfileEditPage({
                               {familyFormErrors.national_id && <span className="error-message">{familyFormErrors.national_id}</span>}
                             </div>
                           </div>
-                          {/* หนังสือเดินทาง: เลข + ประเภท + วันออก + หมดอายุ */}
-                          <div className="form-row" style={{ flexWrap: 'wrap', gap: '12px' }}>
-                            <div className="form-group" style={{ minWidth: '140px' }}>
-                              <label className="form-label">เลขหนังสือเดินทาง</label>
-                              <input type="text" value={familyForm.passport_no} onChange={(e) => setFamilyForm(f => ({ ...f, passport_no: e.target.value }))} className={`form-input ${familyFormErrors.passport_no ? 'error' : ''}`} placeholder="A12345678" />
-                              {familyFormErrors.passport_no && <span className="error-message">{familyFormErrors.passport_no}</span>}
-                            </div>
-                            <div className="form-group" style={{ minWidth: '120px' }}>
-                              <label className="form-label">ประเภทหนังสือเดินทาง</label>
-                              <select value={familyForm.passport_type} onChange={(e) => setFamilyForm(f => ({ ...f, passport_type: e.target.value }))} className="form-input">
-                                <option value="N">ทั่วไป</option>
-                                <option value="D">ทางการทูต</option>
-                                <option value="O">ราชการ</option>
-                                <option value="S">บริการ</option>
-                              </select>
-                            </div>
-                            <div className="form-group" style={{ minWidth: '140px' }}>
-                              <label className="form-label">วันออกหนังสือเดินทาง</label>
-                              <input type="date" value={familyForm.passport_issue_date} onChange={(e) => setFamilyForm(f => ({ ...f, passport_issue_date: e.target.value }))} className={`form-input ${familyFormErrors.passport_issue_date ? 'error' : ''}`} />
-                              {familyFormErrors.passport_issue_date && <span className="error-message">{familyFormErrors.passport_issue_date}</span>}
-                            </div>
-                            <div className="form-group" style={{ minWidth: '140px' }}>
-                              <label className="form-label">วันหมดอายุ</label>
-                              <input type="date" value={familyForm.passport_expiry} onChange={(e) => setFamilyForm(f => ({ ...f, passport_expiry: e.target.value }))} className={`form-input ${familyFormErrors.passport_expiry ? 'error' : ''}`} />
-                              {familyFormErrors.passport_expiry && <span className="error-message">{familyFormErrors.passport_expiry}</span>}
-                            </div>
-                          </div>
-                          {/* ประเทศที่ออก + สัญชาติ */}
-                          <div className="form-row" style={{ flexWrap: 'wrap', gap: '12px' }}>
-                            <div className="form-group" style={{ minWidth: '180px' }}>
-                              <label className="form-label">ประเทศที่ออกหนังสือเดินทาง</label>
-                              <select value={familyForm.passport_issuing_country} onChange={(e) => setFamilyForm(f => ({ ...f, passport_issuing_country: e.target.value }))} className="form-input">
-                                {countries.map(c => (<option key={c.code} value={c.code}>{c.name}</option>))}
-                              </select>
-                            </div>
-                            <div className="form-group" style={{ minWidth: '180px' }}>
-                              <label className="form-label">สัญชาติ</label>
-                              <select value={familyForm.nationality} onChange={(e) => setFamilyForm(f => ({ ...f, nationality: e.target.value }))} className="form-input">
-                                {countries.map(c => (<option key={c.code} value={c.code}>{c.name}</option>))}
-                              </select>
+                          {/* มี/ไม่มี หนังสือเดินทาง */}
+                          <div className="form-row" style={{ flexWrap: 'wrap', gap: '12px', alignItems: 'center' }}>
+                            <label className="form-label" style={{ width: '100%', marginBottom: '4px' }}>หนังสือเดินทาง</label>
+                            <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+                              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+                                <input
+                                  type="radio"
+                                  name="family_has_passport"
+                                  checked={familyForm.has_passport === true}
+                                  onChange={() => setFamilyForm(f => ({ ...f, has_passport: true }))}
+                                />
+                                <span>มีหนังสือเดินทาง</span>
+                              </label>
+                              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+                                <input
+                                  type="radio"
+                                  name="family_has_passport"
+                                  checked={familyForm.has_passport === false}
+                                  onChange={() => {
+                                    setFamilyForm(f => ({
+                                      ...f,
+                                      has_passport: false,
+                                      passport_no: '', passport_expiry: '', passport_issue_date: '',
+                                      passport_issuing_country: 'TH', passport_given_names: '', passport_surname: '',
+                                      place_of_birth: '', passports: [], visa_records: [],
+                                    }));
+                                    setEditingFamilyPassportId(null);
+                                    setEditingFamilyVisaId(null);
+                                  }}
+                                />
+                                <span>ไม่มีหนังสือเดินทาง</span>
+                              </label>
                             </div>
                           </div>
-                          {/* ชื่อ-นามสกุลตามหนังสือเดินทาง (อังกฤษ) + สถานที่เกิด */}
-                          <div className="form-row" style={{ flexWrap: 'wrap', gap: '12px' }}>
-                            <div className="form-group" style={{ minWidth: '160px' }}>
-                              <label className="form-label">ชื่อตามหนังสือเดินทาง (อังกฤษ)</label>
-                              <input type="text" value={familyForm.passport_given_names} onChange={(e) => setFamilyForm(f => ({ ...f, passport_given_names: e.target.value }))} className="form-input" placeholder="First name" />
-                            </div>
-                            <div className="form-group" style={{ minWidth: '160px' }}>
-                              <label className="form-label">นามสกุลตามหนังสือเดินทาง (อังกฤษ)</label>
-                              <input type="text" value={familyForm.passport_surname} onChange={(e) => setFamilyForm(f => ({ ...f, passport_surname: e.target.value }))} className="form-input" placeholder="Last name" />
-                            </div>
-                            <div className="form-group" style={{ minWidth: '200px' }}>
-                              <label className="form-label">สถานที่เกิด</label>
-                              <input type="text" value={familyForm.place_of_birth} onChange={(e) => setFamilyForm(f => ({ ...f, place_of_birth: e.target.value }))} className="form-input" placeholder="เมือง, ประเทศ" />
-                            </div>
+                          {familyForm.has_passport && (
+                            <>
+                          {/* หนังสือเดินทางหลายเล่ม (สำหรับเที่ยวบินระหว่างประเทศ) — pattern เดียวกับผู้จองหลัก */}
+                          <div style={{ marginBottom: '12px' }}>
+                            <div className="form-label" style={{ marginBottom: '8px' }}>🛂 ข้อมูลหนังสือเดินทาง (สำหรับเที่ยวบินระหว่างประเทศ)</div>
+                            {familyFormErrors.passports && <span className="error-message" style={{ display: 'block', marginBottom: '8px' }}>{familyFormErrors.passports}</span>}
+                            {(member.passport_warnings || []).length > 0 && editingFamilyId === member.id && (
+                              <div style={{ marginBottom: '8px', padding: '8px', background: '#fef3c7', borderRadius: '6px', fontSize: '13px', color: '#92400e' }}>
+                                {(member.passport_warnings || []).map((w, i) => <div key={i}>{w.message}</div>)}
+                              </div>
+                            )}
+                            {(familyForm.passports || []).length === 0 && !editingFamilyPassportId && (
+                              <p style={{ color: '#6b7280', marginBottom: '8px', fontSize: '14px' }}>ยังไม่มีหนังสือเดินทาง — กดปุ่มด้านล่างเพื่อเพิ่ม</p>
+                            )}
+                            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                              {(familyForm.passports || []).map((p) => (
+                                <li key={p.id} style={{ marginBottom: '8px', padding: '10px', background: '#f9fafb', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
+                                    <span style={{ fontWeight: 600, color: '#111827' }}>{p.passport_no}</span>
+                                    <span style={{ fontSize: '12px', color: '#6b7280' }}>{p.passport_expiry && `หมดอายุ ${p.passport_expiry}`} {p.is_primary && ' • ใช้เป็นค่าเริ่มต้น'}</span>
+                                    <div style={{ display: 'flex', gap: '6px' }}>
+                                      {!p.is_primary && <button type="button" onClick={setPrimaryFamilyPassport.bind(null, p.id)} style={{ padding: '4px 8px', fontSize: '12px', border: '1px solid #2563eb', borderRadius: '6px', background: '#eff6ff', color: '#2563eb' }}>ใช้เป็นค่าเริ่มต้น</button>}
+                                      <button type="button" onClick={() => startEditFamilyPassport(p)} style={{ padding: '4px 8px', fontSize: '12px' }}>แก้ไข</button>
+                                      <button type="button" onClick={() => deleteFamilyPassport(p.id)} style={{ padding: '4px 8px', fontSize: '12px', color: '#dc2626' }}>ลบ</button>
+                                    </div>
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+                            {editingFamilyPassportId ? (
+                              <div style={{ marginTop: '12px', padding: '12px', background: '#f0f9ff', borderRadius: '8px', border: '1px solid #0ea5e9' }}>
+                                <h4 style={{ margin: '0 0 8px', fontSize: '14px' }}>{editingFamilyPassportId === 'new' ? 'เพิ่มหนังสือเดินทาง' : 'แก้ไขหนังสือเดินทาง'}</h4>
+                                <div className="form-row">
+                                  <div className="form-group"><label className="form-label">เลขหนังสือเดินทาง *</label><input type="text" value={familyPassportForm.passport_no} onChange={(e) => setFamilyPassportForm(f => ({ ...f, passport_no: e.target.value }))} className={`form-input ${familyPassportFormErrors.passport_no ? 'error' : ''}`} placeholder="A12345678" />{familyPassportFormErrors.passport_no && <span className="error-message">{familyPassportFormErrors.passport_no}</span>}</div>
+                                  <div className="form-group"><label className="form-label">ประเภท</label><select value={familyPassportForm.passport_type} onChange={(e) => setFamilyPassportForm(f => ({ ...f, passport_type: e.target.value }))} className="form-input"><option value="N">ทั่วไป</option><option value="D">ทูต</option><option value="O">ราชการ</option><option value="S">บริการ</option></select></div>
+                                </div>
+                                <div className="form-row">
+                                  <div className="form-group"><label className="form-label">วันออก</label><input type="date" value={familyPassportForm.passport_issue_date} onChange={(e) => setFamilyPassportForm(f => ({ ...f, passport_issue_date: e.target.value }))} className={`form-input ${familyPassportFormErrors.passport_issue_date ? 'error' : ''}`} />{familyPassportFormErrors.passport_issue_date && <span className="error-message">{familyPassportFormErrors.passport_issue_date}</span>}</div>
+                                  <div className="form-group"><label className="form-label">วันหมดอายุ *</label><input type="date" value={familyPassportForm.passport_expiry} onChange={(e) => setFamilyPassportForm(f => ({ ...f, passport_expiry: e.target.value }))} className={`form-input ${familyPassportFormErrors.passport_expiry ? 'error' : ''}`} />{familyPassportFormErrors.passport_expiry && <span className="error-message">{familyPassportFormErrors.passport_expiry}</span>}</div>
+                                </div>
+                                <div className="form-row">
+                                  <div className="form-group"><label className="form-label">ประเทศที่ออก</label><select value={familyPassportForm.passport_issuing_country} onChange={(e) => setFamilyPassportForm(f => ({ ...f, passport_issuing_country: e.target.value }))} className="form-input">{countries.map(c => (<option key={c.code} value={c.code}>{c.name}</option>))}</select></div>
+                                  <div className="form-group"><label className="form-label">สัญชาติ</label><select value={familyPassportForm.nationality} onChange={(e) => setFamilyPassportForm(f => ({ ...f, nationality: e.target.value }))} className="form-input">{countries.map(c => (<option key={c.code} value={c.code}>{c.name}</option>))}</select></div>
+                                </div>
+                                <div className="form-row">
+                                  <div className="form-group"><label className="form-label">ชื่อตามเล่ม (EN) *</label><input type="text" value={familyPassportForm.passport_given_names} onChange={(e) => setFamilyPassportForm(f => ({ ...f, passport_given_names: e.target.value }))} className={`form-input ${familyPassportFormErrors.passport_given_names ? 'error' : ''}`} />{familyPassportFormErrors.passport_given_names && <span className="error-message">{familyPassportFormErrors.passport_given_names}</span>}</div>
+                                  <div className="form-group"><label className="form-label">นามสกุลตามเล่ม (EN) *</label><input type="text" value={familyPassportForm.passport_surname} onChange={(e) => setFamilyPassportForm(f => ({ ...f, passport_surname: e.target.value }))} className={`form-input ${familyPassportFormErrors.passport_surname ? 'error' : ''}`} />{familyPassportFormErrors.passport_surname && <span className="error-message">{familyPassportFormErrors.passport_surname}</span>}</div>
+                                </div>
+                                <div className="form-group"><label className="form-label">สถานที่เกิด</label><input type="text" value={familyPassportForm.place_of_birth} onChange={(e) => setFamilyPassportForm(f => ({ ...f, place_of_birth: e.target.value }))} className="form-input" />{familyPassportFormErrors.place_of_birth && <span className="error-message">{familyPassportFormErrors.place_of_birth}</span>}</div>
+                                {editingFamilyPassportId === 'new' && <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', cursor: 'pointer' }}><input type="checkbox" checked={familyPassportForm.is_primary} onChange={(e) => setFamilyPassportForm(f => ({ ...f, is_primary: e.target.checked }))} /><span>ใช้เป็นค่าเริ่มต้น</span></label>}
+                                <div style={{ display: 'flex', gap: '8px' }}><button type="button" onClick={saveFamilyPassportEdit} className="btn-primary" style={{ padding: '6px 12px' }}>บันทึก</button><button type="button" onClick={cancelFamilyPassportEdit} className="btn-secondary" style={{ padding: '6px 12px' }}>ยกเลิก</button></div>
+                              </div>
+                            ) : (
+                              <button type="button" onClick={addFamilyPassport} style={{ marginTop: '8px', padding: '8px 14px', fontSize: '13px', border: '1px solid #2563eb', borderRadius: '8px', background: '#eff6ff', color: '#2563eb', fontWeight: 600, cursor: 'pointer' }}>+ เพิ่มหนังสือเดินทาง</button>
+                            )}
                           </div>
+
+                          {/* ข้อมูลวีซ่า (สำหรับเที่ยวบินระหว่างประเทศ) — pattern เดียวกับผู้จองหลัก */}
+                          <div style={{ marginBottom: '12px', marginTop: '16px', paddingTop: '12px', borderTop: '1px solid #e5e7eb' }}>
+                            <div className="form-label" style={{ marginBottom: '8px' }}>🛂 ข้อมูลวีซ่า (สำหรับเที่ยวบินระหว่างประเทศ)</div>
+                            {(member.visa_warnings || []).length > 0 && editingFamilyId === member.id && (
+                              <div style={{ marginBottom: '8px', padding: '8px', background: '#fef3c7', borderRadius: '6px', fontSize: '13px', color: '#92400e' }}>{(member.visa_warnings || []).map((w, i) => <div key={i}>{w.message}</div>)}</div>
+                            )}
+                            {(familyForm.visa_records || []).length === 0 && !editingFamilyVisaId && <p style={{ color: '#6b7280', marginBottom: '8px', fontSize: '14px' }}>ยังไม่มีรายการวีซ่า — กดปุ่มด้านล่างเพื่อเพิ่ม</p>}
+                            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                              {(familyForm.visa_records || []).map((v) => {
+                                const countryName = countries.find(c => c.code === v.country_code)?.name || v.country_code;
+                                const isExpired = v.status === 'Expired' || (v.expiry_date && new Date(v.expiry_date) < new Date());
+                                return (
+                                  <li key={v.id} style={{ marginBottom: '8px', padding: '10px', background: isExpired ? '#fef2f2' : '#f9fafb', borderRadius: '8px', border: `1px solid ${isExpired ? '#fecaca' : '#e5e7eb'}` }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
+                                      <span style={{ fontWeight: 600, color: '#111827' }}>{countryName}</span>
+                                      <span style={{ fontSize: '12px', color: '#6b7280' }}>{v.visa_type} • หมดอายุ {v.expiry_date || '-'} • {v.entries === 'Single' ? 'ครั้งเดียว' : 'หลายครั้ง'}{v.linked_passport && ` • ผูกกับพาสปอร์ต ${v.linked_passport}`}</span>
+                                      <div style={{ display: 'flex', gap: '6px' }}><button type="button" onClick={() => startEditFamilyVisa(v)} style={{ padding: '4px 8px', fontSize: '12px' }}>แก้ไข</button><button type="button" onClick={() => deleteFamilyVisa(v.id)} style={{ padding: '4px 8px', fontSize: '12px', color: '#dc2626' }}>ลบ</button></div>
+                                    </div>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                            {editingFamilyVisaId ? (
+                              <div style={{ marginTop: '12px', padding: '12px', background: '#f0f9ff', borderRadius: '8px', border: '1px solid #0ea5e9' }}>
+                                <h4 style={{ margin: '0 0 8px', fontSize: '14px' }}>{editingFamilyVisaId === 'new' ? 'เพิ่มวีซ่า' : 'แก้ไขวีซ่า'}</h4>
+                                <div className="form-row"><div className="form-group"><label className="form-label">ประเทศปลายทาง *</label><select value={familyVisaForm.country_code} onChange={(e) => setFamilyVisaForm(f => ({ ...f, country_code: e.target.value }))} className={`form-input ${familyVisaFormErrors.country_code ? 'error' : ''}`}><option value="">-- เลือกประเทศ --</option>{countries.map(c => (<option key={c.code} value={c.code}>{c.name}</option>))}</select>{familyVisaFormErrors.country_code && <span className="error-message">{familyVisaFormErrors.country_code}</span>}</div><div className="form-group"><label className="form-label">ประเภทวีซ่า</label><select value={familyVisaForm.visa_type} onChange={(e) => setFamilyVisaForm(f => ({ ...f, visa_type: e.target.value }))} className="form-input"><option value="B1/B2">B1/B2</option><option value="L">L</option><option value="TOURIST">ท่องเที่ยว</option><option value="EVISA">eVisa</option><option value="OTHER">อื่นๆ</option></select></div></div>
+                                <div className="form-row"><div className="form-group"><label className="form-label">วันหมดอายุ *</label><input type="date" value={familyVisaForm.expiry_date} onChange={(e) => setFamilyVisaForm(f => ({ ...f, expiry_date: e.target.value }))} className={`form-input ${familyVisaFormErrors.expiry_date ? 'error' : ''}`} />{familyVisaFormErrors.expiry_date && <span className="error-message">{familyVisaFormErrors.expiry_date}</span>}</div><div className="form-group"><label className="form-label">วันออก</label><input type="date" value={familyVisaForm.issue_date} onChange={(e) => setFamilyVisaForm(f => ({ ...f, issue_date: e.target.value }))} className={`form-input ${familyVisaFormErrors.issue_date ? 'error' : ''}`} /></div></div>
+                                <div className="form-row"><div className="form-group"><label className="form-label">การเข้าประเทศ</label><select value={familyVisaForm.entries} onChange={(e) => setFamilyVisaForm(f => ({ ...f, entries: e.target.value }))} className="form-input"><option value="Single">ครั้งเดียว</option><option value="Multiple">หลายครั้ง</option></select></div><div className="form-group"><label className="form-label">วัตถุประสงค์</label><select value={familyVisaForm.purpose} onChange={(e) => setFamilyVisaForm(f => ({ ...f, purpose: e.target.value }))} className="form-input"><option value="T">ท่องเที่ยว</option><option value="B">ธุรกิจ</option><option value="S">ศึกษา</option><option value="O">อื่นๆ</option></select></div></div>
+                                <div className="form-row"><div className="form-group"><label className="form-label">เลขที่วีซ่า (ถ้ามี)</label><input type="text" value={familyVisaForm.visa_number} onChange={(e) => setFamilyVisaForm(f => ({ ...f, visa_number: e.target.value }))} className={`form-input ${familyVisaFormErrors.visa_number ? 'error' : ''}`} placeholder="V123456789" />{familyVisaFormErrors.visa_number && <span className="error-message">{familyVisaFormErrors.visa_number}</span>}</div><div className="form-group"><label className="form-label">ผูกกับพาสปอร์ตเล่ม</label><select value={familyVisaForm.linked_passport} onChange={(e) => setFamilyVisaForm(f => ({ ...f, linked_passport: e.target.value }))} className="form-input"><option value="">-- ไม่ระบุ --</option>{(familyForm.passports || []).filter(p => p.passport_no).map(p => (<option key={p.id} value={p.passport_no}>{p.passport_no}{p.is_primary ? ' (ค่าเริ่มต้น)' : ''}</option>))}</select></div></div>
+                                <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}><button type="button" onClick={saveFamilyVisaEdit} className="btn-primary" style={{ padding: '6px 12px' }}>บันทึก</button><button type="button" onClick={cancelFamilyVisaEdit} className="btn-secondary" style={{ padding: '6px 12px' }}>ยกเลิก</button></div>
+                              </div>
+                            ) : (
+                              <button type="button" onClick={addFamilyVisa} style={{ marginTop: '8px', padding: '8px 14px', fontSize: '13px', border: '1px solid #2563eb', borderRadius: '8px', background: '#eff6ff', color: '#2563eb', fontWeight: 600, cursor: 'pointer' }}>+ เพิ่มวีซ่า</button>
+                            )}
+                          </div>
+                            </>
+                          )}
                           {/* ที่อยู่: default กรอกเอง, มีตัวเลือกติ๊ก "ตามผู้จองหลัก" เท่านั้น */}
                           <div className="form-row" style={{ flexWrap: 'wrap', gap: '16px', marginTop: '16px', paddingTop: '16px', borderTop: '1px solid #e5e7eb' }}>
                             <div className="form-group" style={{ width: '100%' }}>
@@ -2279,23 +3014,25 @@ export default function UserProfileEditPage({
                             )}
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <button type="button" onClick={saveFamilyEdit} className="btn-primary" style={{ padding: '8px 14px', fontSize: '14px' }}>บันทึก</button>
-                            <button type="button" onClick={cancelFamilyEdit} className="btn-secondary" style={{ padding: '8px 14px', fontSize: '14px' }}>ยกเลิก</button>
+                            <button type="button" onClick={saveFamilyEdit} className="btn-primary" style={{ padding: '8px 14px', fontSize: '14px' }} disabled={familySaving}>{familySaving ? 'กำลังบันทึก...' : 'บันทึก'}</button>
+                            <button type="button" onClick={cancelFamilyEdit} className="btn-secondary" style={{ padding: '8px 14px', fontSize: '14px' }} disabled={familySaving}>ยกเลิก</button>
                           </div>
                         </div>
                       ) : (
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
                           <div>
-                            <span style={{ fontWeight: 600 }}>
+                            <span style={{ fontWeight: 600, color: '#111827' }}>
                               {(member.first_name_th && member.last_name_th) ? `${member.first_name_th} ${member.last_name_th}` : (member.first_name || '(ยังไม่ระบุ)') + ' ' + (member.last_name || '')}
                             </span>
                             <span style={{ marginLeft: '8px', fontSize: '12px', padding: '2px 8px', borderRadius: '6px', background: member.type === 'adult' ? '#1d4ed8' : '#059669', color: '#ffffff', fontWeight: 600 }}>
                               {member.type === 'adult' ? 'ผู้ใหญ่' : 'เด็ก'}
                             </span>
-                            {(member.date_of_birth || member.passport_no || member.national_id || member.address_option) && (
-                              <span style={{ marginLeft: '8px', fontSize: '12px', color: 'var(--text-secondary, #374151)' }}>
+                            {(member.date_of_birth || member.passport_no || (member.passports && member.passports.length > 0) || member.has_passport === false || member.national_id || member.address_option || (member.visa_records && member.visa_records.length > 0)) && (
+                              <span style={{ marginLeft: '8px', fontSize: '12px', color: '#374151' }}>
                                 {member.date_of_birth && `วันเกิด ${member.date_of_birth}`}
-                                {member.passport_no && ` • พาสปอร์ต ${member.passport_no}`}
+                                {(member.passport_no || (member.passports && member.passports.length > 0)) && ` • พาสปอร์ต ${(member.primary_passport || member.passports?.[0] || {}).passport_no || member.passport_no || '-'}`}
+                                {member.has_passport === false && !member.passport_no && (!member.passports || member.passports.length === 0) && ` • ไม่มีหนังสือเดินทาง`}
+                                {(member.visa_records && member.visa_records.length > 0) && ` • วีซ่า ${member.visa_records.length} ประเทศ`}
                                 {member.national_id && ` • บัตรประชาชน`}
                                 {member.address_option === 'same_as_main' && ` • ที่อยู่: ตามผู้จองหลัก`}
                                 {member.address_option === 'own' && (member.address_line1 || member.province || member.postal_code) && ` • ที่อยู่: กรอกเอง`}

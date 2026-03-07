@@ -23,6 +23,27 @@ import httpx
 
 logger = get_logger(__name__)
 
+# ✅ ชื่อฟิลด์ที่ต้องมีในโปรไฟล์ก่อนจอง (ข้อมูลพื้นฐาน) — ถ้าไม่ครบให้แจ้งผู้ใช้
+BOOKING_REQUIRED_PROFILE_FIELDS = [
+    ("first_name", "ชื่อ (ภาษาอังกฤษ)"),
+    ("last_name", "นามสกุล (ภาษาอังกฤษ)"),
+    ("email", "อีเมล"),
+    ("phone", "เบอร์โทรศัพท์"),
+]
+
+
+def _get_missing_profile_fields_for_booking(user_doc: dict) -> list[str]:
+    """คืนรายการชื่อฟิลด์ (ภาษาไทย) ที่ยังไม่กรอก — ใช้แจ้งผู้ใช้ให้กรอกข้อมูลให้ครบก่อนจอง"""
+    if not user_doc:
+        return [label for _, label in BOOKING_REQUIRED_PROFILE_FIELDS]
+    missing = []
+    for key, label in BOOKING_REQUIRED_PROFILE_FIELDS:
+        val = user_doc.get(key)
+        if val is None or (isinstance(val, str) and not val.strip()):
+            missing.append(label)
+    return missing
+
+
 # ✅ My Bookings = Amadeus sandbox: retry จนกว่าจะสำเร็จ ห้ามฝั่งใดฝั่งหนึ่งสำเร็จอย่างเดียว
 AMADEUS_SYNC_MAX_RETRIES = 5
 AMADEUS_SYNC_RETRY_DELAY_SEC = 2
@@ -172,6 +193,10 @@ class BookingCreateRequest(BaseModel):
         default=None,
         description="List of passengers: [{name, type, passport_no, ...}] — ถ้าไม่ส่งมาจะดึงจาก user profile อัตโนมัติ"
     )
+    replace_booking_id: Optional[str] = Field(
+        default=None,
+        description="โหมดแก้ไขทริป: ID การจองเดิมที่จะยกเลิกก่อนสร้างจองใหม่ (ใช้ trip_id เดิม)"
+    )
 
 
 class BookingListResponse(BaseModel):
@@ -262,6 +287,15 @@ async def create_booking(booking_request: BookingCreateRequest, fastapi_request:
                 detail="กรุณายืนยันอีเมลก่อนจึงจะจองได้ ไปที่ การตั้งค่า > สถานะการยืนยันอีเมล > ส่งอีเมลยืนยัน"
             )
         
+        # ✅ ข้อมูลพื้นฐานไม่ครบ — ไม่งี่นจะจองไม่ได้ แจ้งให้ผู้ใช้ไปกรอกใน ข้อมูลพื้นฐาน ให้ครบ
+        missing_fields = _get_missing_profile_fields_for_booking(user_doc)
+        if missing_fields:
+            missing_list = ", ".join(missing_fields)
+            raise HTTPException(
+                status_code=400,
+                detail=f"กรุณากรอกข้อมูลใน ข้อมูลพื้นฐาน ให้ครบก่อนจึงจะจองได้: {missing_list} — ไปที่ การตั้งค่า > ข้อมูลพื้นฐาน"
+            )
+        
         # ✅ ประวัติ workflow: บันทึก summary → booking (ผู้ใช้กดยืนยันจอง)
         _session_id = f"{user_id}::{booking_request.chat_id or booking_request.trip_id}"
         try:
@@ -293,6 +327,7 @@ async def create_booking(booking_request: BookingCreateRequest, fastapi_request:
                 users_collection = storage.db["users"]
                 user_doc = await users_collection.find_one({"user_id": user_id})
                 if user_doc:
+                    from app.services.user_family_service import get_user_family
                     # ผู้จองหลัก — เก็บทั้งชื่อไทยและอังกฤษแยกกัน
                     main_name_th = f"{user_doc.get('first_name_th', '')} {user_doc.get('last_name_th', '')}".strip()
                     main_name_en = f"{user_doc.get('first_name', '')} {user_doc.get('last_name', '')}".strip()
@@ -315,8 +350,8 @@ async def create_booking(booking_request: BookingCreateRequest, fastapi_request:
                     if main_name_en:
                         main_pax["name_en"] = main_name_en
                     passengers.append(main_pax)
-                    # family members (co-travelers)
-                    family = user_doc.get("family") or []
+                    # family members (co-travelers) — อ่านจาก user_family
+                    family = await get_user_family(storage.db, user_id)
                     adults_needed = int(booking_request.travel_slots.get("adults") or 1) - 1
                     children_needed = int(booking_request.travel_slots.get("children") or 0)
                     added_adults = 0
@@ -359,13 +394,67 @@ async def create_booking(booking_request: BookingCreateRequest, fastapi_request:
             "currency": booking_request.currency,
             "status": initial_status,  # ✅ "confirmed" for Agent Mode, "pending_payment" for Normal Mode
             "passengers": passengers,  # ✅ รายชื่อผู้โดยสาร
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.utcnow().isoformat() + "Z",
             "updated_at": datetime.utcnow().isoformat(),
             "metadata": {
                 "mode": booking_request.mode or "normal",  # ✅ Store chat mode
                 "auto_booked": booking_request.auto_booked or False  # ✅ Flag for agent mode
             }
         }
+        
+        # ✅ โหมดแก้ไขทริป: ยกเลิกการจองเดิมก่อน แล้วสร้างจองใหม่ใน trip_id เดิม
+        if getattr(booking_request, "replace_booking_id", None):
+            from bson import ObjectId
+            rid = (booking_request.replace_booking_id or "").strip()
+            if rid:
+                old_booking = None
+                try:
+                    old_booking = await bookings_collection.find_one(
+                        {"_id": ObjectId(rid), "user_id": user_id}
+                    )
+                except Exception:
+                    pass
+                if not old_booking:
+                    old_booking = await bookings_collection.find_one(
+                        {"booking_id": rid, "user_id": user_id}
+                    )
+                if not old_booking:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="ไม่พบการจองเดิมที่ต้องการแทนที่ หรือไม่มีสิทธิ์แก้ไข"
+                    )
+                if old_booking.get("trip_id") != booking_request.trip_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="การจองเดิมไม่ตรงกับทริปนี้ (trip_id ไม่ตรงกัน)"
+                    )
+                old_id = str(old_booking.get("_id") or old_booking.get("booking_id") or rid)
+                old_status = (old_booking.get("status") or "").lower()
+                if old_status not in ("cancelled",):
+                    # Amadeus sandbox: ยกเลิก flight orders แบบ best-effort
+                    amadeus_sync = old_booking.get("amadeus_sync") or {}
+                    flight_order_ids = amadeus_sync.get("flight_order_ids") or []
+                    if flight_order_ids and settings.amadeus_booking_env.lower() != "production":
+                        from app.services.travel_service import orchestrator
+                        for order_id in flight_order_ids:
+                            async def _cancel_one(oid=order_id):
+                                await orchestrator.delete_flight_order(oid)
+                            try:
+                                await _amadeus_retry_until_success(f"cancel_flight_order_{order_id}", _cancel_one)
+                            except Exception as ae:
+                                logger.warning(f"Amadeus cancel (replace): booking={old_id} order={order_id}: {ae}")
+                    # อัปเดต DB เป็น cancelled
+                    try:
+                        await bookings_collection.update_one(
+                            {"_id": old_booking["_id"]},
+                            {"$set": {"status": "cancelled", "updated_at": datetime.utcnow().isoformat()}}
+                        )
+                    except Exception:
+                        await bookings_collection.update_one(
+                            {"booking_id": old_booking.get("booking_id"), "user_id": user_id},
+                            {"$set": {"status": "cancelled", "updated_at": datetime.utcnow().isoformat()}}
+                        )
+                    logger.info(f"Replace booking: cancelled old booking {old_id} for trip_id={booking_request.trip_id}")
         
         # ✅ CRUD STABILITY: Check for duplicate booking (same trip_id + user_id)
         existing_booking = await bookings_collection.find_one({
@@ -430,27 +519,59 @@ async def create_booking(booking_request: BookingCreateRequest, fastapi_request:
             from app.services.notification_preferences import should_create_in_app_notification
             users_collection = storage.db["users"]
             user_doc = await users_collection.find_one({"user_id": user_id})
-            if should_create_in_app_notification(user_doc, "booking_created"):
+            is_edit_trip = bool(getattr(booking_request, "replace_booking_id", None))
+            notif_type = "trip_edited" if is_edit_trip else "booking_created"
+            if should_create_in_app_notification(user_doc, notif_type):
                 notifications_collection = storage.db.get_collection("notifications")
-                notification_doc = {
-                    "user_id": user_id,
-                    "type": "booking_created",
-                    "title": "จองสำเร็จ",
-                    "message": f"การจองของคุณได้รับการสร้างแล้ว กรุณาชำระเงินเพื่อยืนยันการจอง",
-                    "booking_id": booking_id,
-                    "read": False,
-                    "created_at": datetime.utcnow().isoformat(),
-                    "metadata": {
-                        "status": initial_status,
-"total_price": booking_request.total_price,
-                    "currency": booking_request.currency or "THB"
+                if is_edit_trip:
+                    notification_doc = {
+                        "user_id": user_id,
+                        "type": "trip_edited",
+                        "title": "แก้ไขทริปสำเร็จ",
+                        "message": "การจองเดิมถูกยกเลิกและสร้างการจองใหม่ในทริปนี้แล้ว กรุณาชำระเงินเพื่อยืนยันการจอง",
+                        "booking_id": booking_id,
+                        "read": False,
+                        "created_at": datetime.utcnow().isoformat() + "Z",
+                        "metadata": {
+                            "status": initial_status,
+                            "total_price": booking_request.total_price,
+                            "currency": booking_request.currency or "THB",
+                        }
                     }
-                }
+                else:
+                    notification_doc = {
+                        "user_id": user_id,
+                        "type": "booking_created",
+                        "title": "จองสำเร็จ",
+                        "message": f"การจองของคุณได้รับการสร้างแล้ว กรุณาชำระเงินเพื่อยืนยันการจอง",
+                        "booking_id": booking_id,
+                        "read": False,
+                        "created_at": datetime.utcnow().isoformat() + "Z",
+                        "metadata": {
+                            "status": initial_status,
+                            "total_price": booking_request.total_price,
+                            "currency": booking_request.currency or "THB"
+                        }
+                    }
                 result = await notifications_collection.insert_one(notification_doc)
                 notification_doc["id"] = str(result.inserted_id)
                 notification_doc.pop("_id", None)
                 await push_notification_event(user_id, notification_doc)
-                logger.info(f"Created notification for booking: {booking_id} (user_id: {user_id})")
+                logger.info(f"Created {notif_type} notification for booking: {booking_id} (user_id: {user_id})")
+                # ส่งอีเมลแจ้งเตือนแก้ไขทริป (ถ้าผู้ใช้เปิดรับ)
+                if is_edit_trip:
+                    import asyncio
+                    from app.services.notification_service import send_notification_email_if_enabled
+                    asyncio.create_task(
+                        send_notification_email_if_enabled(
+                            db=storage.db,
+                            user_id=user_id,
+                            notif_type="trip_edited",
+                            title=notification_doc["title"],
+                            message=notification_doc["message"],
+                            booking_id=booking_id,
+                        )
+                    )
             else:
                 logger.debug(f"Skipped notification for booking {booking_id} (user preferences)")
         except Exception as notif_error:
@@ -477,6 +598,55 @@ async def create_booking(booking_request: BookingCreateRequest, fastapi_request:
     except Exception as e:
         logger.error(f"Failed to create booking: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create booking: {str(e)}")
+
+
+@router.get("/profile-check")
+async def booking_profile_check(request: Request):
+    """
+    ตรวจสอบว่าข้อมูลพื้นฐานของผู้ใช้ครบสำหรับการจองหรือไม่
+    คืนค่า ready_for_booking, missing_fields เพื่อให้ frontend แสดงข้อความแจ้งหรือปิดปุ่มจอง
+    """
+    from app.core.security import extract_user_id_from_request
+    user_id = extract_user_id_from_request(request)
+    if not user_id:
+        return {
+            "ok": True,
+            "ready_for_booking": False,
+            "missing_fields": ["กรุณาเข้าสู่ระบบ"],
+            "message": "กรุณาเข้าสู่ระบบก่อนจึงจะจองได้",
+        }
+    storage = MongoStorage()
+    await storage.connect()
+    users_collection = storage.db["users"]
+    user_doc = await users_collection.find_one({"user_id": user_id})
+    if not user_doc:
+        return {
+            "ok": True,
+            "ready_for_booking": False,
+            "missing_fields": ["ไม่พบข้อมูลผู้ใช้"],
+            "message": "ไม่พบข้อมูลผู้ใช้",
+        }
+    if not user_doc.get("email_verified", False):
+        return {
+            "ok": True,
+            "ready_for_booking": False,
+            "missing_fields": ["ยืนยันอีเมล"],
+            "message": "กรุณายืนยันอีเมลก่อนจึงจะจองได้ ไปที่ การตั้งค่า > สถานะการยืนยันอีเมล",
+        }
+    missing = _get_missing_profile_fields_for_booking(user_doc)
+    if missing:
+        return {
+            "ok": True,
+            "ready_for_booking": False,
+            "missing_fields": missing,
+            "message": f"กรุณากรอกข้อมูลใน ข้อมูลพื้นฐาน ให้ครบก่อนจึงจะจองได้: {', '.join(missing)}",
+        }
+    return {
+        "ok": True,
+        "ready_for_booking": True,
+        "missing_fields": [],
+        "message": "ข้อมูลครบ สามารถจองได้",
+    }
 
 
 @router.get("/list")
@@ -589,6 +759,173 @@ async def list_bookings(request: Request):
     except Exception as e:
         logger.error(f"Failed to list bookings: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list bookings: {str(e)}")
+
+
+def _safe_float(val, default: float = 0.0) -> float:
+    if val is None: return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _calculate_total_price_from_plan(booking_doc: dict) -> Optional[float]:
+    """คำนวณ total_price จาก plan เมื่อของเดิมเป็น 0 หรือไม่มี — ใช้ทั้งใน detail และ payment flow"""
+    plan = booking_doc.get("plan") or {}
+    travel_slots = booking_doc.get("travel_slots") or {}
+    total = 0.0
+
+    def pick(d: dict, *keys: str) -> float:
+        if not d or not isinstance(d, dict):
+            return 0.0
+        for k in keys:
+            v = d.get(k)
+            if v is not None and v != "":
+                n = _safe_float(v, -1)
+                if n >= 0:
+                    return n
+        return 0.0
+
+    try:
+        total += pick(plan.get("flight") or {}, "price_total", "price_amount", "price", "total_price")
+        hotel_data = plan.get("hotel") or plan.get("accommodation") or {}
+        hp = pick(hotel_data, "price_total", "price_amount", "price", "total_price")
+        if hp > 0:
+            total += hp
+        else:
+            nights = _safe_float(travel_slots.get("nights") or travel_slots.get("number_of_nights") or 1, 1)
+            nr = hotel_data.get("nightly_rate")
+            if nr is not None:
+                total += _safe_float(nr, 0) * max(nights, 1)
+        total += pick(plan.get("transport") or plan.get("transfer") or {}, "price_total", "price_amount", "price", "total_price")
+        travel = plan.get("travel") or {}
+        for direction in ("outbound", "inbound"):
+            for seg in (travel.get("flights") or {}).get(direction) or []:
+                opt = (seg or {}).get("selected_option") or {}
+                total += pick(opt, "price_amount", "price_total", "price")
+        acc_segments = (plan.get("accommodation") or {}).get("segments") or (plan.get("hotel") or {}).get("segments") or []
+        for seg in acc_segments:
+            opt = (seg or {}).get("selected_option") or {}
+            total += pick(opt, "price_amount", "price_total", "price")
+    except (TypeError, ValueError, KeyError):
+        pass
+    return total if total > 0 else None
+
+
+@router.get("/detail")
+async def get_booking_detail(request: Request, booking_id: str = Query(..., description="Booking ID or _id")):
+    """
+    ดึงข้อมูลการจองหนึ่งรายการ (รวม plan, travel_slots, total_price) สำหรับหน้าชำระเงิน
+    ใช้แทนการดึงจาก list เพื่อให้ได้ข้อมูลล่าสุดและครบ
+    """
+    from app.core.security import extract_user_id_from_request
+    from bson import ObjectId
+
+    user_id = extract_user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    bid = (booking_id or "").strip()
+    if not bid:
+        raise HTTPException(status_code=400, detail="booking_id is required")
+
+    storage = MongoStorage()
+    try:
+        await storage.connect()
+    except Exception as e:
+        logger.error(f"DB connect failed: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    if not storage.db:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    coll = storage.db["bookings"]
+    or_conds = [{"booking_id": bid}, {"_id": bid}]
+    if len(bid) == 24 and all(c in "0123456789abcdefABCDEF" for c in bid):
+        try:
+            or_conds.append({"_id": ObjectId(bid)})
+        except Exception:
+            pass
+    query = {"user_id": user_id.strip(), "$or": or_conds}
+    try:
+        booking = await coll.find_one(query)
+    except Exception as e:
+        logger.error(f"Booking detail query failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load booking")
+    if not booking:
+        raise HTTPException(status_code=404, detail="ไม่พบข้อมูลการจอง")
+
+    # คืนแบบ dict ที่ frontend ใช้ได้ (รวม plan, travel_slots)
+    out = dict(booking)
+    out["_id"] = str(out.get("booking_id") or out.get("_id", ""))
+    if "created_at" in out and hasattr(out["created_at"], "isoformat"):
+        out["created_at"] = out["created_at"].isoformat()
+    if "updated_at" in out and hasattr(out["updated_at"], "isoformat"):
+        out["updated_at"] = out["updated_at"].isoformat()
+    # ถ้า total_price เป็น 0 หรือไม่มี ให้คำนวณจาก plan แล้วใส่ใน response (frontend จะได้แสดงราคา)
+    stored_price = out.get("total_price")
+    if stored_price is None or (isinstance(stored_price, (int, float)) and float(stored_price) <= 0):
+        computed = _calculate_total_price_from_plan(out)
+        if computed is not None and computed > 0:
+            out["total_price"] = computed
+            logger.info(f"Detail: filled total_price from plan for booking {bid}: {computed}")
+    return {"ok": True, "booking": out}
+
+
+@router.get("/by-trip")
+async def get_booking_by_trip(request: Request, trip_id: str = Query(..., description="Trip ID")):
+    """
+    ดึงการจองล่าสุดของทริปนี้ (สำหรับหน้าชำระเงิน) พร้อม plan, travel_slots และราคาชำระเงิน (total_price)
+    """
+    from app.core.security import extract_user_id_from_request
+
+    user_id = extract_user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    tid = (trip_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="trip_id is required")
+
+    storage = MongoStorage()
+    try:
+        await storage.connect()
+    except Exception as e:
+        logger.error(f"DB connect failed: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    if not storage.db:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    coll = storage.db["bookings"]
+    query = {"user_id": user_id.strip(), "trip_id": tid}
+    try:
+        booking = await coll.find_one(
+            query,
+            sort=[("created_at", -1)],
+            projection=None,
+        )
+    except Exception as e:
+        logger.error(f"Booking by-trip query failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load booking")
+    if not booking:
+        raise HTTPException(status_code=404, detail="ไม่พบการจองของทริปนี้")
+
+    out = dict(booking)
+    out["_id"] = str(out.get("booking_id") or out.get("_id", ""))
+    if "created_at" in out and hasattr(out["created_at"], "isoformat"):
+        out["created_at"] = out["created_at"].isoformat()
+    if "updated_at" in out and hasattr(out["updated_at"], "isoformat"):
+        out["updated_at"] = out["updated_at"].isoformat()
+    stored_price = out.get("total_price")
+    if stored_price is None or (isinstance(stored_price, (int, float)) and float(stored_price) <= 0):
+        computed = _calculate_total_price_from_plan(out)
+        if computed is not None and computed > 0:
+            out["total_price"] = computed
+            logger.info(f"By-trip: filled total_price from plan for trip_id={tid}: {computed}")
+    amount = out.get("total_price")
+    if amount is not None:
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            amount = None
+    return {"ok": True, "booking": out, "amount": amount}
 
 
 @router.post("/payment")
@@ -1088,7 +1425,7 @@ async def cancel_booking(
                     "message": f"การจอง #{booking_id[:8]} ถูกยกเลิกเรียบร้อยแล้ว",
                     "booking_id": booking_id,
                     "read": False,
-                    "created_at": datetime.utcnow().isoformat(),
+                    "created_at": datetime.utcnow().isoformat() + "Z",
                     "metadata": {"action": "cancelled"}
                 }
                 result = await notifications_collection.insert_one(cancel_doc)
@@ -1096,6 +1433,19 @@ async def cancel_booking(
                 cancel_doc.pop("_id", None)
                 await push_notification_event(user_id, cancel_doc)
                 logger.info(f"Created cancellation notification for booking {booking_id}")
+                # ส่งอีเมลแจ้งเตือนทริปยกเลิก (ถ้าผู้ใช้เปิดรับ)
+                import asyncio
+                from app.services.notification_service import send_notification_email_if_enabled
+                asyncio.create_task(
+                    send_notification_email_if_enabled(
+                        db=storage.db,
+                        user_id=user_id,
+                        notif_type="trip_change",
+                        title=cancel_doc["title"],
+                        message=cancel_doc["message"],
+                        booking_id=booking_id,
+                    )
+                )
         except Exception as notif_err:
             logger.warning(f"Failed to create cancellation notification: {notif_err}")
 
@@ -1240,7 +1590,7 @@ async def update_booking(
                     "message": f"การจอง #{booking_id[:8]} ได้รับการอัปเดตเรียบร้อยแล้ว",
                     "booking_id": booking_id,
                     "read": False,
-                    "created_at": datetime.utcnow().isoformat(),
+                    "created_at": datetime.utcnow().isoformat() + "Z",
                     "metadata": {"changed_fields": changed_fields}
                 }
                 result = await notifications_collection.insert_one(update_doc)
@@ -1248,6 +1598,19 @@ async def update_booking(
                 update_doc.pop("_id", None)
                 await push_notification_event(user_id, update_doc)
                 logger.info(f"Created trip_change notification for booking {booking_id}")
+                # ส่งอีเมลแจ้งเตือนแก้ไขทริป/อัปเดตการจอง (ถ้าผู้ใช้เปิดรับ)
+                import asyncio
+                from app.services.notification_service import send_notification_email_if_enabled
+                asyncio.create_task(
+                    send_notification_email_if_enabled(
+                        db=storage.db,
+                        user_id=user_id,
+                        notif_type="trip_change",
+                        title=update_doc["title"],
+                        message=update_doc["message"],
+                        booking_id=booking_id,
+                    )
+                )
         except Exception as notif_err:
             logger.warning(f"Failed to create trip_change notification: {notif_err}")
 
@@ -1613,6 +1976,7 @@ class CreateChargeRequest(BaseModel):
     currency: str = Field(default="THB", description="Currency code")
     card_id: Optional[str] = Field(None, description="Omise card id (saved card)")
     customer_id: Optional[str] = Field(None, description="Omise customer id (saved card)")
+    payment_method: Optional[str] = Field(None, description="promptpay = สแกน QR PromtPay (ไม่ใช้ token/card)")
 
 
 @router.post("/create-charge")
@@ -1684,10 +2048,21 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
         # Validate amount
         if request.amount <= 0:
             raise HTTPException(status_code=400, detail="Invalid amount")
-        
+
+        use_promptpay = (request.payment_method or "").strip().lower() == "promptpay"
+        if use_promptpay:
+            # PromptPay: จำนวนขั้นต่ำ 20 บาท, สูงสุด 150,000 บาท (Omise limit)
+            amount_satang = int(round(request.amount * 100))
+            if amount_satang < 2000:
+                raise HTTPException(status_code=400, detail="ยอดขั้นต่ำสำหรับ PromtPay คือ ฿20")
+            if amount_satang > 15000000:
+                raise HTTPException(status_code=400, detail="ยอดสูงสุดสำหรับ PromtPay คือ ฿150,000")
+        else:
+            amount_satang = int(request.amount * 100)
+
         use_saved_card = request.card_id and request.customer_id
-        if not use_saved_card and not request.token:
-            raise HTTPException(status_code=400, detail="Provide either token (new card) or card_id and customer_id (saved card)")
+        if not use_promptpay and not use_saved_card and not request.token:
+            raise HTTPException(status_code=400, detail="Provide either token (new card), card_id and customer_id (saved card), or payment_method=promptpay")
         if use_saved_card:
             # ✅ SECURITY: Verify saved card belongs to this user in MongoDB
             saved_doc = await storage.saved_cards_collection.find_one({"user_id": user_id})
@@ -1698,17 +2073,19 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
                 raise HTTPException(status_code=403, detail="Card does not belong to your account")
         
         charge_payload = {
-            "amount": int(request.amount * 100),  # Convert to satang
+            "amount": amount_satang,
             "currency": request.currency.lower(),
             "description": f"Booking #{request.booking_id}",
             "metadata": {"booking_id": request.booking_id, "user_id": user_id},
         }
-        if use_saved_card:
+        if use_promptpay:
+            charge_payload["source"] = {"type": "promptpay"}
+        elif use_saved_card:
             charge_payload["customer"] = request.customer_id
             charge_payload["card"] = request.card_id
         else:
             charge_payload["card"] = request.token
-        
+
         # Create charge using Omise API
         async with httpx.AsyncClient() as client:
             try:
@@ -1718,10 +2095,40 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
                     json=charge_payload,
                     timeout=30.0
                 )
-                
+
                 if response.status_code == 200:
                     charge_data = response.json()
-                    
+
+                    if use_promptpay:
+                        # PromptPay: charge is pending until user scans QR; return QR link and authorize_uri
+                        source = charge_data.get("source") or {}
+                        scannable = source.get("scannable_code") or {}
+                        image = scannable.get("image") or {}
+                        qr_download_uri = image.get("download_uri")
+                        authorize_uri = charge_data.get("authorize_uri")
+                        # Update booking with pending charge (ไม่เปลี่ยน status เป็น paid จนกว่าจะได้ webhook charge.complete)
+                        from bson import ObjectId
+                        up_filter = {"user_id": user_id, "booking_id": request.booking_id}
+                        await bookings_collection.update_one(
+                            up_filter,
+                            {"$set": {
+                                "status": "pending_payment",
+                                "payment_id": charge_data.get("id"),
+                                "payment_status": charge_data.get("status"),
+                                "promptpay_charge_id": charge_data.get("id"),
+                                "updated_at": datetime.utcnow().isoformat()
+                            }}
+                        )
+                        return {
+                            "ok": True,
+                            "message": "กรุณาสแกน QR PromtPay เพื่อชำระเงิน",
+                            "charge_id": charge_data.get("id"),
+                            "status": charge_data.get("status"),
+                            "paid": False,
+                            "authorize_uri": authorize_uri,
+                            "qr_download_uri": qr_download_uri,
+                        }
+
                     # ✅ Sync Amadeus sandbox แบบ best-effort — ไม่บล็อกการชำระเงิน
                     # Amadeus sandbox offer หมดอายุเร็ว ไม่ควรทำให้ user ชำระเงินไม่ได้
                     if charge_data.get("paid"):
@@ -1801,8 +2208,8 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
                             if _uid:
                                 users_collection = storage.db["users"]
                                 user_doc = await users_collection.find_one({"user_id": _uid})
+                                is_paid = charge_data.get("paid", False)
                                 if should_create_in_app_notification(user_doc, "payment_status"):
-                                    is_paid = charge_data.get("paid", False)
                                     notifications_collection = storage.db.get_collection("notifications")
                                     pay_doc = {
                                         "user_id": _uid,
@@ -1815,7 +2222,7 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
                                         ),
                                         "booking_id": request.booking_id,
                                         "read": False,
-                                        "created_at": datetime.utcnow().isoformat(),
+                                        "created_at": datetime.utcnow().isoformat() + "Z",
                                         "metadata": {
                                             "charge_id": charge_data.get("id"),
                                             "paid": is_paid,
@@ -1828,6 +2235,44 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
                                     pay_doc.pop("_id", None)
                                     await push_notification_event(_uid, pay_doc)
                                     logger.info(f"Created payment_status notification for booking {request.booking_id}")
+                                    if is_paid:
+                                        import asyncio
+                                        from app.services.notification_service import send_notification_email_if_enabled
+                                        asyncio.create_task(
+                                            send_notification_email_if_enabled(
+                                                db=storage.db,
+                                                user_id=_uid,
+                                                notif_type="payment_success",
+                                                title="ชำระเงินสำเร็จ",
+                                                message=pay_doc["message"],
+                                                booking_id=request.booking_id,
+                                            )
+                                        )
+                                # ส่งอีเมลใบเสร็จ/ยืนยันชำระเงินทุกครั้งเมื่อชำระสำเร็จ (ไม่ขึ้นกับ preference)
+                                if is_paid and user_doc:
+                                    _to_email = (user_doc.get("email") or "").strip()
+                                    if _to_email and "@" in _to_email:
+                                        try:
+                                            from app.services.email_service import get_email_service
+                                            _amount = _bk.get("total_price")
+                                            _currency = _bk.get("currency", "THB")
+                                            _amount_str = f"{_amount:,.2f} {_currency}" if _amount is not None else _currency
+                                            _receipt_msg = (
+                                                f"ชำระเงินสำเร็จสำหรับการจอง #{request.booking_id[:8]} "
+                                                f"ยอดชำระ {_amount_str} คุณสามารถตรวจสอบรายการจองได้ที่ My Bookings"
+                                            )
+                                            _email_svc = get_email_service()
+                                            if _email_svc.send_notification_email(
+                                                _to_email,
+                                                f"ชำระเงินสำเร็จ — การจอง #{request.booking_id[:8]}",
+                                                "ชำระเงินสำเร็จ",
+                                                _receipt_msg,
+                                            ):
+                                                logger.info(f"Payment receipt email sent to {_to_email} for booking {request.booking_id}")
+                                            else:
+                                                logger.warning("Payment receipt email not sent (SMTP not configured or failed)")
+                                        except Exception as _email_err:
+                                            logger.warning(f"Failed to send payment receipt email: {_email_err}")
                     except Exception as notif_err:
                         logger.warning(f"Failed to create payment notification: {notif_err}")
 

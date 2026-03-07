@@ -156,37 +156,37 @@ class DataAggregator:
                         continue
             
             elif request_type == "hotel":
-                for idx, hotel in enumerate(raw_results):
+                for idx, raw in enumerate(raw_results):
                     try:
-                        hotel_name = hotel.get("name", "Unknown Hotel")
-                        address = hotel.get("address", {}).get("lines", [])
-                        address_str = ", ".join(address) if address else ""
-                        
-                        # Price (~90% accuracy): ราคาจริงจาก Amadeus (total หรือ total_amount)
-                        price_info = hotel.get("price") or {}
-                        try:
-                            price_amount = float(price_info.get("total") or price_info.get("total_amount") or price_info.get("grandTotal") or 0)
-                        except (TypeError, ValueError):
-                            price_amount = 0.0
-                        currency = (price_info.get("currency") or "THB")
-                        if not isinstance(currency, str):
-                            currency = "THB"
-                        # Rating
-                        rating = hotel.get("rating", 0)
-                        
-                        item = StandardizedItem(
-                            id=f"mcp_hotel_{idx}",
-                            category=ItemCategory.HOTEL,
-                            provider=hotel.get("chainCode", "Unknown"),
-                            display_name=hotel_name,
-                            price_amount=price_amount,
-                            currency=currency,
-                            rating=rating,
-                            location=address_str,
-                            description=hotel.get("description", {}).get("text", ""),
-                            raw_data=hotel
-                        )
-                        standardized.append(item)
+                        if raw.get("hotel") and raw.get("offers"):
+                            # Raw Amadeus format: use _normalize_and_sync_hotel for Google photos
+                            item = await self._normalize_and_sync_hotel(raw)
+                            if item:
+                                standardized.append(item)
+                        else:
+                            # Fallback: formatted structure (e.g. from old MCP response)
+                            hotel_name = raw.get("name", "Unknown Hotel")
+                            addr = raw.get("address") or {}
+                            address_str = ", ".join(addr.get("lines", [])) if isinstance(addr, dict) and addr.get("lines") else ""
+                            price_info = raw.get("price") or {}
+                            try:
+                                price_amount = float(price_info.get("total") or price_info.get("total_amount") or 0)
+                            except (TypeError, ValueError):
+                                price_amount = 0.0
+                            currency = (price_info.get("currency") or "THB")
+                            item = StandardizedItem(
+                                id=f"mcp_hotel_{idx}",
+                                category=ItemCategory.HOTEL,
+                                provider=raw.get("chainCode", "Unknown"),
+                                display_name=hotel_name,
+                                price_amount=price_amount,
+                                currency=currency,
+                                rating=raw.get("rating", 0),
+                                location=address_str,
+                                description="",
+                                raw_data=raw
+                            )
+                            standardized.append(item)
                     except Exception as e:
                         logger.warning(f"Failed to normalize hotel {idx}: {e}")
                         continue
@@ -737,17 +737,17 @@ class DataAggregator:
             logger.info(f"Found {len(raw_data)} hotels in Amadeus for {location}. Syncing with Google...")
             # For each Amadeus hotel, try to sync with Google Place data
             results = []
-            # Process top 5 hotels for speed
-            max_hotels = 5
+            # Process top 15 hotels for PlanChoiceCard display
+            max_hotels = 15
             sync_tasks = [self._normalize_and_sync_hotel(item) for item in raw_data[:max_hotels]]
             results = await asyncio.gather(*sync_tasks)
             return [r for r in results if r]
 
-        # 2. Fallback: Google Places (Only if Amadeus fails - NO real price/booking)
+        # 2. Fallback: Google Places - all accommodation types (โรงแรม รีสอร์ท เกสต์เฮาส์ บังกะโล ฯลฯ)
         try:
-            logger.warning(f"Amadeus returned NO hotels for {location}. Falling back to Google discovery.")
-            google_limit = 10
-            google_places = await self.orchestrator.get_hotels_google(location_name=location, limit=google_limit)
+            logger.warning(f"Amadeus returned NO hotels for {location}. Falling back to Google (all accommodation types).")
+            google_limit = 15
+            google_places = await self.orchestrator.get_accommodations_google(location_name=location, limit=google_limit)
             if google_places:
                 return [self._normalize_hotel_google(p) for p in google_places]
         except Exception as e:
@@ -820,20 +820,47 @@ class DataAggregator:
         
         hotel_meta = amadeus_raw.get("hotel", {})
         hotel_name = hotel_meta.get("name", "Unknown Hotel")
-        city_code = amadeus_raw.get("_debug", {}).get("city_code_used", "")
+        city_code_raw = amadeus_raw.get("_debug", {}).get("city_code_used", "")
+        # Extract code from "city:BKK" or "cityCode:PAR" or "geo:lat,lng"
+        city_code = ""
+        if ":" in city_code_raw:
+            part = city_code_raw.split(":")[-1].strip()
+            if len(part) == 3 and part.isupper():
+                city_code = part
+            elif part and not part[0].isdigit():
+                city_code = part.split(",")[0] if "," in part else part
+        else:
+            city_code = city_code_raw
         
-        # 1. Try to find the matching Google Place
+        # 1. Try to find the matching Google Place (prefer Find Place by name for accuracy)
         google_place_details = {}
         try:
-            # Search for this specific hotel on Google
-            search_query = f"{hotel_name} {city_code or ''}".strip()
-            nearby = await LocationIntelligence.search_nearby_google(search_query, radius=500)
-            if nearby:
-                # Get details for the first match
-                place_id = nearby[0]["place_id"]
+            lat = hotel_meta.get("latitude")
+            lng = hotel_meta.get("longitude")
+            # Prefer Find Place (text search by hotel name) - more accurate than nearby
+            found = await LocationIntelligence.find_hotel_place_google(hotel_name, city_code, lat, lng)
+            place_id = None
+            if found:
+                place_id = found.get("place_id")
+            if not place_id:
+                text_found = await LocationIntelligence.search_hotel_text_google(hotel_name, city_code, lat, lng)
+                if text_found:
+                    place_id = text_found.get("place_id")
+            if not place_id:
+                search_query = f"{hotel_name} {city_code or ''}".strip()
+                nearby = await LocationIntelligence.search_nearby_google(search_query, radius=2000)
+                if nearby:
+                    place_id = nearby[0]["place_id"]
+            if place_id:
                 details = await LocationIntelligence.get_place_details_google(place_id)
                 if details:
                     google_place_details = details
+                    # Fallback: use photos from Find Place if Place Details has none
+                    if not google_place_details.get("photos") and found and found.get("photos"):
+                        google_place_details = dict(google_place_details)
+                        google_place_details["photos"] = found["photos"]
+                        if not google_place_details.get("place_id"):
+                            google_place_details["place_id"] = place_id
         except Exception as e:
             logger.warning(f"Failed to sync hotel '{hotel_name}' with Google: {e}")
 
@@ -854,7 +881,7 @@ class DataAggregator:
                 location=merged.location.address,
                 description=merged.booking.room.description,
                 raw_data=merged.model_dump(), # Store the full MergedHotelOption
-                tags=["Amadeus", "ราคาจริง", "จองได้ทันที"],
+                tags=[],
                 recommended=merged.visuals.review_score and merged.visuals.review_score >= 4.0
             )
         except Exception as e:
@@ -982,13 +1009,37 @@ class DataAggregator:
             raw_data=raw
         )
         
+        # Estimate CO2 from duration (~800 km/h avg, ~220 kg CO2e per 1000 km)
+        def _parse_iso_duration_to_hours(dur: str) -> float:
+            if not dur or not isinstance(dur, str) or not dur.startswith("PT"):
+                return 0.0
+            try:
+                h, m = 0, 0
+                if "H" in dur:
+                    parts = dur.split("H")
+                    h = int(parts[0].replace("PT", "") or 0)
+                    rem = parts[1] if len(parts) > 1 else ""
+                    if "M" in rem:
+                        m = int(rem.split("M")[0] or 0)
+                elif "M" in dur:
+                    m = int(dur.replace("PT", "").split("M")[0] or 0)
+                return h + m / 60.0
+            except (ValueError, TypeError):
+                return 0.0
+        total_duration = main_itinerary.get("duration") or ""
+        est_hours = _parse_iso_duration_to_hours(total_duration)
+        est_km = est_hours * 800 if est_hours > 0 else 0
+        co2_kg = round(est_km * 0.22) if est_km > 0 else None
+
         # Inject extracted data into raw_data for Frontend mapping
         norm_item.raw_data["enhanced_info"] = {
             "cabin": cabin_class,
             "baggage": baggage_text,
             "refundable": is_refundable,
             "changeable": is_changeable,
-            "transit_warning": transit_warning
+            "transit_warning": transit_warning,
+            "co2_emissions_kg": co2_kg,
+            "change_fee": None,  # Amadeus fare rules API needed for real value
         }
         
         # Inject warning into tags or raw_data for Frontend to pick up
@@ -1085,7 +1136,8 @@ class DataAggregator:
 
     def sync_hotel_data(self, amadeus_offer: Dict[str, Any], google_place_details: Dict[str, Any]) -> MergedHotelOption:
         """
-        Production-Grade Data Merger
+        รวมข้อมูล Amadeus (จอง/ราคา/ห้อง) + Google (ภาพ/รีวิว/ชื่อ/ที่อยู่).
+        ตรงไหนที่ Amadeus ไม่มี ใช้ข้อมูลจาก Google มาช่วย (ชื่อ, ที่อยู่, ระดับดาว, รูป, รีวิว).
         """
         # --- 1. Amadeus Extraction (Booking Core) ---
         hotel_meta = amadeus_offer.get("hotel", {})
@@ -1179,12 +1231,10 @@ class DataAggregator:
             policies=policy_obj
         )
 
-        # --- 2. Google Extraction (Context) ---
+        # --- 2. Google Extraction (Context) — ตรงที่ Amadeus ไม่มี ใช้ Google ---
         
-        # 2.1 Amenities (Merge Amadeus + Google types)
-        # Amadeus
+        # 2.1 Amenities: รวม Amadeus + Google (Amadeus ไม่มีหรือน้อยใช้ types จาก Google)
         raw_amenities = hotel_meta.get("amenities", [])
-        # Google
         google_types = google_place_details.get("types", [])
         combined_tags = [str(a).upper() for a in raw_amenities] + [str(t).upper().replace("_", " ") for t in google_types]
         
@@ -1199,10 +1249,8 @@ class DataAggregator:
             original_list=raw_amenities[:10] # Keep top 10 raw ones
         )
 
-        # 2.2 Location
+        # 2.2 Location — ที่อยู่: ใช้ Amadeus ก่อน ถ้าไม่มีใช้ Google
         loc_geo = google_place_details.get("geometry", {}).get("location", {})
-        
-        # User Request: Data from Amadeus Only (except images)
         amadeus_addr = ", ".join(hotel_meta.get("address", {}).get("lines", []))
         final_addr = amadeus_addr if amadeus_addr else (google_place_details.get("formatted_address") or "")
 
@@ -1215,15 +1263,24 @@ class DataAggregator:
             distance_to_airport=None 
         )
 
-        # 2.3 Visuals
+        # 2.3 Visuals - support both Legacy (photo_reference) and New API (name)
         photos = []
-        if "photos" in google_place_details:
-             for p in google_place_details["photos"][:5]:
-                 ref = p.get("photo_reference")
-                 if ref and settings.google_maps_api_key:
-                     # Using Google Places Photo API with Key
-                     url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photoreference={ref}&key={settings.google_maps_api_key}"
-                     photos.append(url)
+        place_id_for_photos = google_place_details.get("place_id", "")
+        if "photos" in google_place_details and settings.google_maps_api_key:
+            for p in google_place_details["photos"][:5]:
+                url = None
+                ref = p.get("photo_reference")
+                name = p.get("name")
+                if ref:
+                    # Legacy Places API
+                    url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference={ref}&key={settings.google_maps_api_key}"
+                elif name:
+                    # New Places API (2024): name = "places/{placeId}/photos/{photoId}"
+                    url = f"https://places.googleapis.com/v1/{name}/media?maxWidthPx=400&key={settings.google_maps_api_key}"
+                if url:
+                    photos.append(url)
+        if not photos and google_place_details:
+            logger.debug(f"Hotel '{google_place_details.get('name')}' has no photos in response (place_id={place_id_for_photos})")
         
         visuals_obj = HotelVisuals(
             image_urls=photos,
@@ -1239,15 +1296,28 @@ class DataAggregator:
         )
 
         # --- 4. Final Merge ---
+        # ระดับดาว: Amadeus (v3 มักไม่มี) ไม่มีแล้วใช้จาก Google (rating 0–5 ปัดเป็นจำนวนเต็ม)
+        amadeus_star = hotel_meta.get("rating")
+        google_rating = google_place_details.get("rating")
+        if amadeus_star is not None:
+            star_rating = int(amadeus_star) if isinstance(amadeus_star, (int, float)) else amadeus_star
+        elif google_rating is not None:
+            try:
+                star_rating = round(float(google_rating))  # Google 0–5 → ใช้แสดงระดับดาว
+            except (TypeError, ValueError):
+                star_rating = None
+        else:
+            star_rating = None
+
         return MergedHotelOption(
             hotel_id=hotel_meta.get("hotelId", "unknown"),
-            hotel_name=hotel_meta.get("name") or google_place_details.get("name"), # Prefer Amadeus Name
+            hotel_name=google_place_details.get("name") or hotel_meta.get("name"),  # ชื่อ: ใช้ Google ก่อน (เช่น ภาษาไทย)
             chain_code=hotel_meta.get("chainCode"),
-            star_rating=hotel_meta.get("rating"), # Amadeus rating (1-5)
+            star_rating=star_rating,  # Amadeus ไม่มี → ใช้ Google
             booking=booking_obj,
             amenities=amenities_obj,
             location=location_obj,
-            visuals=visuals_obj,
+            visuals=visuals_obj,  # รูป + รีวิว จาก Google เท่านั้น (Amadeus v3 ไม่มี)
             ai=ai_obj
         )
 

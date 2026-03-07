@@ -636,6 +636,14 @@ class TravelAgent:
                     tp_parts.append(f"สไตล์: {travel_prefs['travel_style']}")
                 if tp_parts:
                     context_parts.append(f"✈️ ความชอบการเดินทาง: {' | '.join(tp_parts)}")
+            # 🎯 ความชอบจากการเลือก (Choice History + RL) — ใช้ร่วมกับ RL/ML
+            try:
+                from app.services.selection_preferences import get_selection_preferences_summary
+                selection_summary = await get_selection_preferences_summary(user_id)
+                if selection_summary:
+                    context_parts.append(f"🎯 ความชอบจากการเลือก (RL+ประวัติการเลือก):\n{selection_summary}")
+            except Exception as _e:
+                logger.debug(f"Selection preferences summary (non-critical): {_e}")
             
             # 🛂 Visa section (for flight/transfer search and planning - filter/plan by visa)
             visa_type = user_doc.get("visa_type") or ""
@@ -1419,8 +1427,28 @@ class TravelAgent:
             if _conv_ctx:
                 prompt_parts.append("\n=== CONVERSATION HISTORY (SLIDING WINDOW) ===\n")
                 prompt_parts.append(_conv_ctx)
+            # เริ่มจาก 0: ตรวจว่าแผนว่าง (ไม่มี segments) เพื่อบังคับ CREATE_ITINERARY หรือ ASK_USER
+            _plan_empty = False
+            try:
+                _state_obj = json.loads(state_json) if state_json else {}
+                _travel = _state_obj.get("travel") or {}
+                _flights = _travel.get("flights") or {}
+                _out = _flights.get("outbound") or []
+                _inb = _flights.get("inbound") or []
+                _acc = (_state_obj.get("accommodation") or {}).get("segments") or []
+                _ground = _travel.get("ground_transport") or []
+                _plan_empty = (len(_out) == 0 and len(_inb) == 0 and len(_acc) == 0 and len(_ground) == 0)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            _empty_hint = ""
+            if _plan_empty:
+                if mode == "agent":
+                    _empty_hint = "\n⚠️ CURRENT STATE IS EMPTY (no segments). User is starting from zero. AGENT MODE: Your FIRST action MUST be CREATE_ITINERARY with destination/dates inferred from user input or intelligent defaults (origin=Bangkok, next weekend/tomorrow, guests=1). Never ASK_USER in Agent Mode.\n"
+                else:
+                    _empty_hint = "\n⚠️ CURRENT STATE IS EMPTY (no segments). User is starting from zero. Your FIRST action MUST be CREATE_ITINERARY (with destination/dates from user or defaults) or ASK_USER to ask for destination/dates only.\n"
             prompt_parts.extend([
-                "\n=== CURRENT STATE (TRIP PLAN) ===\n",
+                "\n=== CURRENT STATE (TRIP PLAN) ===",
+                _empty_hint,
                 state_json,
                 "\n=== LATEST USER INPUT ===\n",
                 user_input,
@@ -1554,6 +1582,7 @@ class TravelAgent:
 ❌ NEVER output ASK_USER unless BOTH origin AND destination are completely missing AND there's ZERO context to infer from.
 
 ✅ ALWAYS output CREATE_ITINERARY or BATCH with intelligent defaults.
+✅ When CURRENT STATE is EMPTY (no segments), your FIRST action MUST be CREATE_ITINERARY — infer destination from user message or use a sensible default (e.g. Phuket, Tokyo), origin=Bangkok, dates=next weekend/tomorrow, guests=1. Never ASK_USER in Agent Mode.
 """)
                 prompt_parts.append("🚫 DO NOT RETURN ASK_USER UNLESS:")
                 prompt_parts.append("   - Destination is COMPLETELY missing (no city, country, or landmark mentioned)")
@@ -3332,6 +3361,17 @@ class TravelAgent:
                 logger.warning(f"Failed to record RL reward: {rl_error}")
         else:
             logger.debug(f"🧠 RL: Skipped reward recording (reinforcementLearning disabled by user)")
+        # 🎯 Selection preferences: บันทึก choice history (ใช้ร่วมกับ RL/ML, เช็ค learnFromMyChoices ใน service)
+        try:
+            selected_opt = None
+            if segment.options_pool and option_index < len(segment.options_pool):
+                raw = segment.options_pool[option_index]
+                selected_opt = raw.model_dump() if hasattr(raw, 'model_dump') else raw
+            if selected_opt is not None:
+                from app.services.selection_preferences import record_choice
+                await record_choice(session.user_id, slot_name, selected_opt, slot_type=slot_name)
+        except Exception as sp_err:
+            logger.debug(f"Record choice for selection preferences (non-critical): {sp_err}")
         
         action_log.add_action(
             "SELECT_OPTION",
@@ -3502,6 +3542,16 @@ class TravelAgent:
                     except Exception as rl_ctx_err:
                         logger.debug(f"RL context build failed (non-critical): {rl_ctx_err}")
 
+                # 🎯 Selection preferences (Choice History + RL summary) — ใช้ร่วมกับ RL/ML
+                selection_preferences_text = ""
+                try:
+                    from app.services.selection_preferences import get_selection_preferences_summary
+                    selection_preferences_text = await get_selection_preferences_summary(session.user_id)
+                    if selection_preferences_text:
+                        selection_preferences_text = "\n=== SELECTION PREFERENCES (from past choices + RL) ===\n" + selection_preferences_text
+                except Exception as _e:
+                    logger.debug(f"Selection preferences in agent mode (non-critical): {_e}")
+
                 # Build LLM prompt for smart selection
                 options_json = json.dumps(raw_options, ensure_ascii=False, indent=2)
 
@@ -3510,6 +3560,7 @@ class TravelAgent:
 === USER PREFERENCES ===
 {memory_summary or "No specific preferences recorded"}
 {rl_context}
+{selection_preferences_text}
 === REQUIREMENTS ===
 {json.dumps(segment.requirements, ensure_ascii=False)}
 
@@ -4987,7 +5038,59 @@ class LocationIntelligence:
         except Exception as e:
             logger.error(f"Error searching nearby places: {e}", exc_info=True)
             return []
-    
+
+    @staticmethod
+    async def find_hotel_place_google(hotel_name: str, city_code: str = "", lat: float = None, lng: float = None) -> Optional[Dict[str, Any]]:
+        """Find a hotel on Google by name and city/code; returns dict with place_id (and photos if available)."""
+        gmaps = get_gmaps_client()
+        if not gmaps:
+            return None
+        try:
+            query = f"{hotel_name} {city_code}".strip()
+            if not query:
+                return None
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: gmaps.find_place(
+                    input=query,
+                    input_type="textquery",
+                    fields=["place_id", "name", "photos", "geometry"],
+                    language="th",
+                )
+            )
+            candidates = result.get("candidates") or []
+            if candidates:
+                return candidates[0]
+            return None
+        except Exception as e:
+            logger.debug(f"find_hotel_place_google failed for '{hotel_name}': {e}")
+            return None
+
+    @staticmethod
+    async def search_hotel_text_google(hotel_name: str, city_code: str = "", lat: float = None, lng: float = None) -> Optional[Dict[str, Any]]:
+        """Text search for a hotel; returns dict with place_id (fallback when find_place returns nothing)."""
+        gmaps = get_gmaps_client()
+        if not gmaps:
+            return None
+        try:
+            query = f"{hotel_name} {city_code}".strip()
+            if not query:
+                return None
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: gmaps.places(query=query, language="th"),
+            )
+            results = result.get("results") or []
+            for place in results[:5]:
+                if place.get("place_id"):
+                    return {"place_id": place["place_id"], "name": place.get("name"), "photos": place.get("photos", [])}
+            return None
+        except Exception as e:
+            logger.debug(f"search_hotel_text_google failed for '{hotel_name}': {e}")
+            return None
+
     @staticmethod
     async def get_place_details_google(place_id: str) -> Optional[Dict[str, Any]]:
         """Get detailed information about a place using Google Place ID"""
@@ -5003,7 +5106,7 @@ class LocationIntelligence:
                     place_id=place_id,
                     fields=["name", "formatted_address", "formatted_phone_number",
                            "geometry", "rating", "user_ratings_total", "reviews",
-                           "website", "url", "price_level", "opening_hours", "photo"],
+                           "website", "url", "price_level", "opening_hours", "photos"],
                     language="th"
                 )
             )

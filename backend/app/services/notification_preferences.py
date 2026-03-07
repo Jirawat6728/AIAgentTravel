@@ -18,6 +18,7 @@ NOTIFICATION_TYPE_PREFERENCE = {
     "payment_failed":           "paymentNotifications",
     # Trip / flight changes
     "trip_change":              "tripChangeNotifications",
+    "trip_edited":               "tripChangeNotifications",
     "flight_delayed":           "flightAlertNotifications",
     "flight_cancelled":         "flightAlertNotifications",
     "flight_rescheduled":       "flightAlertNotifications",

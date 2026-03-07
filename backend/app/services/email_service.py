@@ -201,6 +201,17 @@ class EmailService:
         )
         return _send_gmail(to_email, f"รหัส OTP รีเซ็ตรหัสผ่าน - {self.site_name}", html)
 
+    def send_notification_email(
+        self,
+        to_email: str,
+        subject: str,
+        title: str,
+        message: str,
+    ) -> bool:
+        """ส่งอีเมลแจ้งเตือน (ชำระเงินสำเร็จ, ทริปดีเลย์, ยกเลิก, แก้ไขทริป ฯลฯ)"""
+        html = _build_notification_html(title=title, message=message, site_name=self.site_name)
+        return _send_gmail(to_email, subject, html)
+
     # ── Legacy alias (kept for backward compat, not used) ──────────────────────
     def send_email_change_verification(
         self,
@@ -210,6 +221,37 @@ class EmailService:
     ) -> bool:
         """Deprecated: use send_email_change_otp instead."""
         return self.send_email_change_otp(to_email, token, user_name, new_email=to_email)
+
+
+def _build_notification_html(*, title: str, message: str, site_name: str = "AI Travel Agent") -> str:
+    """Build HTML for notification email (payment success, trip delay, cancel, edit, etc.)."""
+    return f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+</head>
+<body style="margin:0;padding:0;background:#eef2ff;font-family:'Noto Sans Thai',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#eef2ff;padding:48px 16px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 8px 40px rgba(99,102,241,0.13);max-width:560px;width:100%;">
+        <tr><td style="background:linear-gradient(135deg,#4f46e5 0%,#7c3aed 60%,#a855f7 100%);padding:32px 40px;text-align:center;">
+          <div style="font-size:40px;margin-bottom:8px;">✈️</div>
+          <h1 style="color:#ffffff;margin:0;font-size:22px;font-weight:800;">{site_name}</h1>
+          <p style="color:rgba(255,255,255,0.8);margin:6px 0 0;font-size:13px;">การแจ้งเตือน</p>
+        </td></tr>
+        <tr><td style="padding:36px 40px;">
+          <h2 style="color:#1e1b4b;font-size:20px;font-weight:700;margin:0 0 12px;">{title}</h2>
+          <p style="color:#4b5563;font-size:15px;line-height:1.7;margin:0;">{message}</p>
+        </td></tr>
+        <tr><td style="padding:20px 40px;text-align:center;border-top:1px solid #e5e7eb;">
+          <p style="color:#9ca3af;font-size:12px;margin:0;">© {site_name} · ส่งโดยระบบอัตโนมัติ</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
 
 
 _email_service: Optional[EmailService] = None

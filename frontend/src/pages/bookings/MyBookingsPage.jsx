@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
+import Swal from 'sweetalert2';
 import './MyBookingsPage.css';
 import AppHeader from '../../components/common/AppHeader';
 import { useTheme } from '../../context/ThemeContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { useFontSize } from '../../context/FontSizeContext';
 import PaymentPopup from '../../components/bookings/PaymentPopup';
+import { formatPriceInThb } from '../../utils/currency';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
@@ -49,14 +51,6 @@ function formatTime(isoDateTime) {
   } catch (e) {
     return '';
   }
-}
-
-function formatCurrency(amount, currency = 'THB') {
-  return new Intl.NumberFormat('th-TH', {
-    style: 'currency',
-    currency: currency,
-    minimumFractionDigits: 0,
-  }).format(amount);
 }
 
 function getStatusBadge(status) {
@@ -217,30 +211,70 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
         { headers, credentials: 'include' }
       );
       const data = await res.json();
-      if (data?.ok) {
-        setRefundModal((prev) => ({
-          ...prev,
-          eligibility: {
+      const eligibility = data?.ok
+        ? {
             refundable_items: data.refundable_items || [],
             total_refundable_amount: data.total_refundable_amount ?? 0,
             can_full_refund: data.can_full_refund,
-            message: data.message,
-          },
-          loading: false,
-        }));
-      } else {
-        setRefundModal((prev) => ({
-          ...prev,
-          eligibility: { refundable_items: [], total_refundable_amount: 0, can_full_refund: false, message: data.detail || 'ไม่สามารถโหลดข้อมูลได้' },
-          loading: false,
-        }));
+            message: data.message || 'กำลังตรวจสอบเงื่อนไขการคืนเงิน',
+          }
+        : {
+            refundable_items: [],
+            total_refundable_amount: 0,
+            can_full_refund: false,
+            message: data.detail || 'ไม่สามารถโหลดข้อมูลได้',
+          };
+
+      setRefundModal((prev) => ({ ...prev, eligibility, loading: false }));
+
+      const totalRefundable = eligibility.total_refundable_amount ?? 0;
+      const currency = booking?.currency || 'THB';
+
+      if (totalRefundable <= 0) {
+        await Swal.fire({
+          icon: 'info',
+          title: 'ไม่สามารถคืนเงินได้',
+          text: 'ไม่สามารถคืนเงินได้ตามเงื่อนไขของโรงแรมหรือสายการบิน',
+          confirmButtonText: 'ตกลง',
+          confirmButtonColor: '#2563eb',
+        });
+        setRefundModal(null);
+        return;
       }
+
+      const itemsList = (eligibility.refundable_items || [])
+        .map(
+          (item) =>
+            `• ${item.label}: ${formatPriceInThb(item.amount, item.currency || currency)} — ${item.refundable ? '✅ คืนได้' : item.reason || '❌ คืนไม่ได้'}`
+        )
+        .join('\n');
+      const conditionsHtml =
+        (eligibility.message ? `<p style="text-align:left;margin-bottom:12px;">${eligibility.message}</p>` : '') +
+        (itemsList ? `<pre style="text-align:left;white-space:pre-wrap;font-size:13px;background:#f3f4f6;padding:12px;border-radius:8px;margin:0 0 12px 0;">${itemsList}</pre>` : '') +
+        `<p style="text-align:left;font-weight:700;margin:0;">ยอดที่คืนได้รวม: ${formatPriceInThb(totalRefundable, currency)}</p>`;
+
+      await Swal.fire({
+        icon: 'info',
+        title: 'เงื่อนไขการคืนเงิน',
+        html: conditionsHtml,
+        confirmButtonText: 'ตกลง',
+        confirmButtonColor: '#2563eb',
+        width: 480,
+      });
     } catch (err) {
       setRefundModal((prev) => ({
         ...prev,
         eligibility: { refundable_items: [], total_refundable_amount: 0, can_full_refund: false, message: err.message || 'เกิดข้อผิดพลาด' },
         loading: false,
       }));
+      await Swal.fire({
+        icon: 'warning',
+        title: 'ไม่สามารถคืนเงินได้',
+        text: 'ไม่สามารถคืนเงินได้ตามเงื่อนไขของโรงแรมหรือสายการบิน หรือเกิดข้อผิดพลาดในการตรวจสอบ',
+        confirmButtonText: 'ตกลง',
+        confirmButtonColor: '#2563eb',
+      });
+      setRefundModal(null);
     }
   };
 
@@ -268,23 +302,49 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
       if (data?.ok) {
         setRefundModal(null);
         await loadBookings();
-        alert(data.message || 'ดำเนินการคืนเงินเรียบร้อยแล้ว');
+        await Swal.fire({
+          icon: 'success',
+          title: 'คืนเงินสำเร็จ',
+          text: data.message || 'ดำเนินการคืนเงินเรียบร้อยแล้ว',
+          confirmButtonText: 'ตกลง',
+          confirmButtonColor: '#2563eb',
+        });
       } else {
-        alert(data.detail || data.message || 'เกิดข้อผิดพลาดในการคืนเงิน');
+        await Swal.fire({
+          icon: 'error',
+          title: 'คืนเงินไม่สำเร็จ',
+          text: data.detail || data.message || 'เกิดข้อผิดพลาดในการคืนเงิน',
+          confirmButtonText: 'ตกลง',
+          confirmButtonColor: '#2563eb',
+        });
       }
     } catch (err) {
-      alert(err.message || 'เกิดข้อผิดพลาดในการคืนเงิน');
+      await Swal.fire({
+        icon: 'error',
+        title: 'เกิดข้อผิดพลาด',
+        text: err.message || 'เกิดข้อผิดพลาดในการคืนเงิน',
+        confirmButtonText: 'ตกลง',
+        confirmButtonColor: '#2563eb',
+      });
     } finally {
       setProcessing((p) => ({ ...p, [bid]: null }));
     }
   };
 
   const handleCancel = async (bookingId) => {
-    if (!confirm('คุณต้องการยกเลิกการจองนี้หรือไม่?')) {
-      return;
-    }
+    const result = await Swal.fire({
+      title: t('bookings.confirmCancel') || 'คุณต้องการยกเลิกการจองนี้หรือไม่?',
+      icon: 'warning',
+      showCancelButton: true,
+      confirmButtonText: t('bookings.cancelBooking') || '❌ ยกเลิกการจอง',
+      confirmButtonColor: '#d9534f',
+      cancelButtonText: 'ไม่ ยกเลิก',
+      cancelButtonColor: '#6c757d',
+      reverseButtons: true,
+    });
+    if (!result.isConfirmed) return;
 
-    setProcessing({ ...processing, [bookingId]: 'cancelling' });
+    setProcessing((p) => ({ ...p, [bookingId]: 'cancelling' }));
     try {
       const headers = {};
       if (user?.id) {
@@ -298,18 +358,36 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
       });
       const data = await res.json();
       if (data?.ok) {
-        alert(data.message || 'ยกเลิกการจองสำเร็จ');
-        await loadBookings(); // Reload bookings
+        await Swal.fire({
+          icon: 'success',
+          title: t('bookings.cancelSuccess') || 'ยกเลิกการจองสำเร็จ',
+          text: data.message || null,
+          confirmButtonText: 'ตกลง',
+          confirmButtonColor: '#6366f1',
+        });
+        await loadBookings();
       } else {
-        const errorMsg = data.detail 
+        const errorMsg = data.detail
           ? (typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail))
           : 'Unknown error';
-        alert('เกิดข้อผิดพลาด: ' + errorMsg);
+        await Swal.fire({
+          icon: 'error',
+          title: 'เกิดข้อผิดพลาด',
+          text: errorMsg,
+          confirmButtonText: 'ตกลง',
+          confirmButtonColor: '#6366f1',
+        });
       }
     } catch (err) {
-      alert('เกิดข้อผิดพลาด: ' + (err.message || 'Unknown error'));
+      await Swal.fire({
+        icon: 'error',
+        title: 'เกิดข้อผิดพลาด',
+        text: err.message || 'Unknown error',
+        confirmButtonText: 'ตกลง',
+        confirmButtonColor: '#6366f1',
+      });
     } finally {
-      setProcessing({ ...processing, [bookingId]: null });
+      setProcessing((p) => ({ ...p, [bookingId]: null }));
     }
   };
 
@@ -373,7 +451,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
           const paymentUrlParsed = new URL(data.payment_url, window.location.origin);
           const urlBookingId = paymentUrlParsed.pathname.split('/').pop() || bookingId;
           if (onNavigateToPayment) {
-            onNavigateToPayment(urlBookingId);
+            onNavigateToPayment(urlBookingId, booking);
           } else {
             if (window.history && window.history.pushState) {
               window.history.pushState({ view: 'payment' }, '', `/payment?booking_id=${urlBookingId}`);
@@ -650,6 +728,22 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
     }
   };
 
+  // ✅ แต่ละทริป (trip_id) แสดงเฉพาะการจองที่ยังไม่ยกเลิก 1 อัน — หลังแก้ไขทริปจะไม่โผล่ 2 การ์ด
+  const displayBookings = (() => {
+    const byTrip = {};
+    (bookings || []).forEach((b) => {
+      const tid = b.trip_id || b._id;
+      if (!byTrip[tid]) byTrip[tid] = [];
+      byTrip[tid].push(b);
+    });
+    return Object.values(byTrip).map((arr) => {
+      const active = arr.filter((b) => (b.status || '').toLowerCase() !== 'cancelled');
+      const list = active.length ? active : arr;
+      list.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+      return list[0];
+    });
+  })();
+
   return (
     <div className="my-bookings-container">
       {/* Header */}
@@ -675,7 +769,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
           <div className="my-bookings-loading">{t('bookings.loading')}</div>
         ) : error ? (
           <div className="my-bookings-error">❌ {error}</div>
-        ) : bookings.length === 0 ? (
+        ) : displayBookings.length === 0 ? (
           <div className="my-bookings-empty">
             <div className="empty-icon">📭</div>
             <div className="empty-text">{t('bookings.noBookings')}</div>
@@ -683,7 +777,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
           </div>
         ) : (
           <div className="bookings-list">
-          {bookings.map((booking) => {
+          {displayBookings.map((booking) => {
             const plan = booking.plan || {};
             const travelSlots = booking.travel_slots || {};
             const statusBadge = getStatusBadge(booking.status);
@@ -827,6 +921,9 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                 rating: selectedOption?.rating || null
               };
             }
+
+            // ✅ ที่พักอย่างเดียว = มีที่พัก แต่ไม่มีเที่ยวบิน
+            const isAccommodationOnly = hotelInfo && !outboundFlight && !inboundFlight;
             
             return (
               <div key={booking._id} className="booking-card">
@@ -849,7 +946,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                         </span>
                       </span>
                     )}
-                    <span>{origin && dest ? `${origin} → ${dest}` : 'ทริป'}</span>
+                    <span>{isAccommodationOnly && hotelInfo?.name ? `🏨 ${hotelInfo.name}` : (origin && dest ? `${origin} → ${dest}` : 'ทริป')}</span>
                     {/* ✅ Agent Mode Badge */}
                     {booking.metadata?.mode === 'agent' || booking.metadata?.auto_booked ? (
                       <span className="status-badge" style={{
@@ -874,12 +971,12 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
 
                 <div className="booking-details">
                   <div className="booking-detail-row">
-                    <span className="detail-label">วันเดินทาง:</span>
+                    <span className="detail-label">{isAccommodationOnly ? 'เช็คอิน:' : 'วันเดินทาง:'}</span>
                     <span className="detail-value">{formatThaiDate(dateGo)}</span>
                   </div>
                   {dateReturn && (
                     <div className="booking-detail-row">
-                      <span className="detail-label">วันกลับ:</span>
+                      <span className="detail-label">{isAccommodationOnly ? 'เช็คเอาท์:' : 'วันกลับ:'}</span>
                       <span className="detail-value">{formatThaiDate(dateReturn)}</span>
                     </div>
                   )}
@@ -890,7 +987,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                     </div>
                   )}
                   <div className="booking-detail-row">
-                    <span className="detail-label">ผู้โดยสาร:</span>
+                    <span className="detail-label">{isAccommodationOnly ? 'จำนวนผู้เข้าพัก:' : 'ผู้โดยสาร:'}</span>
                     <span className="detail-value">
                       {adults} ผู้ใหญ่{children > 0 ? `, ${children} เด็ก` : ''}
                     </span>
@@ -911,7 +1008,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
 
                     return (
                       <div className="booking-passengers">
-                        <div className="passengers-label">👤 รายชื่อผู้โดยสาร</div>
+                        <div className="passengers-label">👤 {isAccommodationOnly ? 'รายชื่อผู้เข้าพัก' : 'รายชื่อผู้โดยสาร'}</div>
                         <div className="passengers-list">
                           {passengers.map((pax, idx) => {
                             let displayName = pax.name_th || pax.name || '';
@@ -1057,7 +1154,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                     <div className="booking-total-price">
                       <div className="total-price-label">💰 ราคารวมทั้งหมด</div>
                       <div className="total-price-value">
-                        {formatCurrency(booking.total_price, booking.currency || 'THB')}
+                        {formatPriceInThb(booking.total_price, booking.currency || 'THB')}
                       </div>
                     </div>
                   )}
@@ -1115,13 +1212,13 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                       <div style={{ fontSize: '13px', color: '#2563eb', marginTop: '8px', fontWeight: 600 }}>
                         {outboundFlight?.price > 0 && (
                           <span>
-                            ขาไป: {formatCurrency(outboundFlight.price, outboundFlight.currency)}
+                            ขาไป: {formatPriceInThb(outboundFlight.price, outboundFlight.currency)}
                           </span>
                         )}
                         {outboundFlight?.price > 0 && inboundFlight?.price > 0 && <span> • </span>}
                         {inboundFlight?.price > 0 && (
                           <span>
-                            ขากลับ: {formatCurrency(inboundFlight.price, inboundFlight.currency)}
+                            ขากลับ: {formatPriceInThb(inboundFlight.price, inboundFlight.currency)}
                           </span>
                         )}
                       </div>
@@ -1146,7 +1243,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                     )}
                     {hotelInfo.price > 0 && (
                       <div style={{ fontSize: '13px', color: '#2563eb', marginTop: '4px', fontWeight: 600 }}>
-                        {formatCurrency(hotelInfo.price, hotelInfo.currency)}
+                        {formatPriceInThb(hotelInfo.price, hotelInfo.currency)}
                       </div>
                     )}
                   </div>
@@ -1209,7 +1306,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                     {/* ✅ แสดงราคาไฟท์บิน */}
                     {plan.flight.price_total && (
                       <div style={{ fontSize: '13px', color: '#2563eb', marginTop: '8px', fontWeight: 600 }}>
-                        ราคาไฟท์บิน: {formatCurrency(plan.flight.price_total, plan.flight.currency || booking.currency || 'THB')}
+                        ราคาไฟท์บิน: {formatPriceInThb(plan.flight.price_total, plan.flight.currency || booking.currency || 'THB')}
                       </div>
                     )}
                   </div>
@@ -1404,7 +1501,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                       const seg = f.itineraries?.[0]?.segments?.[0];
                       const dep = seg?.departure?.at ? new Date(seg.departure.at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', hour12: false }) : '--:--';
                       const arr = seg?.arrival?.at ? new Date(seg.arrival.at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', hour12: false }) : '--:--';
-                      return `${seg?.carrierCode} ${seg?.number}  ${dep}→${arr}  ${seg?.departure?.iataCode}→${seg?.arrival?.iataCode}  ฿${parseFloat(f.price?.total || 0).toLocaleString()}`;
+                      return `${seg?.carrierCode} ${seg?.number}  ${dep}→${arr}  ${seg?.departure?.iataCode}→${seg?.arrival?.iataCode}  ${formatPriceInThb(parseFloat(f.price?.total || 0), f.price?.currency)}`;
                     };
 
                     // ── Collapsed view (หลังยืนยัน) ──────────────────────────
@@ -1451,6 +1548,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                               const depTime = seg?.departure?.at ? new Date(seg.departure.at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', hour12: false }) : '--:--';
                               const arrTime = seg?.arrival?.at ? new Date(seg.arrival.at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', hour12: false }) : '--:--';
                               const price = parseFloat(f.price?.total) || 0;
+                              const fCurrency = f.price?.currency || 'THB';
                               const isSelected = selectedFlight === f;
                               return (
                                 <button key={idx} type="button"
@@ -1460,7 +1558,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                                   <span className="efi-code">{seg?.carrierCode} {seg?.number}</span>
                                   <span className="efi-time">{depTime} → {arrTime}</span>
                                   <span className="efi-route">{seg?.departure?.iataCode} → {seg?.arrival?.iataCode}</span>
-                                  <span className="efi-price">฿{price.toLocaleString()}</span>
+                                  <span className="efi-price">{formatPriceInThb(price, fCurrency)}</span>
                                   {isSelected && <span className="efi-check">✓</span>}
                                 </button>
                               );
@@ -1521,14 +1619,17 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                         {(editModal.selectedOutbound || editModal.selectedInbound) && (
                           <div className="efi-price-summary">
                             {editModal.selectedOutbound && (
-                              <span>ขาไป ฿{parseFloat(editModal.selectedOutbound.price?.total || 0).toLocaleString()}</span>
+                              <span>ขาไป {formatPriceInThb(parseFloat(editModal.selectedOutbound.price?.total || 0), editModal.selectedOutbound.price?.currency)}</span>
                             )}
                             {editModal.selectedOutbound && editModal.selectedInbound && <span className="efi-plus">+</span>}
                             {editModal.selectedInbound && (
-                              <span>ขากลับ ฿{parseFloat(editModal.selectedInbound.price?.total || 0).toLocaleString()}</span>
+                              <span>ขากลับ {formatPriceInThb(parseFloat(editModal.selectedInbound.price?.total || 0), editModal.selectedInbound.price?.currency)}</span>
                             )}
                             <span className="efi-total">
-                              รวม ฿{((parseFloat(editModal.selectedOutbound?.price?.total) || 0) + (parseFloat(editModal.selectedInbound?.price?.total) || 0)).toLocaleString()}
+                              รวม {formatPriceInThb(
+                                (parseFloat(editModal.selectedOutbound?.price?.total) || 0) + (parseFloat(editModal.selectedInbound?.price?.total) || 0),
+                                editModal.selectedOutbound?.price?.currency || editModal.selectedInbound?.price?.currency
+                              )}
                             </span>
                           </div>
                         )}
@@ -1553,7 +1654,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                 <div className="edit-price-info">
                   <span className="edit-price-label">💰 {(editModal.selectedOutbound || editModal.selectedInbound) ? 'ราคาเที่ยวบินที่เลือก' : 'ราคาปัจจุบัน'}</span>
                   <span className="edit-price-value">
-                    {formatCurrency(editModal.formData.total_price, editModal.formData.currency)}
+                    {formatPriceInThb(editModal.formData.total_price, editModal.formData.currency)}
                   </span>
                 </div>
               </div>
@@ -1597,7 +1698,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                       {refundModal.eligibility.refundable_items.map((item, idx) => (
                         <li key={idx} style={{ padding: '8px 0', borderBottom: '1px solid #e5e7eb', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
                           <span>{item.label}</span>
-                          <span style={{ fontWeight: 600 }}>{formatCurrency(item.amount, item.currency)}</span>
+                          <span style={{ fontWeight: 600 }}>{formatPriceInThb(item.amount, item.currency)}</span>
                           <span style={{ fontSize: 12, color: item.refundable ? '#059669' : '#6b7280' }}>
                             {item.refundable ? '✅ คืนได้' : (item.reason || '❌ คืนไม่ได้')}
                           </span>
@@ -1607,7 +1708,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                   )}
                   {refundModal.eligibility.total_refundable_amount > 0 && (
                     <p style={{ fontWeight: 700, fontSize: 16, marginBottom: 16 }}>
-                      ยอดที่คืนได้รวม: {formatCurrency(refundModal.eligibility.total_refundable_amount, refundModal.booking?.currency || 'THB')}
+                      ยอดที่คืนได้รวม: {formatPriceInThb(refundModal.eligibility.total_refundable_amount, refundModal.booking?.currency || 'THB')}
                     </p>
                   )}
                   <div className="refund-modal-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 16 }}>
