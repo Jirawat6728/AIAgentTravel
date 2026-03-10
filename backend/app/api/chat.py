@@ -307,6 +307,12 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
                 for i in range(2, len(itineraries)):
                      process_itinerary(itineraries[i], f"Flight {i+1}")
 
+            # ✅ กรอง segments ตาม slot: ขาไปแสดงเฉพาะขาไป ขากลับแสดงเฉพาะขากลับ (ไม่รวม round-trip ในการ์ดเดียว → ไม่แสดงเป็น "ต่อเครื่อง" และ BKK→BKK)
+            if slot_context == "flights_outbound":
+                mapped_segments = [s for s in mapped_segments if s.get("direction") and "ขาไป" in str(s["direction"])]
+            elif slot_context == "flights_inbound":
+                mapped_segments = [s for s in mapped_segments if s.get("direction") and "ขากลับ" in str(s["direction"])]
+
             flight_price = option.get("price_amount")
             if flight_price is None and raw_data:
                 price_dict = raw_data.get("price", {})
@@ -1020,6 +1026,19 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
     children = 0
     infants = 0
     
+    # Build flight legs for multi-city (one entry per segment: outbound + inbound)
+    all_flight_segments_ordered = list(plan.travel.flights.outbound) + list(plan.travel.flights.inbound)
+    legs_for_slots = []
+    for seg in all_flight_segments_ordered:
+        req = seg.requirements or {}
+        legs_for_slots.append({
+            "origin": req.get("origin"),
+            "destination": req.get("destination"),
+            "departure_date": req.get("departure_date") or req.get("date"),
+        })
+    if legs_for_slots:
+        travel_slots["legs"] = legs_for_slots
+
     # Get from outbound flight segment (priority)
     if plan.travel.flights.outbound:
         outbound_seg = plan.travel.flights.outbound[0]
@@ -1029,6 +1048,9 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
         adults = outbound_seg.requirements.get("adults", 1)
         children = outbound_seg.requirements.get("children", 0) or outbound_seg.requirements.get("children_2_11", 0)
         infants = outbound_seg.requirements.get("infants", 0) or (outbound_seg.requirements.get("infants_with_seat", 0) + outbound_seg.requirements.get("infants_on_lap", 0))
+        # Multi-city: overall destination = last outbound's destination (or last leg's destination)
+        if len(plan.travel.flights.outbound) > 1:
+            destination_city = plan.travel.flights.outbound[-1].requirements.get("destination") or destination_city
         # Also try to get from selected_option if available
         if outbound_seg.selected_option:
             raw_data = outbound_seg.selected_option.get("raw_data", {})
@@ -1412,8 +1434,13 @@ async def chat_stream(
             
             try:
                 llm_with_mcp = LLMServiceWithMCP()
-                
-                # ✅ Get user preferences for agent (personality, style, language, RL)
+                # ✅ User ใหม่: อนุมานความชอบจากข้อความแรก → บันทึกลง travelPreferences เพื่อให้ AI เรียนรู้และรู้จักพฤติกรรม/ความชอบทันที (ใช้ Ask 1 ครั้ง + Agent 1 ครั้ง ก็มีข้อมูลใช้ได้)
+                try:
+                    from app.services.infer_user_preferences import infer_and_save_user_preferences_from_message
+                    await infer_and_save_user_preferences_from_message(user_id, request.message, only_if_empty=True)
+                except Exception as _inf:
+                    logger.debug(f"Infer user preferences (non-critical): {_inf}")
+                # ✅ Get user preferences for agent (personality, style, language, RL + inferred travelPreferences)
                 _prefs = await _load_user_agent_preferences(storage, user_id)
                 agent = TravelAgent(
                     storage,
@@ -1754,6 +1781,25 @@ async def chat_stream(
                     final_data["agent_booking_success_message"] = (
                         "✅ จองอัตโนมัติสำเร็จ! กรุณาชำระเงินที่ My Bookings เพื่อยืนยันการจอง"
                     )
+                    # คะแนนความแม่นยำการเลือกช้อยจากสมการ ML/RL (0–100) สำหรับแสดงใน SweetAlert วัดผล AI
+                    acc = getattr(updated_session, "_agent_accuracy_score", None)
+                    final_data["agent_accuracy_score"] = int(acc) if acc is not None else None
+                    # บันทึก trip evaluation (AI ประเมินตัวเอง) เพื่อเรียนรู้และปรับปรุง
+                    try:
+                        from app.services.trip_evaluations import upsert_trip_evaluation
+                        _user_id = getattr(updated_session, "user_id", None) or (session_id.split("::")[0] if "::" in str(session_id) else None)
+                        _chat_id = getattr(updated_session, "chat_id", None) or (session_id.split("::")[-1] if "::" in str(session_id) else None)
+                        if _user_id:
+                            asyncio.create_task(upsert_trip_evaluation(
+                                session_id=session_id,
+                                user_id=_user_id,
+                                chat_id=_chat_id,
+                                mode="agent",
+                                agent_accuracy_score=int(acc) if acc is not None else None,
+                                user_stars=None,
+                            ))
+                    except Exception as _te:
+                        logger.debug(f"Trip evaluation save (agent): {_te}")
             
             _write_debug_log({"id": f"log_{int(datetime.utcnow().timestamp()*1000)}_final_data", "timestamp": int(datetime.utcnow().timestamp()*1000), "location": "chat.py:stream", "message": "Completion final_data built", "data": {"mode": mode, "has_current_plan": bool(metadata.get("current_plan")), "auto_booked": auto_booked if mode == "agent" else None}, "runId": "run1", "hypothesisId": "H3"})
             
@@ -2048,6 +2094,9 @@ async def chat(
         clear_logging_context()
 
 
+# ✅ Cap history size to avoid huge payload and timeouts
+_HISTORY_LIMIT_MAX = 100
+
 @router.get("/history/{client_trip_id}")
 async def get_history(
     client_trip_id: str,
@@ -2070,6 +2119,7 @@ async def get_history(
     
     # ✅ session_id ใช้รูปแบบเดียวกับ chat endpoint: user_id::chat_id
     session_id = f"{user_id}::{chat_id}"
+    limit = min(max(1, limit), _HISTORY_LIMIT_MAX)
     
     logger.info(f"Fetching history for session_id={session_id}, chat_id={chat_id}, trip_id={trip_id}, user_id={user_id}")
     
@@ -2162,62 +2212,34 @@ async def get_user_sessions(
         query = {"user_id": user_id}
         logger.debug(f"🔍 Querying sessions with filter: {query}")
         
+        # ✅ โหลดรายการแชทไม่ล่ม: ใช้แค่ collection sessions (1 query) — ไม่ดึง conversations (ป้องกัน timeout/ payload ใหญ่)
         cursor = sessions_collection.find(query).sort("last_updated", -1).limit(limit)
-            
-        async for doc in cursor:
+        session_docs = await cursor.to_list(length=limit)
+
+        for doc in session_docs:
             session_id = doc.get("session_id", "")
             chat_id = doc.get("chat_id") or session_id.split("::")[-1] if "::" in session_id else session_id
-            
-            # ✅ SECURITY: Double-check that session belongs to this user
             session_user_id = session_id.split("::")[0] if "::" in session_id else doc.get("user_id")
             if session_user_id != user_id:
-                logger.warning(f"Session {session_id} has mismatched user_id: expected {user_id}, found {session_user_id}")
                 continue
-            
-            # Skip duplicates
             if chat_id in seen_chat_ids:
                 continue
             seen_chat_ids.add(chat_id)
-            
-            # ✅ SECURITY: Check if conversation has messages and verify user_id
-            # Query conversation with BOTH session_id AND user_id to prevent data leakage
-            conv_query = {"session_id": session_id, "user_id": user_id}
-            conv_doc = await conversations_collection.find_one(conv_query)
-            if conv_doc:
-                conv_user_id = conv_doc.get("user_id")
-                # Double-check user_id match (additional safety layer)
-                if conv_user_id and conv_user_id != user_id:
-                    logger.error(f"🚨 SECURITY ALERT: Session {session_id} conversation has mismatched user_id! expected {user_id}, found {conv_user_id}")
-                    continue  # Skip this session to prevent data leakage
-            elif conv_doc is None and session_id:
-                # ✅ If no conversation found, that's OK (new session) - don't skip the session
-                pass
-            has_messages = conv_doc and conv_doc.get("messages") and len(conv_doc["messages"]) > 0
-            msg_count = len(conv_doc.get("messages", [])) if conv_doc else 0
 
-            # ✅ Title: แบบ Gemini — จาก session.title หรือข้อความแรกของ user (ตัดสั้น) หรือ "การสนทนาใหม่"
-            title = (doc.get("title") or "").strip()
-            if not title and conv_doc:
-                messages = conv_doc.get("messages") or []
-                for m in messages:
-                    if (m.get("role") or "").lower() == "user":
-                        raw = (m.get("content") or m.get("text") or "").strip()
-                        if raw:
-                            title = raw[:50] + ("…" if len(raw) > 50 else "")
-                            break
-            if not title:
-                title = "การสนทนาใหม่"
+            title = (doc.get("title") or "").strip() or "การสนทนาใหม่"
+            msg_count = 0
+            has_messages = False
 
             last_ts = doc.get("last_updated") or doc.get("created_at")
-            last_updated_str = last_ts.isoformat() if last_ts else None
-            created_str = doc.get("created_at").isoformat() if doc.get("created_at") else None
+            last_updated_str = last_ts.isoformat() if hasattr(last_ts, "isoformat") and last_ts else None
+            created_at = doc.get("created_at")
+            created_str = created_at.isoformat() if hasattr(created_at, "isoformat") and created_at else None
 
-            # ✅ SECURITY: Include user_id in response for frontend validation
             all_sessions.append({
                 "session_id": session_id,
                 "chat_id": chat_id,
                 "trip_id": doc.get("trip_id"),
-                "user_id": user_id,  # ✅ Include user_id for frontend validation
+                "user_id": user_id,
                 "title": title,
                 "last_updated": last_updated_str,
                 "created_at": created_str,
@@ -2388,6 +2410,62 @@ async def select_choice(request: dict, fastapi_request: Request):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         clear_logging_context()
+
+
+@router.post("/agent-feedback")
+async def agent_feedback(request: dict, fastapi_request: Request):
+    """
+    บันทึกคะแนนดาว (1–5) จาก User หลัง Agent Mode จองอัตโนมัติ — ใช้สำหรับ RL ปรับปรุงความแม่นยำ
+    """
+    from app.core.security import extract_user_id_from_request, validate_session_user_id
+    from app.engine.reinforcement_learning import get_rl_service
+
+    user_id = extract_user_id_from_request(fastapi_request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    chat_id = request.get("chat_id") or request.get("session_id")
+    stars = request.get("stars")
+    mode = request.get("mode")  # "ask" หรือ "agent" ตามโหมดแชทที่ผู้ใช้ประเมิน
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="chat_id required")
+    try:
+        stars = int(stars)
+        if stars < 1 or stars > 5:
+            raise ValueError("stars must be 1-5")
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="stars must be 1-5")
+
+    session_id = f"{user_id}::{chat_id}" if "::" not in str(chat_id) else str(chat_id)
+    validate_session_user_id(session_id, user_id)
+
+    try:
+        rl_svc = get_rl_service()
+        await rl_svc.record_reward(
+            user_id=user_id,
+            action_type="user_star_rating",
+            slot_name="agent_booking",
+            option=None,
+            context={"stars": stars, "session_id": session_id},
+        )
+        # บันทึก user_stars ลง trip_evaluations เพื่อให้ AI นำไปเรียนรู้และปรับปรุง
+        try:
+            from app.services.trip_evaluations import upsert_trip_evaluation
+            chat_id_for_ev = request.get("chat_id") or request.get("session_id") or (session_id.split("::")[-1] if "::" in str(session_id) else None)
+            await upsert_trip_evaluation(
+                session_id=session_id,
+                user_id=user_id,
+                chat_id=chat_id_for_ev,
+                mode=mode if mode in ("ask", "agent") else None,
+                agent_accuracy_score=None,
+                user_stars=stars,
+            )
+        except Exception as _te:
+            logger.debug(f"Trip evaluation save (feedback): {_te}")
+        return {"ok": True, "message": "บันทึกคะแนนแล้ว ใช้สำหรับปรับปรุงความแม่นยำ"}
+    except Exception as e:
+        logger.warning(f"Agent feedback record error: {e}")
+        return {"ok": False, "message": str(e)}
 
 
 @router.post("/tts")

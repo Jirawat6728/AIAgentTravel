@@ -3,7 +3,7 @@ import './ResetPasswordPage.css';
 import { sha256Password } from '../../utils/passwordHash.js';
 import Swal from 'sweetalert2';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
 export default function ResetPasswordPage({ onNavigateToLogin, onNavigateToHome, onNavigateToRegister }) {
   const [email, setEmail] = useState('');

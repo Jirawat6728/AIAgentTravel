@@ -246,9 +246,11 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
 
   const totalText = moneyThb(total, currency) || safeText(plan?.total_price_text || plan?.summary?.total_price_text) || '—';
 
-  const origin = travelSlots?.origin_city || travelSlots?.origin || travelSlots?.origin_iata || '';
-  const dest = travelSlots?.destination_city || travelSlots?.destination || travelSlots?.destination_iata || '';
-  const dateGo = travelSlots?.departure_date || travelSlots?.start_date || travelSlots?.check_in || '';
+  const legs = Array.isArray(travelSlots?.legs) ? travelSlots.legs : [];
+  const isMultiCity = legs.length > 1;
+  const origin = travelSlots?.origin_city || travelSlots?.origin || travelSlots?.origin_iata || legs[0]?.origin || '';
+  const dest = travelSlots?.destination_city || travelSlots?.destination || travelSlots?.destination_iata || (legs.length ? legs[legs.length - 1]?.destination : '');
+  const dateGo = travelSlots?.departure_date || travelSlots?.start_date || travelSlots?.check_in || legs[0]?.departure_date || '';
   
   // ✅ คำนวณวันกลับถ้ายังไม่มี
   let dateBack = travelSlots?.return_date || travelSlots?.end_date || travelSlots?.check_out || '';
@@ -295,6 +297,11 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
   const hasHotelData = hotelSegments.length > 0 || !!hotel.hotelName;
   const hasTransportData = transportSegments.length > 0 || !!transport.type;
   const isRoundTrip = inboundSegments.length > 0 || !!dateBack;
+
+  const routeLabel = isMultiCity ? 'เส้นทาง (หลายสถานที่)' : (hasHotelData && !hasFlightData ? 'สถานที่' : 'ต้นทาง → ปลายทาง');
+  const routeText = isMultiCity && legs.length
+    ? [legs[0]?.origin, ...legs.map((l) => l.destination)].filter(Boolean).join(' → ')
+    : (origin && dest ? `${origin} → ${dest}` : origin || dest);
   
   // ✅ Title ตามสถานการณ์
   const summaryTitle = (() => {
@@ -332,7 +339,7 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
       <div className="plan-card-section">
         <div className="plan-card-section-title">🧾 ภาพรวม</div>
         <div className="plan-card-section-body">
-          {(origin || dest) && kv(hasHotelData && !hasFlightData ? 'สถานที่' : 'ต้นทาง → ปลายทาง', origin && dest ? `${origin} → ${dest}` : origin || dest)}
+          {(origin || dest || routeText) && kv(routeLabel, routeText)}
           {dateGo && kv(hasHotelData && !hasFlightData ? 'วันเช็คอิน' : 'วันเดินทาง', formatThaiDate(dateGo))}
           {dateBack && kv(hasHotelData && !hasFlightData ? 'วันเช็คเอาท์' : 'วันกลับ', formatThaiDate(dateBack))}
           {pax && kv(hasHotelData && !hasFlightData ? 'จำนวนผู้เข้าพัก' : 'ผู้โดยสาร', pax)}
@@ -767,9 +774,10 @@ export function UserInfoCard({ userProfile, onEdit, isDomesticTravel = false }) 
   );
 }
 
-export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBooking, bookingResult, chatMode = 'normal', agentState = null }) {
+export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBooking, bookingResult, chatMode = 'normal', agentState = null, onNavigateToBookings = null }) {
   const needsPayment = bookingResult?.needs_payment || bookingResult?.status === 'pending_payment';
   const isConfirmed = bookingResult?.status === 'confirmed' || bookingResult?.status === 'paid';
+  const isAlreadyBooked = bookingResult && !bookingResult.ok && bookingResult.already_booked === true;
   
   // ✅ Agent Mode: Check if auto-booked (from agentState or bookingResult)
   const isAgentMode = chatMode === 'agent';
@@ -791,9 +799,14 @@ export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBook
       <div className="plan-card-header">
         <div className="plan-card-title">
           <span className="plan-card-label">✅ ยืนยันจอง</span>
-          {(needsPayment || isConfirmed) && (
+          {(needsPayment || isConfirmed) && !isAlreadyBooked && (
             <span className="plan-card-tag">
               {needsPayment ? 'รอชำระเงิน' : 'จองสำเร็จ'}
+            </span>
+          )}
+          {isAlreadyBooked && (
+            <span className="plan-card-tag" style={{ background: '#fef3c7', color: '#92400e' }}>
+              จองไปแล้ว
             </span>
           )}
         </div>
@@ -809,6 +822,27 @@ export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBook
             <div style={{ marginTop: '8px', opacity: 0.8 }}>
               {needsPayment ? 'กำลังสร้างการจอง...' : 'กำลังชำระเงินและจอง...'}
             </div>
+          </div>
+        </div>
+      ) : bookingResult && isAlreadyBooked ? (
+        <div className="plan-card-section">
+          <div className="plan-card-section-title" style={{ color: '#92400e' }}>
+            📋 จองไปแล้ว
+          </div>
+          <div className="plan-card-section-body plan-card-small">
+            <p style={{ margin: 0 }}>{bookingResult.message}</p>
+            {onNavigateToBookings && (
+              <div className="plan-card-footer summary-footer" style={{ marginTop: '16px' }}>
+                <button
+                  type="button"
+                  className="plan-card-button"
+                  style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
+                  onClick={onNavigateToBookings}
+                >
+                  📋 ไปที่ My Bookings
+                </button>
+              </div>
+            )}
           </div>
         </div>
       ) : bookingResult ? (

@@ -1,21 +1,11 @@
 import React from 'react';
 import { AIRLINE_NAMES } from '../../data/airlineNames';
+import { formatPriceInThb } from '../../utils/currency';
 import '../bookings/TripSummaryUI.css';
 
-// Helper functions
-function money(currency, n) {
-  if (n == null || Number.isNaN(Number(n))) return null;
-  const c = currency || 'THB';
-  try {
-    const opts = {
-      style: 'currency',
-      currency: c,
-      maximumFractionDigits: c === 'THB' ? 0 : 2,
-    };
-    return new Intl.NumberFormat('th-TH', opts).format(Number(n));
-  } catch {
-    return `${c} ${Number(n).toLocaleString('th-TH')}`;
-  }
+// แสดงราคาเป็นบาท (THB) เท่านั้น
+function moneyThb(amount, sourceCurrency) {
+  return formatPriceInThb(amount, sourceCurrency || 'THB');
 }
 
 function safeText(v) {
@@ -90,7 +80,7 @@ export function FlightSlotCard({ flight, travelSlots }) {
             {firstSegment.carrier && kv('สายการบิน', getAirlineName(firstSegment.carrier))}
             {flight.total_duration && kv('ระยะเวลาบิน', flight.total_duration)}
             {flight.is_non_stop !== undefined && kv('บินตรง', flight.is_non_stop ? 'ใช่' : `แวะ ${flight.num_stops || 0} ครั้ง`)}
-            {(flight.total_price != null || flight.price_total != null) && kv('ราคา', money(currency, flight.total_price ?? flight.price_total))}
+            {(flight.total_price != null || flight.price_total != null) && kv('ราคา', moneyThb(flight.total_price ?? flight.price_total, currency))}
           </>
         )}
         {segments.length > 1 && (
@@ -151,7 +141,7 @@ export function HotelSlotCard({ hotel, travelSlots }) {
                 {seg.hotelName && kv('ชื่อโรงแรม', seg.hotelName)}
                 {seg.boardType && kv('ประเภทอาหาร', seg.boardType)}
                 {seg.address && kv('ที่อยู่', seg.address)}
-                {seg.price && kv('ราคา', money(seg.currency || currency, seg.price))}
+                {seg.price && kv('ราคา', moneyThb(seg.price, seg.currency || currency))}
               </div>
             ))}
           </>
@@ -162,7 +152,7 @@ export function HotelSlotCard({ hotel, travelSlots }) {
             {hotel.nights && kv('จำนวนคืน', `${hotel.nights} คืน`)}
             {hotel.boardType && kv('ประเภทอาหาร', hotel.boardType)}
             {hotel.address && kv('ที่อยู่', hotel.address)}
-            {(hotel.total_price != null || hotel.price_total != null) && kv('ราคา', money(currency, hotel.total_price ?? hotel.price_total))}
+            {(hotel.total_price != null || hotel.price_total != null) && kv('ราคา', moneyThb(hotel.total_price ?? hotel.price_total, currency))}
           </>
         )}
         <div className="slot-card-edit-hint">
@@ -294,11 +284,11 @@ export function TransportSlotCard({ transport }) {
                       border: '1px solid rgba(74, 222, 128, 0.3)'
                     }}>
                       <div style={{ fontWeight: '700', fontSize: '16px', color: '#4ade80' }}>
-                        💰 ราคา: {money(segmentCurrency, segmentPrice)}
+                        💰 ราคา: {moneyThb(segmentPrice, segmentCurrency)}
                       </div>
                       {(seg.price_per_day || seg.data?.price_per_day) && (
                         <div style={{ fontSize: '13px', opacity: 0.9, marginTop: '4px' }}>
-                          ราคาต่อวัน: {money(segmentCurrency, seg.price_per_day || seg.data?.price_per_day)}
+                          ราคาต่อวัน: {moneyThb(seg.price_per_day || seg.data?.price_per_day, segmentCurrency)}
                         </div>
                       )}
                     </div>
@@ -352,7 +342,7 @@ export function TransportSlotCard({ transport }) {
                     textAlign: 'center'
                   }}>
                     <div style={{ fontWeight: '700', fontSize: '18px', color: '#4ade80' }}>
-                      💰 ราคารวม: {money(currency, totalPrice)}
+                      💰 ราคารวม: {moneyThb(totalPrice, currency)}
                     </div>
                   </div>
                 );
@@ -413,11 +403,11 @@ export function TransportSlotCard({ transport }) {
                     border: '1px solid rgba(74, 222, 128, 0.3)'
                   }}>
                     <div style={{ fontWeight: '700', fontSize: '18px', color: '#4ade80', marginBottom: '4px' }}>
-                      💰 ราคา: {money(currency, transportPrice)}
+                      💰 ราคา: {moneyThb(transportPrice, currency)}
                     </div>
                     {(transport.price_per_day || transport.data?.price_per_day) && (
                       <div style={{ fontSize: '14px', opacity: 0.9, marginTop: '4px' }}>
-                        ราคาต่อวัน: {money(currency, transport.price_per_day || transport.data?.price_per_day)}
+                        ราคาต่อวัน: {moneyThb(transport.price_per_day || transport.data?.price_per_day, currency)}
                       </div>
                     )}
                   </div>

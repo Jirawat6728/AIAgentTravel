@@ -749,7 +749,7 @@ class TravelOrchestrator:
     # Core Data Fetchers (Amadeus REST)
     # -------------------------------------------------------------------------
     
-    async def get_flights(self, origin: str = "BKK", destination: str = "NRT", departure_date: str = None, adults: int = 1, children: int = 0, infants: int = 0, non_stop: bool = False, cabin_class: Optional[str] = None, return_date: str = None) -> List[Dict[str, Any]]:
+    async def get_flights(self, origin: str = "BKK", destination: str = "NRT", departure_date: str = None, adults: int = 1, children: int = 0, infants: int = 0, non_stop: bool = False, cabin_class: Optional[str] = None, return_date: str = None, max_price: Optional[int] = None) -> List[Dict[str, Any]]:
         """Fetch Flight Offers with flexible parameters
         
         Args:
@@ -762,6 +762,7 @@ class TravelOrchestrator:
             non_stop: If True, only return non-stop flights
             cabin_class: Cabin class (ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST)
             return_date: Return date in YYYY-MM-DD format (round-trip if provided)
+            max_price: Maximum price per traveler in THB (Amadeus maxPrice filter)
         """
         token = await self._get_amadeus_token()
         
@@ -846,24 +847,35 @@ class TravelOrchestrator:
                 params["travelClass"] = amadeus_cabin
                 logger.info(f"Filtering flights by cabin class: {amadeus_cabin}")
 
+        if max_price and max_price > 0:
+            params["maxPrice"] = max_price
+            logger.info(f"💰 Filtering flights by max price: {max_price} THB")
+
         try:
-            # ✅ Validate date range (Amadeus typically supports up to 11 months ahead)
+            # ✅ Validate date range: supports today → 11 months ahead (335 days)
             from datetime import datetime, timedelta
             try:
                 search_date = datetime.strptime(date, "%Y-%m-%d")
                 today = datetime.now()
                 days_ahead = (search_date - today).days
-                max_days_ahead = 730  # 2 years - ระบบรองรับจองระยะไกล/ข้ามปี
+                max_days_ahead = 335  # 11 months
+                max_date = (today + timedelta(days=max_days_ahead)).strftime("%Y-%m-%d")
 
                 if days_ahead < 0:
-                    logger.warning(f"⚠️ Search date {date} is in the past ({-days_ahead} days ago)")
+                    logger.warning(
+                        f"⚠️ Search date {date} is in the past ({-days_ahead} days ago). "
+                        f"Valid range: {today.strftime('%Y-%m-%d')} to {max_date} (11 months ahead)"
+                    )
                 elif days_ahead > max_days_ahead:
                     logger.warning(
-                        f"⚠️ Search date {date} is {days_ahead} days ahead (max: {max_days_ahead} days). "
-                        f"Amadeus may not have data for dates this far in the future."
+                        f"⚠️ Search date {date} is {days_ahead} days ahead (max: {max_days_ahead} days / 11 months). "
+                        f"Valid range: {today.strftime('%Y-%m-%d')} to {max_date}. "
+                        f"Amadeus may not have data for dates beyond 11 months."
                     )
+                else:
+                    logger.info(f"📅 Date {date} is valid ({days_ahead} days ahead, within 11-month range)")
             except ValueError:
-                logger.warning(f"⚠️ Invalid date format: {date}")
+                logger.warning(f"⚠️ Invalid date format: {date} — expected YYYY-MM-DD")
             
             # ✅ Log search parameters and confirm production URL
             env_label = "production" if "api.amadeus.com" in self.amadeus_search_base_url and "test." not in self.amadeus_search_base_url else "test"
@@ -912,15 +924,15 @@ class TravelOrchestrator:
                 logger.info(f"✅ Found {len(data)} flight options for {origin_code} → {dest_code} on {date}")
                 return data
             
-            # ✅ When 0 results: log meta/errors for debugging (especially with production key)
+            # ✅ When 0 results: retry same date (ไม่เปลี่ยนวัน) จนกว่าจะเจอ หรือคลายเงื่อนไข
             logger.info(
                 f"📋 Amadeus returned 0 flights for {origin_code}→{dest_code} on {date} | "
                 f"meta.count={meta.get('count')} meta={meta} | errors={response_json.get('errors')}"
             )
             
-            # ✅ FALLBACK: Try alternate airport for Osaka (KIX vs ITM)
+            # ✅ FALLBACK: Try alternate airport for Osaka (KIX vs ITM) — same date
             if dest_code == "KIX" and not data:
-                logger.info(f"🔄 Trying alternate airport ITM (Osaka Itami) for {origin_code} → Osaka")
+                logger.info(f"🔄 Trying alternate airport ITM (Osaka Itami) for {origin_code} → Osaka (same date)")
                 params_itm = {**params, "destinationLocationCode": "ITM"}
                 try:
                     resp_itm = await self.client.get(
@@ -938,65 +950,45 @@ class TravelOrchestrator:
                 except Exception as e_itm:
                     logger.debug(f"ITM fallback failed: {e_itm}")
             
-            # ✅ FALLBACK: Try nearby dates (±1..±5 days) to increase chance of finding data (e.g. when Google has results)
-            logger.info(f"⚠️ No flights found for {date}, trying fallback dates (±1..±5 days)...")
-            fallback_dates = []
-            try:
-                from datetime import datetime, timedelta
-                base_date = datetime.strptime(date, "%Y-%m-%d")
-                for offset in [-3, -2, -1, 1, 2, 3, 5]:  # Wider range to match availability
-                    fallback_date = (base_date + timedelta(days=offset)).strftime("%Y-%m-%d")
-                    fallback_dates.append(fallback_date)
-            except Exception:
-                pass
-            
-            # ✅ Parallel fallback searches (try up to 4 dates, 10s timeout)
-            if fallback_dates:
-                import asyncio
-                fallback_tasks = []
-                for fallback_date in fallback_dates[:4]:  # Try 4 fallback dates for better hit rate
-                    fallback_params = params.copy()
-                    fallback_params["departureDate"] = fallback_date
-                    task = self.client.get(
+            # ✅ Retry same date (ไม่เปลี่ยนวัน): ลองค้นใหม่ 2 ครั้ง พร้อมหน่วง 1–2 วินาที
+            import asyncio
+            for attempt in range(1, 3):
+                await asyncio.sleep(1.0 * attempt)
+                logger.info(f"🔄 Retry {attempt}/2 same date {date} (ไม่เปลี่ยนวัน)")
+                try:
+                    retry_resp = await self.client.get(
                         f"{self.amadeus_search_base_url}/v2/shopping/flight-offers",
-                        params=fallback_params,
+                        params=params,
                         headers={"Authorization": f"Bearer {token}"}
                     )
-                    fallback_tasks.append((fallback_date, task))
-                
-                try:
-                    results_list = await asyncio.wait_for(
-                        asyncio.gather(*[task for _, task in fallback_tasks], return_exceptions=True),
-                        timeout=10.0
-                    )
-                    
-                    for (fallback_date, _), result in zip(fallback_tasks, results_list):
-                        if isinstance(result, Exception):
-                            continue
-                        try:
-                            if hasattr(result, 'json'):
-                                fallback_data = result.json().get("data", [])
-                            else:
-                                continue
-                            if fallback_data:
-                                logger.info(f"✅ Fallback success: Found {len(fallback_data)} flights for {fallback_date}")
-                                for item in fallback_data:
-                                    item["_fallback_date"] = fallback_date
-                                    item["_original_date"] = date
-                                data.extend(fallback_data[:3])
-                                if len(data) >= 3:
-                                    break
-                        except Exception as e:
-                            logger.debug(f"Error processing fallback result for {fallback_date}: {e}")
-                            continue
-                    
+                    retry_resp.raise_for_status()
+                    retry_json = retry_resp.json()
+                    data = retry_json.get("data", [])
+                    if data and non_stop:
+                        data = [o for o in data if all(len(itin.get("segments") or []) <= 1 for itin in (o.get("itineraries") or []))]
                     if data:
-                        if non_stop:
-                            data = [o for o in data if all(len(itin.get("segments") or []) <= 1 for itin in (o.get("itineraries") or []))]
-                        logger.info(f"✅ Found {len(data)} total flight options (including fallback dates) → will show PlanChoiceCard")
+                        logger.info(f"✅ Retry same date: found {len(data)} flights on {date}")
                         return data[:10]
-                except asyncio.TimeoutError:
-                    logger.warning(f"⚠️ Fallback date searches timed out after 10s")
+                except Exception as retry_e:
+                    logger.debug(f"Retry {attempt} failed: {retry_e}")
+            
+            # ✅ คลายเงื่อนไข: ถ้าขอบินตรงแต่ไม่เจอ ให้ค้นวันเดียวกันแบบรวมต่อเครื่อง (ไม่เปลี่ยนวัน)
+            if non_stop and not data:
+                logger.info(f"🔄 Same date {date}: relaxing to include connecting flights (ไม่เปลี่ยนวัน)")
+                params_relaxed = {**params, "nonStop": "false"}
+                try:
+                    relax_resp = await self.client.get(
+                        f"{self.amadeus_search_base_url}/v2/shopping/flight-offers",
+                        params=params_relaxed,
+                        headers={"Authorization": f"Bearer {token}"}
+                    )
+                    relax_resp.raise_for_status()
+                    data = relax_resp.json().get("data", [])
+                    if data:
+                        logger.info(f"✅ Same date: found {len(data)} options (including connections)")
+                        return data[:10]
+                except Exception as relax_e:
+                    logger.debug(f"Relaxed search failed: {relax_e}")
             
             # If still no results, log detailed diagnostic information
             full_response = response_json
@@ -1004,7 +996,7 @@ class TravelOrchestrator:
             count = meta.get('count', 0)
             
             logger.warning(
-                f"⚠️ No flights found for {origin_code} → {dest_code} on {date} (including fallback dates).\n"
+                f"⚠️ No flights found for {origin_code} → {dest_code} on {date} (after retries + relaxed search, same date).\n"
                 f"   URL: {self.amadeus_search_base_url} (production={('test' not in self.amadeus_search_base_url)})\n"
                 f"   Response status: {resp.status_code}\n"
                 f"   Response keys: {list(full_response.keys())}\n"
@@ -1293,13 +1285,13 @@ class TravelOrchestrator:
                             check_in_dt = datetime.strptime(check_in, "%Y-%m-%d")
                             today = datetime.now()
                             days_ahead = (check_in_dt - today).days
-                            max_days = 730  # 2 years - ระบบรองรับจองระยะไกล/ข้ามปี
+                            max_days = 335  # 11 months - รองรับการค้นหา 11 เดือนนับจากวันนี้
 
                             date_info = ""
                             if days_ahead < 0:
                                 date_info = f" (date is {-days_ahead} days in the past)"
                             elif days_ahead > max_days:
-                                date_info = f" (date is {days_ahead} days ahead, max: {max_days} days)"
+                                date_info = f" (date is {days_ahead} days ahead, max: 11 months)"
                         except Exception:
                             date_info = ""
                         

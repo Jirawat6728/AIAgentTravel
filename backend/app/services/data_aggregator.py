@@ -5,9 +5,11 @@
 """
 
 from __future__ import annotations
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 from enum import Enum
 from pydantic import BaseModel, Field
+import json
 import logging
 import asyncio
 
@@ -20,6 +22,28 @@ from app.models.trip_plan import (
 )
 
 logger = get_logger(__name__)
+
+# โหลดคะแนนรีวิวสายการบินจากเว็บ (Skytrax, TripAdvisor, Google ฯลฯ) — ใช้เป็นส่วนหนึ่งของ weight
+_airline_ratings: Optional[Dict[str, Dict[str, Any]]] = None
+
+
+def _load_airline_ratings() -> Dict[str, Dict[str, Any]]:
+    global _airline_ratings
+    if _airline_ratings is not None:
+        return _airline_ratings
+    try:
+        path = Path(__file__).resolve().parent.parent / "data" / "airline_ratings.json"
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            _airline_ratings = {k: v for k, v in data.items() if not k.startswith("_") and isinstance(v, dict)}
+        else:
+            _airline_ratings = {}
+    except Exception as e:
+        logger.debug(f"Load airline_ratings.json: {e}")
+        _airline_ratings = {}
+    return _airline_ratings
+
 
 # =============================================================================
 # Unified Schema Models
@@ -50,6 +74,7 @@ class StandardizedItem(BaseModel):
     
     # Details
     rating: Optional[float] = Field(default=None, description="Rating (0-5)")
+    review_count: Optional[int] = Field(default=None, description="Number of reviews (from web/Skytrax etc.)")
     duration: Optional[str] = Field(default=None, description="Duration string (e.g., '2h 30m')")
     description: Optional[str] = Field(default=None, description="Short description or amenities")
     
@@ -137,6 +162,14 @@ class DataAggregator:
                         currency = (price.get("currency") or "THB")
                         if not isinstance(currency, str):
                             currency = "THB"
+                        # คะแนนรีวิวสายการบินจากเว็บ (airline_ratings.json) — เป็นส่วนหนึ่งของ weight ให้ AI เลือก
+                        ratings = _load_airline_ratings()
+                        ext_rating = None
+                        ext_review_count = None
+                        if carrier and carrier in ratings:
+                            r = ratings[carrier]
+                            ext_rating = r.get("rating")
+                            ext_review_count = r.get("review_count")
                         item = StandardizedItem(
                             id=f"mcp_flight_{idx}",
                             category=ItemCategory.FLIGHT,
@@ -148,6 +181,8 @@ class DataAggregator:
                             start_time=first_seg.get("departure", {}).get("at"),
                             end_time=last_seg.get("arrival", {}).get("at"),
                             location=f"{origin_code} → {dest_code}",
+                            rating=float(ext_rating) if ext_rating is not None else None,
+                            review_count=int(ext_review_count) if ext_review_count is not None else None,
                             raw_data=flight
                         )
                         standardized.append(item)
@@ -692,13 +727,15 @@ class DataAggregator:
         }
         mapped_cabin = cabin_mapping.get(cabin_class, cabin_class) if cabin_class else None
         
+        return_date = kwargs.get("return_date")
         raw_data = await self.orchestrator.get_flights(
-            origin=origin, 
-            destination=destination, 
-            departure_date=date, 
+            origin=origin,
+            destination=destination,
+            departure_date=date,
             adults=adults,
             non_stop=use_non_stop,
-            cabin_class=mapped_cabin
+            cabin_class=mapped_cabin,
+            return_date=return_date,
         )
         return [self._normalize_flight(item) for item in raw_data]
 

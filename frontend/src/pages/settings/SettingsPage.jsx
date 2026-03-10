@@ -9,7 +9,7 @@ import { useTheme } from '../../context/ThemeContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { useFontSize } from '../../context/FontSizeContext';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
 /** โลโก้บัตรเครดิตแบบขาว สำหรับใช้บนพื้นหลังสีเข้ม — ใช้ในส่วนบัตรที่บันทึกไว้ */
 const CARD_LOGO_SVG = {

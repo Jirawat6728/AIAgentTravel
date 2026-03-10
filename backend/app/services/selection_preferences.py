@@ -138,7 +138,10 @@ async def get_selection_preferences_summary(user_id: str) -> str:
         cursor = col.find({"user_id": user_id}).sort("created_at", -1).limit(MAX_CHOICES_FOR_SUMMARY)
         choices = await cursor.to_list(length=MAX_CHOICES_FOR_SUMMARY)
         if not choices:
-            # Optional: add RL-only summary from user_feedback_history
+            # User ใหม่: ยังไม่มี choice history — ใช้ความพึงพอใจจากคะแนนดาว (trip_evaluations / RL) เพื่อให้ AI รู้จักพฤติกรรมจากแค่ 1–2 ทริป
+            satisfaction_line = await _last_satisfaction_line(db, user_id)
+            if satisfaction_line:
+                parts.append(satisfaction_line)
             rl_part = await _rl_aggregate_summary(db, user_id)
             if rl_part:
                 parts.append(rl_part)
@@ -174,10 +177,34 @@ async def get_selection_preferences_summary(user_id: str) -> str:
         rl_part = await _rl_aggregate_summary(db, user_id)
         if rl_part:
             parts.append(rl_part)
+        # ความพึงพอใจล่าสุดจากคะแนนดาว (ทั้ง User ใหม่และเก่า)
+        satisfaction_line = await _last_satisfaction_line(db, user_id)
+        if satisfaction_line:
+            parts.append(satisfaction_line)
     except Exception as e:
         logger.warning(f"SelectionPreferences get_selection_preferences_summary error: {e}")
 
     return "\n".join(parts) if parts else ""
+
+
+async def _last_satisfaction_line(db, user_id: str) -> str:
+    """ความพึงพอใจล่าสุดจาก User (คะแนนดาว) — ใช้เมื่อยังมี choice น้อย เพื่อให้ AI รู้จักพฤติกรรมจาก 1–2 ทริป"""
+    try:
+        from app.services.trip_evaluations import COLLECTION_NAME
+        col = db[COLLECTION_NAME]
+        if not col:
+            return ""
+        doc = await col.find_one(
+            {"user_id": user_id, "user_stars": {"$exists": True, "$ne": None}},
+            {"user_stars": 1},
+            sort=[("updated_at", -1)],
+        )
+        if doc and doc.get("user_stars") is not None:
+            stars = doc["user_stars"]
+            return f"ความพึงพอใจล่าสุดจาก User (คะแนนดาว): {stars} ดาว — ใช้เป็นสัญญาณว่าผู้ใช้ชอบระดับไหน"
+        return ""
+    except Exception:
+        return ""
 
 
 async def _rl_aggregate_summary(db, user_id: str) -> str:

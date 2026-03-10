@@ -165,7 +165,7 @@ export default function UserProfileEditPage({
   const [showDeletePopup, setShowDeletePopup] = useState(false);
 
   // บัตรเครดิต/เดบิต (saved cards)
-  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
   const [savedCards, setSavedCards] = useState([]);
   const [primaryCardId, setPrimaryCardId] = useState(null);
   const [cardsLoading, setCardsLoading] = useState(false);
@@ -177,7 +177,7 @@ export default function UserProfileEditPage({
   useEffect(() => {
     const fetchUserData = async () => {
       try {
-        const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+        const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
         const res = await fetch(`${API_BASE_URL}/api/auth/me`, {
           credentials: 'include',
         });

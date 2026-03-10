@@ -15,6 +15,109 @@ from app.services.travel_service import TravelOrchestrator
 logger = get_logger(__name__)
 
 # -----------------------------------------------------------------------------
+# Time Preference Helpers
+# -----------------------------------------------------------------------------
+
+_TIME_RANGES = {
+    "morning":   (6, 0, 11, 59),
+    "afternoon": (12, 0, 16, 59),
+    "evening":   (17, 0, 20, 59),
+    "night":     (21, 0, 5, 59),   # wraps midnight
+}
+
+
+def _parse_preferred_time(pref: str) -> tuple:
+    """Return (range_start_minutes, range_end_minutes, midpoint_minutes) for sorting.
+    For 'night' that wraps midnight, midpoint is set to 01:00 (next day offset 25*60).
+    For exact HH:MM, midpoint is that time with a +/-90min window.
+    """
+    pref_lower = pref.strip().lower()
+    if pref_lower in _TIME_RANGES:
+        sh, sm, eh, em = _TIME_RANGES[pref_lower]
+        start_m = sh * 60 + sm
+        end_m = eh * 60 + em
+        if pref_lower == "night":
+            mid = 25 * 60  # 01:00 next-day offset for sorting
+        else:
+            mid = (start_m + end_m) // 2
+        return start_m, end_m, mid, pref_lower == "night"
+    # Exact HH:MM
+    try:
+        parts = pref_lower.replace(".", ":").split(":")
+        h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+        mid = h * 60 + m
+        return max(0, mid - 90), min(1439, mid + 90), mid, False
+    except (ValueError, IndexError):
+        return None, None, None, False
+
+
+def _get_first_departure_minutes(offer: dict) -> int:
+    """Extract first itinerary's first segment departure time as minutes since midnight."""
+    try:
+        itins = offer.get("itineraries") or []
+        if not itins:
+            return 720  # noon fallback
+        segs = itins[0].get("segments") or []
+        if not segs:
+            return 720
+        dep = segs[0].get("departure", {}).get("at", "")
+        if "T" in dep:
+            time_part = dep.split("T")[1][:5]
+            h, m = time_part.split(":")
+            return int(h) * 60 + int(m)
+    except Exception:
+        pass
+    return 720
+
+
+def _get_offer_total_price(offer: dict) -> float:
+    """Extract total price from a flight offer (Amadeus format)."""
+    try:
+        return float(offer.get("price", {}).get("total", 0))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _filter_by_price_range(results: list, min_price: int = None, max_price: int = None) -> list:
+    """Filter flight results by price range. Returns only offers within [min, max]."""
+    if not results or (min_price is None and max_price is None):
+        return results
+    filtered = []
+    for offer in results:
+        price = _get_offer_total_price(offer)
+        if price <= 0:
+            filtered.append(offer)
+            continue
+        if min_price and price < min_price:
+            continue
+        if max_price and price > max_price:
+            continue
+        filtered.append(offer)
+    return filtered
+
+
+def _filter_and_sort_by_departure_time(results: list, preferred_time: str) -> list:
+    """Sort flight results by proximity to preferred departure time.
+    Always returns all results (sorted, not removed) so user still sees options.
+    """
+    parsed = _parse_preferred_time(preferred_time)
+    if parsed[2] is None:
+        return results
+
+    start_m, end_m, mid_m, wraps = parsed
+
+    def _sort_key(offer):
+        dep_m = _get_first_departure_minutes(offer)
+        if wraps:
+            # night: 21:00-05:59, adjust times after midnight
+            adj = dep_m + 1440 if dep_m < 360 else dep_m  # <06:00 → +24h
+            return abs(adj - mid_m)
+        return abs(dep_m - mid_m)
+
+    return sorted(results, key=_sort_key)
+
+
+# -----------------------------------------------------------------------------
 # Amadeus MCP Tool Definitions (Function Calling Schema for Gemini)
 # -----------------------------------------------------------------------------
 
@@ -60,6 +163,18 @@ AMADEUS_TOOLS = [
                     "type": "boolean",
                     "description": "If true, search only for direct (non-stop) flights",
                     "default": False
+                },
+                "preferred_departure_time": {
+                    "type": "string",
+                    "description": "Preferred departure time of day: 'morning' (06:00-11:59), 'afternoon' (12:00-16:59), 'evening' (17:00-20:59), 'night' (21:00-05:59), or exact 'HH:MM' (e.g. '08:00'). Results are sorted by proximity to preferred time."
+                },
+                "min_price": {
+                    "type": "integer",
+                    "description": "Minimum price in THB. Flights below this price will be filtered out."
+                },
+                "max_price": {
+                    "type": "integer",
+                    "description": "Maximum price in THB. Passed to Amadeus maxPrice parameter for server-side filtering."
                 }
             },
             "required": ["origin", "destination", "departure_date"]
@@ -226,19 +341,61 @@ class AmadeusMCP:
 
         # non_stop can come from the schema field or legacy direct_flight alias
         non_stop = bool(params.get("non_stop")) or bool(params.get("direct_flight"))
+        return_date = params.get("return_date") or None  # round-trip (ให้ตรงกับหน้า Flight search)
+        preferred_departure_time = params.get("preferred_departure_time") or None
+        min_price = params.get("min_price")
+        max_price = params.get("max_price")
+        if min_price is not None:
+            try:
+                min_price = int(min_price)
+            except (ValueError, TypeError):
+                min_price = None
+        if max_price is not None:
+            try:
+                max_price = int(max_price)
+            except (ValueError, TypeError):
+                max_price = None
         logger.info(
             f"🔍 Searching flights: {origin} → {destination} on {departure_date} "
-            f"for {adults} adult(s), {children} child(ren), {infants} infant(s) (non_stop={non_stop})"
+            f"for {adults} adult(s), {children} child(ren), {infants} infant(s) "
+            f"(non_stop={non_stop}, return_date={return_date}, preferred_time={preferred_departure_time}, "
+            f"price_range={min_price}-{max_price})"
         )
 
         try:
-            results = await self.orchestrator.get_flights(
-                origin=origin,
-                destination=destination,
-                departure_date=departure_date,
-                adults=adults,
-                non_stop=non_stop,
-            )
+            # ✅ ค้นใหม่จนกว่าจะเจอ โดยไม่เปลี่ยนวัน: ลองซ้ำ 2 ครั้ง แล้วถ้าไม่เจอและขอบินตรงให้คลายเป็นรวมต่อเครื่อง (วันเดิม)
+            results = []
+            for attempt in range(1, 3):  # 2 ครั้ง พารามิเตอร์เดิม
+                results = await self.orchestrator.get_flights(
+                    origin=origin,
+                    destination=destination,
+                    departure_date=departure_date,
+                    adults=adults,
+                    non_stop=non_stop,
+                    children=children,
+                    infants=infants,
+                    return_date=return_date,
+                    max_price=max_price,
+                )
+                if results:
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(1.0 * attempt)
+                    logger.info(f"🔄 MCP search_flights retry {attempt}/2 same date {departure_date} (ไม่เปลี่ยนวัน)")
+            if not results and non_stop:
+                results = await self.orchestrator.get_flights(
+                    origin=origin,
+                    destination=destination,
+                    departure_date=departure_date,
+                    adults=adults,
+                    non_stop=False,
+                    children=children,
+                    infants=infants,
+                    return_date=return_date,
+                    max_price=max_price,
+                )
+                if results:
+                    logger.info(f"✅ Same date: found {len(results)} options including connections (ไม่เปลี่ยนวัน)")
             logger.info(f"📊 Amadeus API returned {len(results) if results else 0} flight results")
 
             # Filter non-stop if requested (API may still return connecting flights)
@@ -257,18 +414,32 @@ class AmadeusMCP:
                         f"(kept {len(results)} direct)"
                     )
 
+            # Time preference filtering: sort/filter results by preferred departure time
+            if results and preferred_departure_time:
+                results = _filter_and_sort_by_departure_time(results, preferred_departure_time)
+                logger.info(f"⏰ Applied time preference '{preferred_departure_time}': {len(results)} flights after sort/filter")
+
+            # Price range filtering: min_price is post-filtered (Amadeus only supports maxPrice server-side)
+            if results and (min_price or max_price):
+                before_count = len(results)
+                results = _filter_by_price_range(results, min_price=min_price, max_price=max_price)
+                removed = before_count - len(results)
+                if removed > 0:
+                    price_desc = f"{min_price or '∞'}-{max_price or '∞'} THB"
+                    logger.info(f"💰 Price range filter ({price_desc}): removed {removed}, kept {len(results)} flights")
+
             if not results:
                 try:
                     search_date = datetime.strptime(departure_date, "%Y-%m-%d")
                     today = datetime.now()
                     days_ahead = (search_date - today).days
-                    max_days = 330
+                    max_days = 335  # 11 months - รองรับการค้นหา 11 เดือนนับจากวันนี้
                     date_warning = ""
                     if days_ahead < 0:
                         date_warning = f"⚠️ Date is in the past ({-days_ahead} days ago)"
                     elif days_ahead > max_days:
                         date_warning = (
-                            f"⚠️ Date is {days_ahead} days ahead (max: {max_days} days) "
+                            f"⚠️ Date is {days_ahead} days ahead (max: 11 months) "
                             "- Amadeus may not have data yet"
                         )
                 except Exception:
@@ -354,51 +525,21 @@ class AmadeusMCP:
 
             logger.info(f"🔍 Searching hotels: {location} from {check_in} to {check_out} for {guests} guest(s)")
 
-            results = await self.orchestrator.get_hotels(
-                location_name=location,
-                check_in=check_in,
-                check_out=check_out,
-                guests=guests,
-            )
+            # ✅ ค้นใหม่จนกว่าจะเจอ โดยไม่เปลี่ยนวัน: ลองซ้ำ 3 ครั้ง (วันเดิม)
+            results = []
+            for attempt in range(1, 4):
+                results = await self.orchestrator.get_hotels(
+                    location_name=location,
+                    check_in=check_in,
+                    check_out=check_out,
+                    guests=guests,
+                )
+                if results:
+                    break
+                if attempt < 3:
+                    await asyncio.sleep(1.0 * attempt)
+                    logger.info(f"🔄 MCP search_hotels retry {attempt}/2 same dates {check_in}–{check_out} (ไม่เปลี่ยนวัน)")
             logger.info(f"📊 Amadeus API returned {len(results) if results else 0} hotel results")
-
-            # Fallback: try both ±1 day if no results
-            if not results:
-                try:
-                    check_in_dt = datetime.fromisoformat(check_in)
-                    check_out_dt = datetime.fromisoformat(check_out)
-                    fallback_dates = [
-                        (
-                            (check_in_dt + timedelta(days=-1)).strftime("%Y-%m-%d"),
-                            (check_out_dt + timedelta(days=-1)).strftime("%Y-%m-%d"),
-                        ),
-                        (
-                            (check_in_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
-                            (check_out_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
-                        ),
-                    ]
-                    for fb_check_in, fb_check_out in fallback_dates:
-                        try:
-                            fb_results = await asyncio.wait_for(
-                                self.orchestrator.get_hotels(
-                                    location_name=location,
-                                    check_in=fb_check_in,
-                                    check_out=fb_check_out,
-                                    guests=guests,
-                                ),
-                                timeout=5.0,
-                            )
-                            if fb_results:
-                                for item in fb_results:
-                                    item["_fallback_check_in"] = fb_check_in
-                                    item["_fallback_check_out"] = fb_check_out
-                                results = fb_results
-                                logger.info(f"Hotel fallback succeeded with dates {fb_check_in} – {fb_check_out}")
-                                break
-                        except Exception as fb_err:
-                            logger.warning(f"Hotel fallback {fb_check_in} failed: {fb_err}")
-                except Exception as e:
-                    logger.warning(f"Hotel fallback search failed: {e}")
 
             if not results:
                 date_warning = ""
@@ -407,8 +548,8 @@ class AmadeusMCP:
                     days_ahead = (check_in_dt - datetime.now()).days
                     if days_ahead < 0:
                         date_warning = "⚠️ Check-in date is in the past"
-                    elif days_ahead > 330:
-                        date_warning = f"⚠️ Check-in date is {days_ahead} days ahead - Amadeus may not have data"
+                    elif days_ahead > 335:  # 11 months
+                        date_warning = f"⚠️ Check-in date is {days_ahead} days ahead (max: 11 months) - Amadeus may not have data"
                 except Exception:
                     pass
                 return {

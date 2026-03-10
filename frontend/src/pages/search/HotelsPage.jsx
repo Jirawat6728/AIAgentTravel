@@ -5,6 +5,7 @@ import { useTheme } from '../../context/ThemeContext';
 import { useFontSize } from '../../context/FontSizeContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { formatPriceInThb } from '../../utils/currency';
+import Swal from 'sweetalert2';
 import './HotelsPage.css';
 
 const GUESTS_PANEL_WIDTH = 260;
@@ -89,26 +90,26 @@ export default function HotelsPage({ user, onLogout, onSignIn, onNavigateToBooki
     e.preventDefault();
     const loc = (location || '').trim();
     if (!loc) {
-      alert(t('hotels.errFillAll'));
+      Swal.fire({ icon: 'warning', text: t('hotels.errFillAll'), toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
     if (!checkIn || !checkOut) {
-      alert(t('hotels.errFillAll'));
+      Swal.fire({ icon: 'warning', text: t('hotels.errFillAll'), toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
     if (checkOut <= checkIn) {
-      alert(t('hotels.errCheckOutAfter'));
+      Swal.fire({ icon: 'warning', text: t('hotels.errCheckOutAfter'), toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
     if (checkIn < todayStr) {
-      alert(t('flights.errPastDate') || 'กรุณาเลือกวันเช็คอินที่ไม่ใช่อดีต');
+      Swal.fire({ icon: 'warning', text: t('flights.errPastDate') || 'กรุณาเลือกวันเช็คอินที่ไม่ใช่อดีต', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
     setHasSearched(true);
     setIsLoading(true);
     setError(null);
     try {
-      const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+      const baseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
       const params = new URLSearchParams({
         location: loc,
         check_in: checkIn,

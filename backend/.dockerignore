@@ -1,70 +1,35 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-*.egg-info/
-dist/
-build/
-*.egg
-
-# Virtual environments
-venv/
-env/
-ENV/
+# Virtual env
 .venv
+venv
+env
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# Python
+__pycache__
+*.py[cod]
+*.pyo
+.pytest_cache
+.mypy_cache
+*.egg-info
+.eggs
 
-# Environment files (keep env.example for reference)
+# Env & secrets
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
-# Logs
-*.log
-logs/
-*.log.*
-
-# Data directories (will be mounted as volumes)
+# Data & logs (mount at runtime)
 data/
-sessions/
-*.db
-*.sqlite
+logs/
+*.log
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-test_*.py
-*_test.py
-tests/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Git
-.git/
+# Git & IDE
+.git
 .gitignore
-
-# Documentation (not needed in container)
+.cursor
+.vscode
 *.md
-docs/
-DOCKER_README.md
 
-# Temporary files
-*.tmp
-*.bak
-*.swp
-
-# Docker files (not needed inside container)
-docker-compose.yml
+# Docker
+Dockerfile*
+docker-compose*
 .dockerignore

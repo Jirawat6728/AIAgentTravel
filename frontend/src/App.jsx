@@ -21,7 +21,7 @@ import { LanguageProvider } from "./context/LanguageContext.jsx";
 import { FontSizeProvider } from "./context/FontSizeContext.jsx";
 import Swal from "sweetalert2";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
 const FIREBASE_ENABLED = true; // ใช้ Firebase Email Verification เสมอ
 
@@ -416,6 +416,10 @@ function App() {
   const refreshMe = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE_URL}/api/auth/me`, { credentials: "include" });
+      if (res.status === 504) {
+        // Gateway timeout (e.g. backend cold start) — keep current state, don't clear session
+        return;
+      }
       const data = await res.json();
       if (data?.user) {
         // ✅ SECURITY: Check if user changed and clear ALL data if needed
@@ -457,8 +461,11 @@ function App() {
         }
       }
     } catch (e) {
-      // If backend is down or CORS fails, keep local state if available
-      // This allows offline usage with cached data
+      // If backend is down (ERR_CONNECTION_REFUSED) or CORS fails, keep local state if available
+      const isNetworkError = e?.name === "TypeError" && (e?.message === "Failed to fetch" || String(e?.message).includes("fetch"));
+      if (isNetworkError) {
+        console.warn("Backend unreachable at", API_BASE_URL, "— using cached login state if any. Start the backend (e.g. port 8000) to verify session.");
+      }
       const savedIsLoggedIn = localStorage.getItem("is_logged_in") === "true";
       if (!savedIsLoggedIn) {
         setIsLoggedIn(false);
@@ -466,15 +473,13 @@ function App() {
         localStorage.removeItem("is_logged_in");
         localStorage.removeItem("user_data");
         localStorage.removeItem("session_timestamp");
-        // Allow public views to stay when not logged in
         const currentView = getViewFromPath();
         const publicViews = ['home', 'login', 'register', 'reset-password', 'verify-email-change'];
         if (!publicViews.includes(currentView)) {
           navigateToView("home");
         }
       }
-      // If we have saved state, keep it (user might be offline)
-      // The next refreshMe() call will verify the session when backend is available
+      // If we have saved state, keep it (user might be offline); next refreshMe() will verify when backend is available
     } finally {
       setIsAuthChecking(false);
     }

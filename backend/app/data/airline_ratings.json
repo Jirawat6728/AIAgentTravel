@@ -1,0 +1,23 @@
+{
+  "_comment": "คะแนนรีวิวสายการบินจากแหล่งเว็บ (Skytrax, TripAdvisor, Google ฯลฯ) ใช้เป็นส่วนหนึ่งของ weight ให้ AI เลือก — อัปเดตได้โดยไม่ต้องเชื่อม API",
+  "TG": { "rating": 4.2, "review_count": 1200 },
+  "AAV": { "rating": 3.9, "review_count": 800 },
+  "FD": { "rating": 4.0, "review_count": 2500 },
+  "VZ": { "rating": 3.8, "review_count": 600 },
+  "XJ": { "rating": 4.1, "review_count": 900 },
+  "SL": { "rating": 3.7, "review_count": 400 },
+  "SQ": { "rating": 4.6, "review_count": 3500 },
+  "CX": { "rating": 4.5, "review_count": 2800 },
+  "NH": { "rating": 4.5, "review_count": 2200 },
+  "JL": { "rating": 4.4, "review_count": 2000 },
+  "EK": { "rating": 4.5, "review_count": 4200 },
+  "QR": { "rating": 4.4, "review_count": 3000 },
+  "BA": { "rating": 4.0, "review_count": 3800 },
+  "LH": { "rating": 4.2, "review_count": 3200 },
+  "AF": { "rating": 4.0, "review_count": 2900 },
+  "KE": { "rating": 4.3, "review_count": 2400 },
+  "OZ": { "rating": 4.2, "review_count": 1100 },
+  "CA": { "rating": 4.1, "review_count": 1800 },
+  "CZ": { "rating": 4.0, "review_count": 1500 },
+  "MU": { "rating": 3.9, "review_count": 1200 }
+}

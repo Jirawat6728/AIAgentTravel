@@ -926,35 +926,43 @@ class TravelAgent:
                                 ) if s.options_pool
                             ):
                                 session.booking_funnel_state = "confirming_booking"
-                        # ✅ Agent Mode: NEVER ASK_USER - always infer intelligently
+                        # ✅ Agent Mode: allow ASK_USER when plan from zero and we don't know user; else infer
                         else:
-                            logger.info(f"Agent Mode: Controller suggested ASK_USER, but Agent Mode NEVER asks - inferring intelligently instead")
-                            # Don't set has_ask_user - continue with intelligent inference
-                            # Agent should create itinerary with smart defaults
-                            if not session.trip_plan or not any([
+                            _plan_empty_here = not any([
                                 session.trip_plan.travel.flights.outbound,
                                 session.trip_plan.travel.flights.inbound,
-                                session.trip_plan.accommodation.segments
-                            ]):
-                                # Only if no plan exists, create one with intelligent defaults
-                                try:
-                                    if status_callback:
-                                        await status_callback("acting", "🧠 Agent กำลังใช้ AI วิเคราะห์และสร้างแผนการเดินทางด้วยตัวเอง...", "agent_intelligent_inference")
-                                    # Create itinerary with intelligent defaults
-                                    intelligent_payload = {
-                                        "destination": payload.get("destination") or user_input or "Bangkok",  # Parse from input or default
-                                        "start_date": payload.get("start_date") or (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d"),
-                                        "end_date": payload.get("end_date") or (datetime.now() + timedelta(days=4)).strftime("%Y-%m-%d"),
-                                        "travel_mode": payload.get("travel_mode") or "both",
-                                        "trip_type": payload.get("trip_type") or "round_trip",
-                                        "guests": payload.get("guests") or 1,
-                                        "origin": payload.get("origin") or "Bangkok",
-                                        "focus": ["flights", "hotels", "transfers"]
-                                    }
-                                    await self._execute_create_itinerary(session, intelligent_payload, action_log, user_input)
-                                except Exception as e:
-                                    logger.error(f"Agent Mode: Error in intelligent inference: {e}", exc_info=True)
-                            continue  # Skip ASK_USER in Agent Mode
+                                session.trip_plan.accommodation.segments,
+                                session.trip_plan.travel.ground_transport,
+                            ])
+                            _prefs = getattr(session, "travel_preferences", None) or {}
+                            _agent_can_plan = (
+                                (memory_context and len(memory_context.strip()) > 50)
+                                or (user_profile_context and len(user_profile_context.strip()) > 30)
+                                or (_prefs and len(str(_prefs)) > 10)
+                            )
+                            if _plan_empty_here and not _agent_can_plan:
+                                has_ask_user = True
+                                logger.info("Agent Mode: Allowing ASK_USER (plan from zero without enough user context)")
+                            else:
+                                logger.info(f"Agent Mode: Controller suggested ASK_USER - inferring intelligently (we know user or plan exists)")
+                                if _plan_empty_here:
+                                    try:
+                                        if status_callback:
+                                            await status_callback("acting", "🧠 Agent กำลังใช้ AI วิเคราะห์และสร้างแผนการเดินทางด้วยตัวเอง...", "agent_intelligent_inference")
+                                        intelligent_payload = {
+                                            "destination": payload.get("destination") or user_input or "Bangkok",
+                                            "start_date": payload.get("start_date") or (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d"),
+                                            "end_date": payload.get("end_date") or (datetime.now() + timedelta(days=4)).strftime("%Y-%m-%d"),
+                                            "travel_mode": payload.get("travel_mode") or "both",
+                                            "trip_type": payload.get("trip_type") or "round_trip",
+                                            "guests": payload.get("guests") or 1,
+                                            "origin": payload.get("origin") or "Bangkok",
+                                            "focus": ["flights", "hotels", "transfers"]
+                                        }
+                                        await self._execute_create_itinerary(session, intelligent_payload, action_log, user_input)
+                                    except Exception as e:
+                                        logger.error(f"Agent Mode: Error in intelligent inference: {e}", exc_info=True)
+                            continue
                     
                     elif act_type == ActionType.CREATE_ITINERARY:
                         if status_callback:
@@ -1440,10 +1448,20 @@ class TravelAgent:
                 _plan_empty = (len(_out) == 0 and len(_inb) == 0 and len(_acc) == 0 and len(_ground) == 0)
             except (json.JSONDecodeError, TypeError):
                 pass
+            # ✅ วางแผนตั้งแต่ 0 ใน Agent: ได้เฉพาะเมื่อ AI รู้จัก user (memory/profile/preferences) พอ
+            travel_prefs = kwargs.get("travel_preferences") or {}
+            agent_can_plan_from_zero = (
+                (memory_context and len(memory_context.strip()) > 50)
+                or (user_profile_context and len(user_profile_context.strip()) > 30)
+                or (travel_prefs and len(str(travel_prefs)) > 10)
+            )
             _empty_hint = ""
             if _plan_empty:
                 if mode == "agent":
-                    _empty_hint = "\n⚠️ CURRENT STATE IS EMPTY (no segments). User is starting from zero. AGENT MODE: Your FIRST action MUST be CREATE_ITINERARY with destination/dates inferred from user input or intelligent defaults (origin=Bangkok, next weekend/tomorrow, guests=1). Never ASK_USER in Agent Mode.\n"
+                    if not agent_can_plan_from_zero:
+                        _empty_hint = "\n⚠️ CURRENT STATE IS EMPTY (no segments). AGENT MODE but we do NOT have enough user context (memory/profile/preferences). You MUST output ASK_USER to ask for destination and dates (e.g. อยากไปที่ไหน วันไหนบ้างคะ). Do NOT output CREATE_ITINERARY.\n"
+                    else:
+                        _empty_hint = "\n⚠️ CURRENT STATE IS EMPTY (no segments). User is starting from zero. AGENT MODE: We know the user — your FIRST action MUST be CREATE_ITINERARY with destination/dates inferred from user input, memory, or intelligent defaults (origin=Bangkok, next weekend/tomorrow, guests=1). Never ASK_USER in Agent Mode when we have user context.\n"
                 else:
                     _empty_hint = "\n⚠️ CURRENT STATE IS EMPTY (no segments). User is starting from zero. Your FIRST action MUST be CREATE_ITINERARY (with destination/dates from user or defaults) or ASK_USER to ask for destination/dates only.\n"
             prompt_parts.extend([
@@ -1747,30 +1765,32 @@ class TravelAgent:
             # Validate and create ControllerAction
             action = ControllerAction(**data)
             
-            # ✅ Agent Mode: ALWAYS override ASK_USER - never ask user in Agent Mode
+            # ✅ Agent Mode: override ASK_USER → CREATE_ITINERARY only when we know user or plan not empty (วางแผนตั้งแต่ 0 ใน Agent ได้เมื่อรู้จัก user)
             if mode == "agent" and action.action == ActionType.ASK_USER:
-                logger.info("Agent Mode: Overriding ASK_USER - Agent Mode never asks user, inferring everything automatically")
-                # Always create itinerary with intelligent defaults
-                action = ControllerAction(
-                    thought="Agent Mode: Overriding ASK_USER - inferring all missing information automatically",
-                    action=ActionType.CREATE_ITINERARY,
-                    payload={
-                        "destination": user_input or "Bangkok",  # Parse from input or default
-                        "start_date": (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d"),  # Tomorrow
-                        "end_date": (datetime.now() + timedelta(days=4)).strftime("%Y-%m-%d"),  # 3 nights
-                        "guests": 1,  # Default: 1 ผู้ใหญ่ (ผู้จองหลัก)
-                        "origin": "Bangkok",  # Default
-                        "travel_mode": "both",
-                        "trip_type": "round_trip",
-                        "focus": ["flights", "hotels", "transfers"]
-                    }
-                )
-                # Log override
-                action_log.add_action(
-                    "OVERRIDE_ASK_USER_TO_CREATE",
-                    action.payload,
-                    "Agent Mode: Forced CREATE_ITINERARY with intelligent defaults (never ask user)"
-                )
+                if _plan_empty and not agent_can_plan_from_zero:
+                    logger.info("Agent Mode: Keeping ASK_USER — plan from zero without enough user context (will ask destination/dates)")
+                    # Do not override; let ASK_USER pass through
+                else:
+                    logger.info("Agent Mode: Overriding ASK_USER - inferring everything automatically (we know user or plan exists)")
+                    action = ControllerAction(
+                        thought="Agent Mode: Overriding ASK_USER - inferring all missing information automatically",
+                        action=ActionType.CREATE_ITINERARY,
+                        payload={
+                            "destination": user_input or "Bangkok",
+                            "start_date": (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d"),
+                            "end_date": (datetime.now() + timedelta(days=4)).strftime("%Y-%m-%d"),
+                            "guests": 1,
+                            "origin": "Bangkok",
+                            "travel_mode": "both",
+                            "trip_type": "round_trip",
+                            "focus": ["flights", "hotels", "transfers"]
+                        }
+                    )
+                    action_log.add_action(
+                        "OVERRIDE_ASK_USER_TO_CREATE",
+                        action.payload,
+                        "Agent Mode: Forced CREATE_ITINERARY with intelligent defaults (know user or plan exists)"
+                    )
             
             return action
         
@@ -1845,6 +1865,9 @@ class TravelAgent:
         guests = adults + children  # total for segment requirements
         origin = (payload.get("origin") or "Bangkok").strip() or "Bangkok"
         budget = payload.get("budget")
+        preferred_departure_time = payload.get("preferred_departure_time")
+        min_price = payload.get("min_price")
+        max_price_explicit = payload.get("max_price")
         focus = payload.get("focus")
         if not isinstance(focus, list):
             focus = ["flights", "hotels", "transfers"]
@@ -1911,6 +1934,48 @@ class TravelAgent:
                     logger.info(f"✅ Calculated end_date from {days} days: {start_date} + {days} days = {end_date}")
             except (ValueError, TypeError) as e:
                 logger.warning(f"Could not infer end_date from days/nights: {e}")
+        
+        # 🌸 ฤดูกาล/เทศกาล/อีเวนต์: ถ้ามี season หรือ event แต่ยังไม่มีวันที่ → ใช้ Gemini หาช่วงวันที่และสถานที่จริง
+        if (payload.get("season") or payload.get("event")) and (not start_date or not end_date):
+            try:
+                resolved = await self._resolve_season_event_via_gemini(
+                    season=payload.get("season"),
+                    event_name=payload.get("event"),
+                    destination=destination,
+                    year=datetime.now().year,
+                )
+                if resolved:
+                    if resolved.get("start_date"):
+                        start_date = resolved["start_date"]
+                        logger.info(f"✅ Resolved start_date from season/event: {start_date}")
+                    if resolved.get("end_date"):
+                        end_date = resolved["end_date"]
+                        logger.info(f"✅ Resolved end_date from season/event: {end_date}")
+                    if resolved.get("suggested_destination") and (not destination or (destination or "").strip().lower() in ("ญี่ปุ่น", "japan", "thailand", "ไทย", "เกาหลี", "korea")):
+                        destination = resolved["suggested_destination"]
+                        logger.info(f"✅ Resolved destination from season/event: {destination}")
+                    if resolved.get("description"):
+                        payload["_resolved_description"] = resolved["description"]
+            except Exception as e:
+                logger.warning(f"Season/event resolve in CREATE_ITINERARY failed (non-fatal): {e}")
+        
+        # 🎯 กิจกรรม: ถ้ามี activities ใน payload และมี destination → ใช้ Gemini ค้นหากิจกรรม/งานจริงที่ปลายทาง
+        if payload.get("activities") and destination:
+            try:
+                activities_list = payload.get("activities")
+                if isinstance(activities_list, str):
+                    activities_list = [activities_list]
+                resolved_activities = await self._resolve_activities_via_gemini(
+                    destination=destination,
+                    activities_interests=activities_list,
+                    season=payload.get("season"),
+                    event_name=payload.get("event"),
+                )
+                if resolved_activities:
+                    payload["_resolved_activities"] = resolved_activities
+                    logger.info(f"Resolved {len(resolved_activities)} real activities for {destination}")
+            except Exception as e:
+                logger.warning(f"Activities resolve in CREATE_ITINERARY failed (non-fatal): {e}")
         
         # 🧠 Intelligence Layer: Input Validation
         validation_warnings = []
@@ -2164,60 +2229,105 @@ class TravelAgent:
 
         # 1. Setup Flights (only if in focus and mode is flight/both)
         if "flights" in focus and travel_mode in [TravelMode.FLIGHT_ONLY, TravelMode.BOTH]:
-            # ✅ Use airport IATA codes from route planning if available
-            flight_origin_code = origin_airport_iata or origin
-            flight_dest_code = dest_airport_iata or flight_destination
-            
-            # Outbound (use airport IATA codes from route planning)
-            outbound = Segment()
-            outbound.requirements = {
-                "origin": flight_origin_code,
-                "destination": flight_dest_code,
-                "departure_date": self._normalize_date(start_date),
-                "adults": adults,
-                "children": children,
-                "guests": guests,
-            }
-            # ✅ Store route planning results in requirements
-            if route_plan:
-                outbound.requirements["_route_plan"] = {
-                    "distance_km": route_plan.get("distance_km"),
-                    "recommended_transportation": recommended_transport,
-                    "origin_airport": origin_airport_iata,
-                    "dest_airport": dest_airport_iata
-                }
-            if budget:
-                outbound.requirements["max_price"] = budget
-            # ✅ บินตรง: ใส่ direct_flight ใน requirements เมื่อผู้ใช้ขอ "บินตรง" / direct / nonstop
-            if payload.get("direct_flight") is True or payload.get("non_stop") is True:
-                outbound.requirements["direct_flight"] = True
-            session.trip_plan.travel.flights.outbound.append(outbound)
-            
-            # Return (Default behavior: Always add return flight unless explicitly one_way OR no end_date)
-            if trip_type == "round_trip" and end_date:
-                return_flight = Segment()
-                return_flight.requirements = {
-                    "origin": flight_dest_code,  # Use airport IATA from route planning
-                    "destination": flight_origin_code,  # Use airport IATA from route planning
-                    "departure_date": self._normalize_date(end_date),
+            flight_legs = payload.get("flight_legs")
+            if isinstance(flight_legs, list) and len(flight_legs) > 0:
+                # ✅ Multi-city: one segment per leg. Last leg returning to first origin → inbound; rest → outbound.
+                first_origin = None
+                for i, leg in enumerate(flight_legs):
+                    o = (leg.get("origin") or "").strip()
+                    d = (leg.get("destination") or "").strip()
+                    dt = leg.get("departure_date") or leg.get("date")
+                    if not o or not d or not dt:
+                        continue
+                    if first_origin is None:
+                        first_origin = o
+                    seg = Segment()
+                    seg.requirements = {
+                        "origin": o,
+                        "destination": d,
+                        "departure_date": self._normalize_date(dt),
+                        "adults": adults,
+                        "children": children,
+                        "guests": guests,
+                    }
+                    if max_price_explicit:
+                        seg.requirements["max_price"] = max_price_explicit
+                    elif budget:
+                        seg.requirements["max_price"] = budget
+                    if min_price:
+                        seg.requirements["min_price"] = min_price
+                    if payload.get("direct_flight") is True or payload.get("non_stop") is True:
+                        seg.requirements["direct_flight"] = True
+                    if preferred_departure_time:
+                        seg.requirements["preferred_departure_time"] = preferred_departure_time
+                    # Last leg that returns to first origin → inbound
+                    is_return_home = (i == len(flight_legs) - 1) and (d == first_origin or (first_origin and d.upper() == first_origin.upper()))
+                    if is_return_home:
+                        session.trip_plan.travel.flights.inbound.append(seg)
+                    else:
+                        session.trip_plan.travel.flights.outbound.append(seg)
+                logger.info(f"CREATE_ITINERARY: multi-city {len(flight_legs)} legs → outbound={len(session.trip_plan.travel.flights.outbound)}, inbound={len(session.trip_plan.travel.flights.inbound)}")
+            else:
+                # ✅ Single destination (or round-trip): one outbound, optional one inbound
+                flight_origin_code = origin_airport_iata or origin
+                flight_dest_code = dest_airport_iata or flight_destination
+
+                outbound = Segment()
+                outbound.requirements = {
+                    "origin": flight_origin_code,
+                    "destination": flight_dest_code,
+                    "departure_date": self._normalize_date(start_date),
                     "adults": adults,
                     "children": children,
                     "guests": guests,
                 }
-                # ✅ Store route planning results in requirements
                 if route_plan:
-                    return_flight.requirements["_route_plan"] = {
+                    outbound.requirements["_route_plan"] = {
                         "distance_km": route_plan.get("distance_km"),
                         "recommended_transportation": recommended_transport,
-                        "origin_airport": dest_airport_iata,
-                        "dest_airport": origin_airport_iata
+                        "origin_airport": origin_airport_iata,
+                        "dest_airport": dest_airport_iata
                     }
-                if budget:
-                    return_flight.requirements["max_price"] = budget
-                # ✅ บินตรง: ใส่ direct_flight ใน requirements เมื่อผู้ใช้ขอ "บินตรง" / direct / nonstop
+                if max_price_explicit:
+                    outbound.requirements["max_price"] = max_price_explicit
+                elif budget:
+                    outbound.requirements["max_price"] = budget
+                if min_price:
+                    outbound.requirements["min_price"] = min_price
                 if payload.get("direct_flight") is True or payload.get("non_stop") is True:
-                    return_flight.requirements["direct_flight"] = True
-                session.trip_plan.travel.flights.inbound.append(return_flight)
+                    outbound.requirements["direct_flight"] = True
+                if preferred_departure_time:
+                    outbound.requirements["preferred_departure_time"] = preferred_departure_time
+                session.trip_plan.travel.flights.outbound.append(outbound)
+
+                if trip_type == "round_trip" and end_date:
+                    return_flight = Segment()
+                    return_flight.requirements = {
+                        "origin": flight_dest_code,
+                        "destination": flight_origin_code,
+                        "departure_date": self._normalize_date(end_date),
+                        "adults": adults,
+                        "children": children,
+                        "guests": guests,
+                    }
+                    if route_plan:
+                        return_flight.requirements["_route_plan"] = {
+                            "distance_km": route_plan.get("distance_km"),
+                            "recommended_transportation": recommended_transport,
+                            "origin_airport": dest_airport_iata,
+                            "dest_airport": origin_airport_iata
+                        }
+                    if max_price_explicit:
+                        return_flight.requirements["max_price"] = max_price_explicit
+                    elif budget:
+                        return_flight.requirements["max_price"] = budget
+                    if min_price:
+                        return_flight.requirements["min_price"] = min_price
+                    if payload.get("direct_flight") is True or payload.get("non_stop") is True:
+                        return_flight.requirements["direct_flight"] = True
+                    if preferred_departure_time:
+                        return_flight.requirements["preferred_departure_time"] = preferred_departure_time
+                    session.trip_plan.travel.flights.inbound.append(return_flight)
 
         # 2. Setup Accommodation (only if in focus: hotels or rentals ที่พักให้เช่า)
         if "hotels" in focus or "rentals" in focus:
@@ -2286,8 +2396,12 @@ class TravelAgent:
                                 "adults": adults,
                                 "children": children,
                             }
-                            if budget:
+                            if max_price_explicit:
+                                acc_segment.requirements["max_price"] = max_price_explicit
+                            elif budget:
                                 acc_segment.requirements["max_price"] = budget
+                            if min_price:
+                                acc_segment.requirements["min_price"] = min_price
                             session.trip_plan.accommodation.segments.append(acc_segment)
                             
                             current_check_in = check_out
@@ -2316,6 +2430,14 @@ class TravelAgent:
                         "children": children,
                     }
                     session.trip_plan.accommodation.segments.append(acc_segment)
+        # ✅ ใส่กิจกรรมจริงจาก Gemini เป็น attractions ของที่พัก segment แรก (ให้ค้นที่พักใกล้กิจกรรม)
+        if payload.get("_resolved_activities") and session.trip_plan.accommodation.segments:
+            first_acc = session.trip_plan.accommodation.segments[0]
+            names = [a.get("name") for a in payload["_resolved_activities"][:6] if a.get("name")]
+            if names:
+                first_acc.requirements["attractions"] = names
+                first_acc.requirements["near_attractions"] = names
+                logger.info(f"Set accommodation attractions from resolved activities: {names[:3]}...")
         
         # 3. Setup Ground Transport (if in focus) - 🧠 ENHANCED: Logical ordering + plan_through legs
         if "transfers" in focus:
@@ -2422,6 +2544,34 @@ class TravelAgent:
                     iata = await self._city_to_iata(seg.requirements["destination"])
                     if iata: seg.requirements["destination"] = iata
 
+        # ✅ เก็บปัจจัยการวางแผนแบบครอบคลุม (ฤดูกาล อีเวนต์ กิจกรรม ข้อจำกัด สไตล์) สำหรับ Responder / คำแนะนำ
+        plan_ctx = {}
+        if payload.get("season"):
+            plan_ctx["season"] = payload.get("season")
+        if payload.get("event"):
+            plan_ctx["event"] = payload.get("event")
+        if payload.get("_resolved_description"):
+            plan_ctx["resolved_description"] = payload.get("_resolved_description")
+        if payload.get("activities"):
+            plan_ctx["activities"] = payload["activities"] if isinstance(payload["activities"], list) else [payload["activities"]]
+        if payload.get("_resolved_activities"):
+            plan_ctx["resolved_activities"] = payload["_resolved_activities"]
+        if payload.get("accommodation_preferences") and isinstance(payload["accommodation_preferences"], dict):
+            plan_ctx["accommodation_preferences"] = payload["accommodation_preferences"]
+        if payload.get("constraints") and isinstance(payload["constraints"], dict):
+            plan_ctx["constraints"] = payload["constraints"]
+        if payload.get("travel_style"):
+            plan_ctx["travel_style"] = payload.get("travel_style")
+        if preferred_departure_time:
+            plan_ctx["preferred_departure_time"] = preferred_departure_time
+        if min_price:
+            plan_ctx["min_price"] = min_price
+        if max_price_explicit:
+            plan_ctx["max_price"] = max_price_explicit
+        if plan_ctx:
+            session.trip_plan.plan_context = plan_ctx
+            logger.info(f"CREATE_ITINERARY: plan_context set: {list(plan_ctx.keys())}")
+
         action_log.add_action(
             "CREATE_ITINERARY",
             payload,
@@ -2479,6 +2629,8 @@ class TravelAgent:
             "origin", "destination", "location",
             "date", "departure_date", "check_in", "check_out",
             "direct_flight", "non_stop",  # บินตรง → ต้องค้นใหม่เฉพาะเที่ยวบินตรง
+            "preferred_departure_time",  # เปลี่ยนช่วงเวลา → ต้อง re-sort ผลลัพธ์ใหม่
+            "min_price", "max_price",  # เปลี่ยนช่วงราคา → ต้องค้นใหม่/กรองใหม่
         ]
         
         should_clear = clear_existing
@@ -2801,6 +2953,120 @@ class TravelAgent:
         else:
             out["waypoints"] = []
         return out
+
+    async def _resolve_season_event_via_gemini(
+        self,
+        season: Optional[str] = None,
+        event_name: Optional[str] = None,
+        destination: Optional[str] = None,
+        year: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        ใช้ Gemini หาข้อมูลจริง: ช่วงวันที่และสถานที่ของฤดูกาล/เทศกาล/อีเวนต์
+        Returns: { "start_date", "end_date", "suggested_destination", "description" }
+        """
+        if not season and not event_name:
+            return {}
+        year = year or datetime.now().year
+        prompt = f"""You are a travel expert. Given the following, return REAL dates and location for trip planning.
+Use the current or next occurrence for year {year}. Answer in JSON only, no markdown.
+
+Input:
+- season: {season or 'not specified'}
+- event/festival: {event_name or 'not specified'}
+- destination/region (hint): {destination or 'not specified'}
+
+Output JSON with exactly these keys (use YYYY-MM-DD for dates):
+- "start_date": first day of the season or event (YYYY-MM-DD)
+- "end_date": last day of the season or event (YYYY-MM-DD)
+- "suggested_destination": city or region name where this season/event takes place (e.g. "Tokyo" for cherry blossom Japan, "Bangkok" for Songkran)
+- "description": one short sentence in Thai describing the season/event (e.g. "ช่วงซากุระบานญี่ปุ่น")
+
+Examples: Songkran in Thailand → start_date 13 April, end_date 15 April, suggested_destination Bangkok or Chiang Mai.
+Cherry blossom Japan → start_date late March, end_date early April, suggested_destination Tokyo or Kyoto.
+"""
+        system = "You are a travel expert. Output valid JSON only with keys: start_date, end_date, suggested_destination, description. Use YYYY-MM-DD for dates."
+        try:
+            if self.production_llm:
+                result = await self.production_llm.intelligence_generate(prompt=prompt, system_prompt=system)
+            else:
+                result = await self.llm.generate_json(prompt=prompt, system_prompt=system, temperature=0.2, context="season_event_resolve")
+            if not result or not isinstance(result, dict):
+                return {}
+            out = {}
+            if result.get("start_date"):
+                out["start_date"] = self._normalize_date(str(result["start_date"]))
+            if result.get("end_date"):
+                out["end_date"] = self._normalize_date(str(result["end_date"]))
+            if result.get("suggested_destination"):
+                out["suggested_destination"] = str(result["suggested_destination"]).strip()
+            if result.get("description"):
+                out["description"] = str(result["description"]).strip()
+            if out:
+                logger.info(f"Gemini season/event resolve: {out}")
+            return out
+        except Exception as e:
+            logger.warning(f"Season/event resolve via Gemini failed: {e}", exc_info=True)
+            return {}
+
+    async def _resolve_activities_via_gemini(
+        self,
+        destination: str,
+        activities_interests: Optional[List[str]] = None,
+        season: Optional[str] = None,
+        event_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        ใช้ Gemini ค้นหากิจกรรม/งานจริงที่ปลายทาง ตามความสนใจของผู้ใช้
+        Returns: [ {"name": str, "description": str, "category": str}, ... ]
+        """
+        if not destination or not (destination or "").strip():
+            return []
+        interests = activities_interests or []
+        if isinstance(interests, str):
+            interests = [interests]
+        prompt = f"""You are a travel expert. Find REAL activities, events, and things to do at the destination for trip planning.
+Return a JSON array of 5-8 real activities/events. Each item must have: "name" (Thai or English), "description" (one short sentence in Thai), "category" (e.g. ธรรมชาติ, อาหาร, ช้อปปิ้ง, ประวัติศาสตร์, ศิลปะ, อีเวนต์).
+
+Input:
+- destination: {destination}
+- user interests (prioritize these): {interests if interests else 'general sightseeing and experiences'}
+- season (if relevant): {season or 'not specified'}
+- event/festival (if relevant): {event_name or 'not specified'}
+
+Output: JSON array only, no markdown. Example:
+[ {{"name": "ชมซากุระที่สวนอูเอโนะ", "description": "สวนสาธารณะชื่อดังช่วงฤดูซากุระ มีนาคม-เมษายน", "category": "ธรรมชาติ"}}, {{"name": "คลาสทำซูชิ", "description": "เรียนทำซูชิกับเชฟท้องถิ่น ครึ่งวัน", "category": "อาหาร"}} ]
+"""
+        system = "You are a travel expert. Output a valid JSON array of activities. Each object has keys: name, description, category. Use Thai for description when possible."
+        try:
+            if self.production_llm:
+                result = await self.production_llm.intelligence_generate(prompt=prompt, system_prompt=system)
+            else:
+                result = await self.llm.generate_json(prompt=prompt, system_prompt=system, temperature=0.3, context="activities_resolve")
+            if not result:
+                return []
+            # Result might be dict with "activities" key or the array itself
+            arr = result.get("activities") if isinstance(result, dict) else result
+            if not isinstance(arr, list):
+                return []
+            out = []
+            for item in arr:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name") or item.get("title")
+                if not name:
+                    continue
+                out.append({
+                    "name": str(name).strip(),
+                    "description": str(item.get("description") or "").strip(),
+                    "category": str(item.get("category") or "").strip(),
+                })
+            if out:
+                logger.info(f"Gemini activities resolve: {len(out)} activities for {destination}")
+            return out[:10]
+        except Exception as e:
+            logger.warning(f"Activities resolve via Gemini failed: {e}", exc_info=True)
+            return []
     
     def _normalize_date(self, date_str: str) -> str:
         """
@@ -3026,23 +3292,40 @@ class TravelAgent:
                     if self.mcp_executor:
                         try:
                             if "flight" in slot_name:
-                                # Use Amadeus MCP search_flights
+                                # Use Amadeus MCP search_flights (ให้ตรงกับ Flight search)
                                 logger.info(f"🔍 Using Amadeus MCP search_flights for {slot_name}[{segment_index}]")
                                 # ✅ ส่ง non_stop เมื่อผู้ใช้ขอ "บินตรง" / direct / nonstop
                                 non_stop = req.get("direct_flight") is True or req.get("non_stop") is True
+                                return_date = req.get("return_date")
+                                # ถ้าบอกแค่ขาไป (เที่ยวเดียว) แผนจะไม่มี inbound → return_date เป็น None → ค้นเที่ยวเดียว. ถ้ามีไป-กลับ จะส่ง return_date ให้ Amadeus คืน round-trip
+                                if not return_date and "inbound" not in slot_name:
+                                    inbound_segs = session.trip_plan.travel.flights.inbound
+                                    if inbound_segs:
+                                        inv_req = inbound_segs[0].requirements
+                                        return_date = inv_req.get("departure_date") or inv_req.get("date")
+                                        if return_date:
+                                            logger.info(f"✅ Passing return_date={return_date} for round-trip (align with Flight search)")
+                                            req["return_date"] = return_date
+                                search_params = {
+                                    "origin": req.get("origin"),
+                                    "destination": req.get("destination"),
+                                    "departure_date": req.get("departure_date") or req.get("date"),
+                                    "adults": req.get("adults") or req.get("guests", 1),
+                                    "children": req.get("children", 0),
+                                    "infants": req.get("infants", 0),
+                                    "return_date": return_date,
+                                    "non_stop": non_stop,
+                                }
+                                if req.get("preferred_departure_time"):
+                                    search_params["preferred_departure_time"] = req["preferred_departure_time"]
+                                if req.get("min_price"):
+                                    search_params["min_price"] = req["min_price"]
+                                if req.get("max_price"):
+                                    search_params["max_price"] = req["max_price"]
                                 mcp_result = await asyncio.wait_for(
                                     self.mcp_executor.execute_tool(
                                         "search_flights",
-                                        {
-                                            "origin": req.get("origin"),
-                                            "destination": req.get("destination"),
-                                            "departure_date": req.get("departure_date") or req.get("date"),
-                                            "adults": req.get("adults") or req.get("guests", 1),
-                                            "children": req.get("children", 0),
-                                            "infants": req.get("infants", 0),
-                                            "return_date": req.get("return_date") if "inbound" not in slot_name else None,
-                                            "non_stop": non_stop,
-                                        }
+                                        search_params
                                     ),
                                     timeout=20.0,
                                 )
@@ -3050,6 +3333,35 @@ class TravelAgent:
                                 if mcp_result.get("success") and mcp_result.get("flights"):
                                     mcp_results = mcp_result["flights"]
                                     logger.info(f"✅ Amadeus MCP returned {len(mcp_results)} flight options")
+                                # ✅ ไม่เจอแล้วขอบินตรง: ค้นใหม่วันเดิมแบบรวมต่อเครื่อง (ไม่เปลี่ยนวัน)
+                                elif non_stop and not mcp_results:
+                                    logger.info(f"🔄 No direct flights on date — retrying same date with connections (ไม่เปลี่ยนวัน)")
+                                    retry_params = {
+                                        "origin": req.get("origin"),
+                                        "destination": req.get("destination"),
+                                        "departure_date": req.get("departure_date") or req.get("date"),
+                                        "adults": req.get("adults") or req.get("guests", 1),
+                                        "children": req.get("children", 0),
+                                        "infants": req.get("infants", 0),
+                                        "return_date": return_date,
+                                        "non_stop": False,
+                                    }
+                                    if req.get("preferred_departure_time"):
+                                        retry_params["preferred_departure_time"] = req["preferred_departure_time"]
+                                    if req.get("min_price"):
+                                        retry_params["min_price"] = req["min_price"]
+                                    if req.get("max_price"):
+                                        retry_params["max_price"] = req["max_price"]
+                                    mcp_result2 = await asyncio.wait_for(
+                                        self.mcp_executor.execute_tool(
+                                            "search_flights",
+                                            retry_params
+                                        ),
+                                        timeout=25.0,
+                                    )
+                                    if mcp_result2.get("success") and mcp_result2.get("flights"):
+                                        mcp_results = mcp_result2["flights"]
+                                        logger.info(f"✅ Amadeus MCP (with connections) returned {len(mcp_results)} options on same date")
                             
                             elif "accommodation" in slot_name or "hotel" in slot_name:
                                 # Use Amadeus MCP search_hotels
@@ -3523,6 +3835,8 @@ class TravelAgent:
                 # 🧠 RL: Get per-user Q-scores and re-rank options before LLM selection
                 rl_context = ""
                 raw_options = [opt.model_dump() if hasattr(opt, 'model_dump') else opt for opt in segment.options_pool]
+                for i, opt in enumerate(raw_options):
+                    opt["_original_index"] = i  # เก็บ index เดิมใน options_pool (หลัง sort จะใช้ map กลับ)
                 if getattr(self, 'reinforcement_learning_enabled', True):
                     try:
                         rl_svc = get_rl_service()
@@ -3541,6 +3855,11 @@ class TravelAgent:
                         rl_context = await rl_svc.build_rl_context(session.user_id, slot_name, raw_options)
                     except Exception as rl_ctx_err:
                         logger.debug(f"RL context build failed (non-critical): {rl_ctx_err}")
+
+                # ✅ ให้ทุก option มี _final_score (สำหรับคำนวณคะแนนความแม่นยำ AI) — fallback เมื่อ RL ปิดหรือล้มเหลว
+                for opt in raw_options:
+                    if opt.get("_final_score") is None:
+                        opt["_final_score"] = round(float(opt.get("weighted_score", 0.5)), 4)
 
                 # 🎯 Selection preferences (Choice History + RL summary) — ใช้ร่วมกับ RL/ML
                 selection_preferences_text = ""
@@ -3600,27 +3919,30 @@ Output JSON with your analysis and selection:
                             context="agent_selector"
                         )
                     
-                    best_option_index = selection_data.get("selected_index", 0)
+                    best_option_index = selection_data.get("selected_index", 0)  # index ใน raw_options (หลัง sort)
+                    # แมปกลับเป็น index ใน options_pool สำหรับ set_segment_selected
+                    original_option_index = raw_options[best_option_index].get("_original_index", best_option_index) if best_option_index < len(raw_options) else best_option_index
                     reasoning = selection_data.get("reasoning", "Auto-selected by AI")
                     confidence = selection_data.get("confidence", 0.9)
                     
-                    logger.info(f"Agent Mode: LLM selected option {best_option_index} for {slot_name} (confidence: {confidence})")
+                    logger.info(f"Agent Mode: LLM selected option (sorted idx {best_option_index} → options_pool idx {original_option_index}) for {slot_name} (confidence: {confidence})")
                     logger.info(f"Reasoning: {reasoning}")
                     
                 except Exception as e:
-                    # Fallback: Use simple heuristic
+                    # Fallback: Use simple heuristic (best_option_index = index ใน options_pool)
                     logger.warning(f"LLM selection failed, using fallback: {e}")
                     best_option_index = 0
                     for idx, option in enumerate(segment.options_pool):
                         if option.get("recommended") or option.get("tags", []).count("แนะนำ") > 0:
                             best_option_index = idx
                             break
+                    original_option_index = best_option_index
                     reasoning = "Fallback: Selected recommended option"
                     confidence = 0.85
                 
-                # ✅ แสดงรายละเอียด: กำลังเลือก option ที่ดีที่สุด
+                # ✅ แสดงรายละเอียด: กำลังเลือก option ที่ดีที่สุด (ใช้ original_option_index = index ใน options_pool)
                 if status_callback and num_options > 0:
-                    selected_option = segment.options_pool[best_option_index] if best_option_index < len(segment.options_pool) else None
+                    selected_option = segment.options_pool[original_option_index] if original_option_index < len(segment.options_pool) else None
                     option_info = ""
                     if selected_option:
                         # แสดงรายละเอียด option ที่เลือก
@@ -3639,7 +3961,7 @@ Output JSON with your analysis and selection:
                 
                 # ✅ Use SlotManager to set selection (validates state)
                 if status_callback and num_options > 0:
-                    selected_option_detail = segment.options_pool[best_option_index] if best_option_index < len(segment.options_pool) else None
+                    selected_option_detail = segment.options_pool[original_option_index] if original_option_index < len(segment.options_pool) else None
                     selection_detail = ""
                     if selected_option_detail:
                         if slot_name in [SlotType.FLIGHTS_OUTBOUND.value, SlotType.FLIGHTS_INBOUND.value]:
@@ -3656,13 +3978,23 @@ Output JSON with your analysis and selection:
                     await status_callback("selecting", f"✅ เลือก{slot_display}แล้ว{selection_detail} (AI มั่นใจ {int(confidence*100)}%)", f"agent_select_{slot_name}")
                 
                 try:
-                    logger.info(f"Agent Mode: Setting selection for {slot_name}[{segment_index}] - option_index: {best_option_index}, options_count: {len(segment.options_pool)}")
-                    self.slot_manager.set_segment_selected(segment, slot_name, best_option_index)
+                    logger.info(f"Agent Mode: Setting selection for {slot_name}[{segment_index}] - option_index: {original_option_index}, options_count: {len(segment.options_pool)}")
+                    self.slot_manager.set_segment_selected(segment, slot_name, original_option_index)
                     
                     # ✅ Verify selection was set correctly
                     if segment.selected_option is None:
-                        logger.error(f"Agent Mode: CRITICAL - selected_option is None after set_segment_selected! slot: {slot_name}, index: {best_option_index}")
+                        logger.error(f"Agent Mode: CRITICAL - selected_option is None after set_segment_selected! slot: {slot_name}, index: {original_option_index}")
                         raise Exception(f"Failed to set selected_option for {slot_name}[{segment_index}]")
+                    
+                    # ✅ คัดลอก _final_score จาก raw_options ไปที่ selected_option เพื่อให้ตอนคำนวณคะแนนความแม่นยำ AI (agent_accuracy_score) อ่านได้ (best_option_index = index ใน raw_options ที่เลือก)
+                    if best_option_index < len(raw_options):
+                        _score = raw_options[best_option_index].get("_final_score")
+                        if _score is not None:
+                            sel = segment.selected_option
+                            if hasattr(sel, "__setitem__"):
+                                sel["_final_score"] = _score
+                            else:
+                                setattr(sel, "_final_score", _score)
                     
                     logger.info(f"Agent Mode: ✅ Successfully set selected_option for {slot_name}[{segment_index}] - status: {segment.status}")
                     
@@ -3670,8 +4002,8 @@ Output JSON with your analysis and selection:
                     if getattr(self, 'reinforcement_learning_enabled', True):
                         try:
                             _raw_opt = None
-                            if segment.options_pool and best_option_index < len(segment.options_pool):
-                                _r = segment.options_pool[best_option_index]
+                            if segment.options_pool and original_option_index < len(segment.options_pool):
+                                _r = segment.options_pool[original_option_index]
                                 _raw_opt = _r.model_dump() if hasattr(_r, 'model_dump') else _r
                             rl_svc = get_rl_service()
                             await rl_svc.record_reward(
@@ -3681,14 +4013,14 @@ Output JSON with your analysis and selection:
                                 option=_raw_opt,
                                 context={"session_id": session.session_id, "confidence": confidence},
                             )
-                            logger.info(f"🧠 RL: Recorded reward for selecting {slot_name}[{best_option_index}]")
+                            logger.info(f"🧠 RL: Recorded reward for selecting {slot_name}[{original_option_index}]")
                         except Exception as rl_error:
                             logger.warning(f"Failed to record RL reward: {rl_error}")
                     
                     action_log.add_action(
                         "AGENT_SMART_SELECT",
-                        {"slot": slot_name, "index": best_option_index, "reasoning": reasoning, "confidence": confidence},
-                        f"Agent Mode: Intelligently selected option {best_option_index} (confidence: {confidence:.2f})"
+                        {"slot": slot_name, "index": original_option_index, "reasoning": reasoning, "confidence": confidence},
+                        f"Agent Mode: Intelligently selected option {original_option_index} (confidence: {confidence:.2f})"
                     )
                     
                     # ✅ Validate segment state after selection
@@ -4116,6 +4448,30 @@ Output JSON with your analysis and selection:
                             f"Agent Mode: Auto-booked trip instantly (ID: {booking_id}, status: {booking_status}, total: {total_price} {currency})"
                         )
                         
+                        # ✅ คะแนนความแม่นยำ ML/RL (เฉลี่ย final_score ของตัวเลือกที่ AI เลือก, แปลงเป็น 0–100)
+                        scores = []
+                        for seg in all_flights + all_accommodations:
+                            opt = seg.selected_option
+                            if opt is None:
+                                continue
+                            if hasattr(opt, "get") and callable(opt.get):
+                                s = opt.get("_final_score")
+                            else:
+                                s = getattr(opt, "_final_score", None)
+                            if s is not None:
+                                try:
+                                    scores.append(float(s))
+                                except (TypeError, ValueError):
+                                    pass
+                        if scores:
+                            avg_score = sum(scores) / len(scores)
+                            # final_score อยู่ช่วง ~0–1.2 (weighted 0–1 + rl_bonus 0–0.2) → แปลงเป็น 0–100
+                            accuracy_pct = round(min(100.0, max(0.0, avg_score * 100.0)))
+                            setattr(session, "_agent_accuracy_score", accuracy_pct)
+                            logger.info(f"Agent Mode: _agent_accuracy_score={accuracy_pct}% (from {len(scores)} segments)")
+                        else:
+                            setattr(session, "_agent_accuracy_score", None)
+
                         # ✅ Flag for frontend: Agent Mode จองอัตโนมัติสำเร็จ
                         setattr(session, "_agent_auto_booked", True)
                         logger.info(f"Agent Mode: _agent_auto_booked set True (booking_id={booking_id})")
@@ -4221,11 +4577,12 @@ Output JSON with your analysis and selection:
                 flight_seg = session.trip_plan.travel.flights.outbound[0]
                 destination = flight_seg.requirements.get("destination")
             
-            # Generate suggestions if we have enough context
+            # Generate suggestions if we have enough context (รวม plan_context เช่น ฤดูกาล)
+            plan_ctx = getattr(session.trip_plan, "plan_context", None) or {}
             if destination:
                 try:
-                    # ProactiveRecommendations is now in this file
-                    suggestions = ProactiveRecommendations.suggest_based_on_trip(destination, nights or 3)
+                    season = plan_ctx.get("season")
+                    suggestions = ProactiveRecommendations.suggest_based_on_trip(destination, nights or 3, season=season)
                     logger.info(f"Generated {len(suggestions)} proactive suggestions for {destination}")
                 except Exception as e:
                     logger.warning(f"ProactiveRecommendations failed: {e}")
@@ -4254,6 +4611,26 @@ Output JSON with your analysis and selection:
                 intelligence_context += "\n=== 💡 PROACTIVE SUGGESTIONS ===\n"
                 intelligence_context += "\n".join(suggestions)
                 intelligence_context += "\n(แนะนำสิ่งเหล่านี้อย่างเป็นธรรมชาติในการตอบ)\n"
+            if plan_ctx:
+                intelligence_context += "\n=== 📋 PLAN CONTEXT (ปัจจัยที่ผู้ใช้ระบุ – ใช้ในคำตอบให้สอดคล้อง) ===\n"
+                if plan_ctx.get("resolved_description"):
+                    intelligence_context += f"- ข้อมูลจริงจาก Gemini: {plan_ctx['resolved_description']}\n"
+                if plan_ctx.get("season"):
+                    intelligence_context += f"- ฤดูกาล: {plan_ctx['season']}\n"
+                if plan_ctx.get("event"):
+                    intelligence_context += f"- งาน/เทศกาล: {plan_ctx['event']}\n"
+                if plan_ctx.get("activities"):
+                    intelligence_context += f"- กิจกรรมที่สนใจ: {', '.join(plan_ctx['activities'])}\n"
+                if plan_ctx.get("resolved_activities"):
+                    intelligence_context += "- กิจกรรม/งานจริงที่ค้นได้ (จาก Gemini):\n"
+                    for a in (plan_ctx["resolved_activities"] or [])[:6]:
+                        intelligence_context += f"  • {a.get('name', '')}: {a.get('description', '')}\n"
+                    intelligence_context += "(แนะนำกิจกรรมเหล่านี้ในคำตอบ)\n"
+                if plan_ctx.get("travel_style"):
+                    intelligence_context += f"- สไตล์ทริป: {plan_ctx['travel_style']}\n"
+                if plan_ctx.get("constraints"):
+                    intelligence_context += f"- ข้อจำกัด: {plan_ctx['constraints']}\n"
+                intelligence_context += "(อ้างอิงปัจจัยเหล่านี้เมื่อสรุปหรือแนะนำ)\n"
             
             # ✅ Check if Agent Mode is active (from mode parameter)
             is_agent_mode = (mode == "agent")
@@ -4381,6 +4758,7 @@ Output JSON with your analysis and selection:
 {curated_context}
 === INSTRUCTIONS ===
 Generate a response message in Thai:
+0. **INFO-ONLY REPLY (no search was done)**: If ACTIONS TAKEN contains ONLY one action "ASK_USER" with a "message" in payload (and NO "CALL_SEARCH", NO "CREATE_ITINERARY" in this turn), the user asked for information only (e.g. festivals/events). Use the payload "message" as your reply (you may rephrase naturally in Thai). Do NOT say you searched for flights/accommodation or that no options were found.
 1. **CRITICAL: ALWAYS USE COMPLETE CITY NAMES** - Never truncate or abbreviate:
    - ✅ "กรุงเทพฯ - ภูเก็ต" (complete)
    - ❌ "กรุงเทพฯ - ภู" (incomplete - NEVER do this)
@@ -5270,8 +5648,10 @@ class InputValidator:
             if start < today:
                 return False, "วันเดินทางต้องเป็นวันนี้หรืออนาคต"
             
-            if start > today + timedelta(days=365):
-                return False, "วันเดินทางห่างเกิน 1 ปี (ราคาอาจไม่แม่นยำ)"
+            max_ahead = timedelta(days=335)
+            max_date = (today + max_ahead).strftime("%d/%m/%Y")
+            if start > today + max_ahead:
+                return False, f"วันเดินทางห่างเกิน 11 เดือน (ค้นหาได้ถึง {max_date} — ข้อจำกัดของ Amadeus API)"
             
             if end_date:
                 end = datetime.fromisoformat(end_date)

@@ -348,8 +348,19 @@ export default function PlanChoiceCard({ choice, onSelect }) {
       : (total_price_text || null);
 
   // ===== Flight computed fields (from Amadeus structure) =====
-  const firstSeg = getFirstSegment(flight);
-  const lastSeg = getLastSegment(flight);
+  // ✅ กรอง segments ตาม direction (ขาไป/ขากลับ) เพื่อไม่รวม round-trip ในการ์ดเดียว
+  const flightDirection = choice?.flight_direction ?? (flight?.segments?.[0]?.direction && String(flight.segments[0].direction).includes('ขากลับ') ? 'inbound' : flight?.segments?.[0]?.direction && String(flight.segments[0].direction).includes('ขาไป') ? 'outbound' : null);
+  const segmentsForDisplay = (() => {
+    const segs = flight?.segments || [];
+    if (!segs.length) return segs;
+    if (flightDirection === 'outbound') return segs.filter((s) => s?.direction && String(s.direction).includes('ขาไป'));
+    if (flightDirection === 'inbound') return segs.filter((s) => s?.direction && String(s.direction).includes('ขากลับ'));
+    return segs;
+  })();
+  const displayFlight = segmentsForDisplay.length ? { ...flight, segments: segmentsForDisplay } : flight;
+
+  const firstSeg = getFirstSegment(displayFlight);
+  const lastSeg = getLastSegment(displayFlight);
   
 
   const flightRoute =
@@ -362,7 +373,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
       ? `${firstSeg.depart_time || ''} → ${lastSeg.arrive_time || ''}${lastSeg.arrive_plus ? ` ${lastSeg.arrive_plus}` : ''}`.trim()
       : null;
 
-  const flightStops = stopsLabel(flight);
+  const flightStops = stopsLabel(displayFlight);
   const flightCarriers = carriersLabel(flight);
   const flightPrice = formatPriceInThb(
     typeof flight?.price_total === 'number' ? flight.price_total : null,
@@ -371,7 +382,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
   
   // ✅ คำนวณเวลาเดินทางทั้งหมด (รวม layover times)
   let totalJourneyTime = null;
-  if (firstSeg && lastSeg && flight?.segments && flight.segments.length > 0) {
+  if (firstSeg && lastSeg && displayFlight?.segments && displayFlight.segments.length > 0) {
     try {
       // วิธีที่ 1: ถ้ามี depart_at และ arrive_at ที่ถูกต้อง
       const firstDepart = firstSeg.depart_at || firstSeg.depart_time;
@@ -410,16 +421,16 @@ export default function PlanChoiceCard({ choice, onSelect }) {
         };
         
         // รวม duration ของทุก segments
-        for (const seg of flight.segments) {
+        for (const seg of displayFlight.segments) {
           if (seg.duration) {
             totalSeconds += parseDuration(seg.duration);
           }
         }
         
         // รวม layover times
-        for (let i = 0; i < flight.segments.length - 1; i++) {
-          const prevSeg = flight.segments[i];
-          const nextSeg = flight.segments[i + 1];
+        for (let i = 0; i < displayFlight.segments.length - 1; i++) {
+          const prevSeg = displayFlight.segments[i];
+          const nextSeg = displayFlight.segments[i + 1];
           const layover = calculateLayoverTime(prevSeg, nextSeg);
           if (layover) {
             // Parse layover string เช่น "5ชม 30นาที"
@@ -564,7 +575,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
       )}
 
       {/* Flight Section - แสดงรายละเอียด segments ก่อน */}
-      {flight && flight.segments && flight.segments.length > 0 && (
+      {flight && displayFlight?.segments && displayFlight.segments.length > 0 && (
         <div className="plan-card-section">
           {/* #region agent log */}
           {/* #endregion */}
@@ -615,14 +626,14 @@ export default function PlanChoiceCard({ choice, onSelect }) {
                           background: flightStops === 'Non-stop' ? 'rgba(74, 222, 128, 0.2)' : 'rgba(255, 193, 7, 0.2)',
                           color: flightStops === 'Non-stop' ? '#4ade80' : '#ffc107'
                         }}>
-                          {getFlightType(flight.segments) === 'บินตรง' ? '✈️ บินตรง' : '🔀 ต่อเครื่อง'}
+                          {getFlightType(displayFlight.segments) === 'บินตรง' ? '✈️ บินตรง' : '🔀 ต่อเครื่อง'}
                         </span>
                       </div>
                       {/* Connection details */}
-                      {flight.segments.length > 1 && (
+                      {displayFlight.segments.length > 1 && (
                         <div style={{ marginTop: '6px', fontSize: '12px', opacity: 0.7 }}>
-                          {flight.segments.slice(0, -1).map((seg, idx) => {
-                            const nextSeg = flight.segments[idx + 1];
+                          {displayFlight.segments.slice(0, -1).map((seg, idx) => {
+                            const nextSeg = displayFlight.segments[idx + 1];
                             const layover = calculateLayoverTime(seg, nextSeg);
                             return layover ? (
                               <span key={idx} style={{ marginRight: '8px' }}>
@@ -655,9 +666,9 @@ export default function PlanChoiceCard({ choice, onSelect }) {
                 {/* #endregion */}
                   
                 {/* แสดงทุก segments */}
-                {flight.segments && flight.segments.length > 0 ? (
+                {displayFlight.segments && displayFlight.segments.length > 0 ? (
                   <>
-                    {flight.segments.map((seg, idx) => {
+                    {displayFlight.segments.map((seg, idx) => {
                     // คำนวณราคาต่อ segment (แบ่งตามสัดส่วน duration)
                     const totalFlightPrice = typeof flight?.price_total === 'number' ? flight.price_total : null;
                     let segmentPrice = null;
@@ -675,7 +686,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
                       };
                       
                       // คำนวณ total duration ของทุก segments
-                      const totalDuration = flight.segments?.reduce((sum, s) => {
+                      const totalDuration = displayFlight.segments?.reduce((sum, s) => {
                         return sum + parseDuration(s.duration || '');
                       }, 0) || 0;
                       
@@ -688,12 +699,12 @@ export default function PlanChoiceCard({ choice, onSelect }) {
                     }
                     
                     // คำนวณ layover time (ถ้ามี segment ถัดไป)
-                    const nextSegment = idx < flight.segments.length - 1 ? flight.segments[idx + 1] : null;
+                    const nextSegment = idx < displayFlight.segments.length - 1 ? displayFlight.segments[idx + 1] : null;
                     const layoverTime = calculateLayoverTime(seg, nextSegment);
                     
                     
                     return (
-                    <div key={idx} style={{ marginBottom: idx < flight.segments.length - 1 ? '12px' : '0' }}>
+                    <div key={idx} style={{ marginBottom: idx < displayFlight.segments.length - 1 ? '12px' : '0' }}>
                       <div style={{ fontWeight: '600', marginBottom: '6px', fontSize: '16px', lineHeight: '1.4', display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <span>
                           {seg.direction === 'ขาไป' ? '🛫' : seg.direction === 'ขากลับ' ? '🛬' : '✈️'}
@@ -701,7 +712,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
                         <span>
                           {seg.direction 
                             ? seg.direction 
-                            : (idx === 0 ? 'ขาไป' : (idx === 1 && flight.segments.length === 2 ? 'ขากลับ' : `ไฟลท์ ${idx + 1}`))
+                            : (idx === 0 ? 'ขาไป' : (idx === 1 && displayFlight.segments.length === 2 ? 'ขากลับ' : `ไฟลท์ ${idx + 1}`))
                           }
                         </span>
                       </div>
@@ -831,7 +842,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
                 )}
                 
                 {/* ✅ Visa Requirement Check (แสดงถ้ามีข้อมูล transit countries) */}
-                {flight?.segments && flight.segments.length > 1 && (
+                {displayFlight?.segments && displayFlight.segments.length > 1 && (
                   <div style={{
                     marginTop: '8px',
                     padding: '10px 12px',
@@ -848,7 +859,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
                           เที่ยวบินนี้มีการแวะระหว่างทาง
                         </div>
                         <div style={{ fontSize: '13px', color: '#e65100' }}>
-                          • เที่ยวบินนี้มี {flight.segments.length - 1} จุดแวะ (Transit)<br/>
+                          • เที่ยวบินนี้มี {displayFlight.segments.length - 1} จุดแวะ (Transit)<br/>
                           • ตรวจสอบว่าคุณมีวีซ่าสำหรับประเทศที่ต้องผ่านทางหรือไม่<br/>
                           • บางประเทศอาจต้องใช้วีซ่า Transit แม้ไม่ต้องออกจากสนามบิน
                         </div>
@@ -907,7 +918,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
                 {/* 1) เส้นทาง & เวลา */}
                 <div style={{ marginBottom: '12px' }}>
                   <div style={{ fontWeight: '600', marginBottom: '8px', fontSize: '16px' }}>1) เส้นทาง & เวลา</div>
-                  {flight.segments && flight.segments.map((seg, idx) => (
+                  {displayFlight.segments && displayFlight.segments.map((seg, idx) => (
                     <div key={idx} style={{ marginBottom: '8px', paddingLeft: '8px' }}>
                       <div className="plan-card-small">สายการบิน: {getAirlineName(seg.carrier)}</div>
                       <div className="plan-card-small">เลขเที่ยวบิน: {seg.carrier && seg.flight_number ? `${seg.carrier}${seg.flight_number}` : seg.flight_number || '-'}</div>
@@ -1018,7 +1029,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
 
                 {/* CO2 Emissions */}
                 {(() => {
-                  const route = flight?.segments?.length ? (flight.segments[0]?.from && flight.segments[flight.segments.length - 1]?.to) : false;
+                  const route = displayFlight?.segments?.length ? (displayFlight.segments[0]?.from && displayFlight.segments[displayFlight.segments.length - 1]?.to) : false;
                   const co2Kg = flight_details?.co2_emissions_kg ?? (route ? calculateCO2e(1500) : null);
                   return co2Kg != null && co2Kg > 0 ? (
                     <div style={{ marginBottom: '12px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.2)' }}>

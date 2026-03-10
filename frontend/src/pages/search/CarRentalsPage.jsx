@@ -5,6 +5,7 @@ import { useTheme } from '../../context/ThemeContext';
 import { useFontSize } from '../../context/FontSizeContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { formatPriceInThb } from '../../utils/currency';
+import Swal from 'sweetalert2';
 import './CarRentalsPage.css';
 
 const GUESTS_PANEL_WIDTH = 260;
@@ -90,22 +91,22 @@ export default function CarRentalsPage({ user, onLogout, onSignIn, onNavigateToB
     const pickup = (pickupLocation || '').trim();
     const returnLoc = (returnLocation || '').trim();
     if (!pickup || !returnLoc) {
-      alert(t('carRentals.errFillAll'));
+      Swal.fire({ icon: 'warning', text: t('carRentals.errFillAll'), toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
     if (!date) {
-      alert(t('carRentals.errFillAll'));
+      Swal.fire({ icon: 'warning', text: t('carRentals.errFillAll'), toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
     if (date < todayStr) {
-      alert(t('flights.errPastDate') || 'กรุณาเลือกวันที่ที่ไม่ใช่อดีต');
+      Swal.fire({ icon: 'warning', text: t('flights.errPastDate') || 'กรุณาเลือกวันที่ที่ไม่ใช่อดีต', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
     setHasSearched(true);
     setIsLoading(true);
     setError(null);
     try {
-      const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+      const baseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
       const params = new URLSearchParams({
         origin: pickup,
         destination: returnLoc,

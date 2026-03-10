@@ -335,9 +335,10 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
     const day = String(d.getDate()).padStart(2, '0');
     return `${y}-${m}-${day}`;
   }, []);
+  // รองรับการค้นหาได้ 11 เดือนนับจากวันนี้ (สอดคล้องกับ backend / Amadeus)
   const maxDateStr = React.useMemo(() => {
     const d = new Date();
-    d.setFullYear(d.getFullYear() + 2);
+    d.setMonth(d.getMonth() + 11);
     return d.toISOString().slice(0, 10);
   }, []);
 
@@ -403,15 +404,15 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
     if (hasError) return;
 
     if (!date) {
-      alert(t('flights.errFillAll'));
+      Swal.fire({ icon: 'warning', text: t('flights.errFillAll'), toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
     if (date < todayStr) {
-      alert(t('flights.errPastDate'));
+      Swal.fire({ icon: 'warning', text: t('flights.errPastDate'), toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
     if (returnDate && returnDate < date) {
-      alert(t('flights.errReturnBeforeDepart'));
+      Swal.fire({ icon: 'warning', text: t('flights.errReturnBeforeDepart'), toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
     setHasSearched(true);
@@ -419,7 +420,7 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
     setError(null);
 
     try {
-      const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+      const baseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
       // Backend รองรับชื่อเมือง (เช่น กรุงเทพ โตเกียว) และรหัส IATA (BKK, NRT) — จะแปลงชื่อเมืองเป็นรหัสให้
       const params = new URLSearchParams({ origin: originTrim, destination: destTrim, departure_date: date });
       if (returnDate) params.set('return_date', returnDate);
@@ -446,7 +447,7 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
       setFlights(resData.flights || []);
       setLogoShowFallback(new Set());
     } catch (err) {
-      alert("Search Error: " + err.message);
+      Swal.fire({ icon: 'error', text: err.message, toast: true, position: 'top', showConfirmButton: false, timer: 3000 });
     } finally {
       setIsLoading(false);
     }
@@ -504,7 +505,7 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
 
     setIsLoading(true);
     try {
-      const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+      const baseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
       const userId = user?.user_id || user?.id;
       const tripId = `flight-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 

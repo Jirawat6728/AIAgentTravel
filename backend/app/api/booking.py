@@ -246,13 +246,14 @@ async def create_booking(booking_request: BookingCreateRequest, fastapi_request:
                 detail="Booking in production environment is not allowed for security reasons. Please use sandbox environment."
             )
         
-        # ✅ ใช้ user_id จาก session/cookie ก่อน (ให้ตรงกับ /list ที่ใช้ extract_user_id_from_request) เพื่อให้จองแล้วแสดงใน My Bookings
+        # ✅ ใช้ user_id ให้ตรงกับ My Bookings: ถ้า client ส่ง X-User-ID ให้ใช้เป็นหลัก (แชท/Agent ส่ง header นี้) แล้วค่อย cookie/body
         from app.core.security import extract_user_id_from_request
+        header_user_id = (fastapi_request.headers.get("X-User-ID") or "").strip()
         session_user_id = extract_user_id_from_request(fastapi_request)
         body_user_id = (booking_request.user_id or "").strip()
-        user_id = (session_user_id or body_user_id).strip() if (session_user_id or body_user_id) else None
-        if session_user_id and body_user_id and session_user_id != body_user_id:
-            logger.warning(f"Booking create: session user_id ({session_user_id}) != body user_id ({body_user_id}), using session for list consistency")
+        user_id = (header_user_id or body_user_id or session_user_id).strip() if (header_user_id or body_user_id or session_user_id) else None
+        if header_user_id and session_user_id and header_user_id != session_user_id:
+            logger.debug(f"Booking create: using X-User-ID ({header_user_id}) so list will show this booking for same user")
         
         # ✅ Log incoming request for debugging
         logger.info(f"Creating booking - trip_id: {booking_request.trip_id}, user_id: {user_id}, mode: {booking_request.mode}, booking_env: {booking_env}")
@@ -265,16 +266,13 @@ async def create_booking(booking_request: BookingCreateRequest, fastapi_request:
             raise HTTPException(status_code=400, detail="Invalid request format: 'travel_slots' is required and must be a dictionary")
         if booking_request.total_price is None or (isinstance(booking_request.total_price, (int, float)) and booking_request.total_price < 0):
             raise HTTPException(status_code=400, detail="Invalid request format: 'total_price' must be a non-negative number")
-        if not body_user_id and not session_user_id:
-            raise HTTPException(status_code=400, detail="Invalid request format: 'user_id' is required")
+        if not user_id:
+            raise HTTPException(status_code=400, detail="Invalid request format: 'user_id' is required (send X-User-ID header or user_id in body)")
         if not booking_request.trip_id:
             raise HTTPException(status_code=400, detail="Invalid request format: 'trip_id' is required")
         
         storage = MongoStorage()
         await storage.connect()
-        
-        if not user_id:
-            raise HTTPException(status_code=400, detail="Invalid request format: 'user_id' is required and cannot be empty")
         
         # ✅ ต้องยืนยันอีเมลก่อนถึงจะจองได้
         users_collection = storage.db["users"]
@@ -653,18 +651,18 @@ async def booking_profile_check(request: Request):
 async def list_bookings(request: Request):
     """
     List all bookings for the current user
-    ✅ Optimized: Uses Redis caching and removes expensive debug queries
+    ✅ ใช้ X-User-ID เป็นหลักเมื่อมี (ให้ตรงกับ create จากแชท) เพื่อให้จองโผล่ใน My Bookings
     """
     import asyncio
     from app.core.redis_cache import cache
     
     try:
-        # ✅ Use security helper function (prioritizes cookie, then header)
-        from app.core.security import extract_user_id_from_request
-        user_id = extract_user_id_from_request(request)
+        # ✅ Prefer X-User-ID when sent (same as create from chat/Agent) so bookings appear in My Bookings
+        header_user_id = (request.headers.get("X-User-ID") or "").strip()
+        cookie_user_id = (request.cookies.get(settings.session_cookie_name) or "").strip()
+        user_id = (header_user_id or cookie_user_id) or None
         
         if not user_id:
-            # Return empty list if no user_id
             logger.debug("No user_id provided in request")
             return {
                 "ok": True,

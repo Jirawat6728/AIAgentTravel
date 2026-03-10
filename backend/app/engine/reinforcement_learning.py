@@ -27,6 +27,10 @@ REWARD_NEGATIVE_FEEDBACK= -0.3  # feedback แย่
 REWARD_EDIT_SELECTION  = -0.1   # แก้ไขการเลือก
 
 
+# คะแนนดาวจาก User (1–5) → reward สำหรับเรียนรู้และปรับปรุงความแม่นยำ
+STAR_REWARD = {1: -0.3, 2: -0.15, 3: 0.0, 4: 0.35, 5: 0.5}
+
+
 def _calc_reward(action_type: str, context: Optional[Dict] = None) -> float:
     ctx = context or {}
     if action_type in ("select_option",):
@@ -43,6 +47,9 @@ def _calc_reward(action_type: str, context: Optional[Dict] = None) -> float:
         return REWARD_NEGATIVE_FEEDBACK * abs(ctx.get("feedback_score", 1.0))
     if action_type in ("edit", "edit_selection"):
         return REWARD_EDIT_SELECTION
+    if action_type == "user_star_rating":
+        stars = ctx.get("stars", 3)
+        return STAR_REWARD.get(int(stars), 0.0)
     return 0.0
 
 
@@ -228,6 +235,7 @@ class RLService:
     ) -> str:
         """
         สร้าง context string ที่บอก LLM ว่า user เคยชอบ/ไม่ชอบ option แบบไหน
+        รวมความพึงพอใจจากคะแนนดาว (trip_evaluations) เพื่อให้ AI ปรับปรุงการเลือกให้ตรงใจ User มากขึ้น
         """
         if not user_id:
             return ""
@@ -244,15 +252,32 @@ class RLService:
                 name = opt.get("display_name") or opt.get("name") or opt.get("flight_number", f"option {i}")
             lines.append(f"  - Option {i} ({name}): {label} (score={score:+.3f})")
 
-        if not lines:
+        # คะแนนดาวจาก User ในทริปล่าสุด — ให้ AI ประเมินตัวเองและเลือกให้ตรงใจมากขึ้น
+        satisfaction_block = ""
+        try:
+            from app.services.trip_evaluations import get_user_recent_satisfaction
+            sat = await get_user_recent_satisfaction(user_id, limit=5)
+            if sat and sat.get("avg_stars") is not None:
+                satisfaction_block = (
+                    "\n=== 📊 USER SATISFACTION (จากคะแนนดาวในทริปล่าสุด) ===\n"
+                    f"ค่าเฉลี่ยคะแนนที่ User ให้: {sat['avg_stars']} ดาว (จาก {sat['count']} ทริปล่าสุด)\n"
+                    "Use this to maintain or improve selection quality so the user stays satisfied.\n"
+                )
+        except Exception:
+            pass
+
+        if not lines and not satisfaction_block:
             return ""
 
-        return (
-            "\n=== 🧠 RL USER PREFERENCE HISTORY ===\n"
-            "Based on this user's past behavior:\n"
-            + "\n".join(lines)
-            + "\nUse this to BOOST options the user historically preferred and AVOID ones they rejected.\n"
-        )
+        pref_block = ""
+        if lines:
+            pref_block = (
+                "\n=== 🧠 RL USER PREFERENCE HISTORY ===\n"
+                "Based on this user's past behavior:\n"
+                + "\n".join(lines)
+                + "\nUse this to BOOST options the user historically preferred and AVOID ones they rejected.\n"
+            )
+        return pref_block + satisfaction_block
 
     # ------------------------------------------------------------------
     # Get user stats (สำหรับ debug / admin)

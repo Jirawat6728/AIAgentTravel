@@ -6,7 +6,7 @@ import { useFontSize } from '../../context/FontSizeContext';
 import { loadOmiseScript, createTokenAsync } from '../../utils/omiseLoader';
 import { formatPriceInThb } from '../../utils/currency';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 
 /** แปลง error จาก fetch (เช่น Failed to fetch) เป็นข้อความที่ผู้ใช้เข้าใจได้ */
 function toPaymentErrorMessage(err, fallback = 'เกิดข้อผิดพลาด') {

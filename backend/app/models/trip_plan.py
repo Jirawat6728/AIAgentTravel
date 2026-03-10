@@ -297,7 +297,9 @@ class TripPlan(BaseModel):
     model_config = {"extra": "allow"}
     travel: TravelSlot = Field(default_factory=TravelSlot, description="Travel arrangements")
     accommodation: AccommodationSlot = Field(default_factory=AccommodationSlot, description="Accommodation arrangements")
-    
+    # ปัจจัยการวางแผนแบบครอบคลุม: ฤดูกาล อีเวนต์ กิจกรรม ข้อจำกัด สไตล์ทริป (ให้ AI / Responder ใช้แนะนำและกรอง)
+    plan_context: Optional[Dict[str, Any]] = Field(default=None, description="Season, event, activities, constraints, travel_style from user")
+
     def is_complete(self) -> bool:
         """Check if all parts of the plan are complete"""
         return self.travel.is_complete() and self.accommodation.is_complete()

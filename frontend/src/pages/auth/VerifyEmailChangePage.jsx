@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import './VerifyEmailPage.css';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 
 export default function VerifyEmailChangePage({ onNavigateToHome, onNavigateToSettings }) {
   const [status, setStatus] = useState('loading'); // 'loading' | 'success' | 'error'

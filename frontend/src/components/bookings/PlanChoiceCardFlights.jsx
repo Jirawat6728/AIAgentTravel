@@ -133,7 +133,7 @@ function carriersLabel(flight) {
   return carriers.length ? carriers.join(', ') : null;
 }
 
-export default function PlanChoiceCardFlights({ choice, onSelect }) {
+export default function PlanChoiceCardFlights({ choice, onSelect, disableSelect }) {
   const [showDetails, setShowDetails] = useState(false);
   const { id, label, tags, recommended, flight, flight_details, currency, total_price, total_price_text, price, price_breakdown, title } = choice || {};
   const displayCurrency = price_breakdown?.currency || currency || flight?.currency || 'THB';
@@ -144,18 +144,28 @@ export default function PlanChoiceCardFlights({ choice, onSelect }) {
     ? `${displayCurrency} ${Number(resolvedTotal).toLocaleString('th-TH')}`
     : (total_price_text || 'ราคาต้องสอบถาม');
 
-  const firstSeg = getFirstSegment(flight);
-  const lastSeg = getLastSegment(flight);
+  // ✅ กรอง segments ตาม direction (ขาไป/ขากลับ) เพื่อไม่รวม round-trip ในการ์ดเดียว → แสดงบินตรงและเส้นทางถูกต้อง
+  const flightDirection = choice?.flight_direction ?? (flight?.segments?.[0]?.direction && String(flight.segments[0].direction).includes('ขากลับ') ? 'inbound' : flight?.segments?.[0]?.direction && String(flight.segments[0].direction).includes('ขาไป') ? 'outbound' : null);
+  const segmentsForDisplay = (() => {
+    const segs = flight?.segments || [];
+    if (!segs.length) return segs;
+    if (flightDirection === 'outbound') return segs.filter((s) => s?.direction && String(s.direction).includes('ขาไป'));
+    if (flightDirection === 'inbound') return segs.filter((s) => s?.direction && String(s.direction).includes('ขากลับ'));
+    return segs;
+  })();
+  const displayFlight = segmentsForDisplay.length ? { ...flight, segments: segmentsForDisplay } : flight;
+
+  const firstSeg = getFirstSegment(displayFlight);
+  const lastSeg = getLastSegment(displayFlight);
   const flightRoute = firstSeg && lastSeg ? `${firstSeg.from} → ${lastSeg.to}` : null;
-  const flightDirection = choice?.flight_direction ?? (firstSeg?.direction && String(firstSeg.direction).includes('ขากลับ') ? 'inbound' : firstSeg?.direction && String(firstSeg.direction).includes('ขาไป') ? 'outbound' : null);
   const isOutbound = flightDirection === 'outbound';
   const isInbound = flightDirection === 'inbound';
-  const flightStops = stopsLabel(flight);
-  const flightCarriers = carriersLabel(flight);
+  const flightStops = stopsLabel(displayFlight);
+  const flightCarriers = carriersLabel(displayFlight);
   const flightPrice = formatMoney(typeof flight?.price_total === 'number' ? flight.price_total : null, flight?.currency || displayCurrency);
 
   let totalJourneyTime = null;
-  if (firstSeg && lastSeg && flight?.segments?.length > 0) {
+  if (firstSeg && lastSeg && segmentsForDisplay.length > 0) {
     try {
       const firstDepart = firstSeg.depart_at || firstSeg.depart_time;
       let lastArrive = lastSeg.arrive_at || lastSeg.arrive_time;
@@ -176,13 +186,15 @@ export default function PlanChoiceCardFlights({ choice, onSelect }) {
     } catch (e) {}
   }
 
-  if (!flight || !flight.segments || flight.segments.length === 0) {
+  if (!flight || !flight.segments || flight.segments.length === 0 || segmentsForDisplay.length === 0) {
     return (
       <div className="plan-card">
         <div className="plan-card-header"><span className="plan-card-label">เที่ยวบิน {title || id}</span></div>
         <p className="plan-card-desc">ไม่มีข้อมูลเที่ยวบิน</p>
         <div className="plan-card-footer">
-          <button className="plan-card-button" onClick={() => onSelect && onSelect(id)}>เลือกช้อยส์ {id}</button>
+          <button className="plan-card-button" disabled={disableSelect} onClick={() => onSelect && onSelect(id)}>
+            {disableSelect ? 'กรุณาเลือกขาไปก่อน' : `เลือกช้อยส์ ${id}`}
+          </button>
         </div>
       </div>
     );
@@ -239,12 +251,12 @@ export default function PlanChoiceCardFlights({ choice, onSelect }) {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 13, opacity: 0.8 }}>
                     {totalJourneyTime && <span>⏱️ {totalJourneyTime}</span>}
                     {flightRoute && <><span>•</span><span>📍 {flightRoute}</span></>}
-                    {flightStops && <span style={{ padding: '2px 6px', borderRadius: 4, fontSize: 12, fontWeight: 500, background: flightStops === 'Non-stop' ? 'rgba(74,222,128,0.2)' : 'rgba(255,193,7,0.2)', color: flightStops === 'Non-stop' ? '#4ade80' : '#ffc107' }}>{getFlightType(flight.segments) === 'บินตรง' ? '✈️ บินตรง' : '🔀 ต่อเครื่อง'}</span>}
+                    {flightStops && <span style={{ padding: '2px 6px', borderRadius: 4, fontSize: 12, fontWeight: 500, background: flightStops === 'Non-stop' ? 'rgba(74,222,128,0.2)' : 'rgba(255,193,7,0.2)', color: flightStops === 'Non-stop' ? '#4ade80' : '#ffc107' }}>{getFlightType(displayFlight.segments) === 'บินตรง' ? '✈️ บินตรง' : '🔀 ต่อเครื่อง'}</span>}
                   </div>
-                  {flight.segments.length > 1 && (
+                  {displayFlight.segments.length > 1 && (
                     <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>
-                      {flight.segments.slice(0, -1).map((seg, idx) => {
-                        const layover = calculateLayoverTime(seg, flight.segments[idx + 1]);
+                      {displayFlight.segments.slice(0, -1).map((seg, idx) => {
+                        const layover = calculateLayoverTime(seg, displayFlight.segments[idx + 1]);
                         return layover ? <span key={idx} style={{ marginRight: 8 }}>{seg.to ? `รอที่ ${getAirportDisplay(seg.to)}` : 'รอต่อเครื่อง'} ({layover})</span> : null;
                       })}
                     </div>
@@ -275,14 +287,14 @@ export default function PlanChoiceCardFlights({ choice, onSelect }) {
             <div style={{ padding: 14, background: 'rgba(0,0,0,0.2)', borderRadius: 8, border: '1px solid rgba(255,255,255,0.2)' }}>
               <div className="plan-card-section-title" style={{ marginBottom: 10 }}>📋 รายละเอียดเที่ยวบินทั้งหมด</div>
               {/* ส่วนข้อมูลเที่ยวบินแต่ละขา (ขาไป/ขากลับ) — แบบในรูป */}
-              {flight.segments.map((seg, idx) => {
-                const nextSeg = flight.segments[idx + 1];
+              {displayFlight.segments.map((seg, idx) => {
+                const nextSeg = displayFlight.segments[idx + 1];
                 const layoverTime = calculateLayoverTime(seg, nextSeg);
                 return (
-                  <div key={idx} style={{ marginBottom: idx < flight.segments.length - 1 ? 16 : 12, paddingBottom: idx < flight.segments.length - 1 ? 16 : 0, borderBottom: idx < flight.segments.length - 1 ? '1px solid rgba(255,255,255,0.15)' : 'none' }}>
+                  <div key={idx} style={{ marginBottom: idx < displayFlight.segments.length - 1 ? 16 : 12, paddingBottom: idx < displayFlight.segments.length - 1 ? 16 : 0, borderBottom: idx < displayFlight.segments.length - 1 ? '1px solid rgba(255,255,255,0.15)' : 'none' }}>
                     <div style={{ fontWeight: 600, marginBottom: 8, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
                       <span>{seg.direction === 'ขาไป' ? '🛫' : seg.direction === 'ขากลับ' ? '🛬' : '✈️'}</span>
-                      <span>{seg.direction || (idx === 0 ? 'ขาไป' : (idx === 1 && flight.segments.length === 2 ? 'ขากลับ' : `เที่ยว ${idx + 1}`))}</span>
+                      <span>{seg.direction || (idx === 0 ? 'ขาไป' : (idx === 1 && displayFlight.segments.length === 2 ? 'ขากลับ' : `เที่ยว ${idx + 1}`))}</span>
                     </div>
                     <div className="plan-card-small" style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                       <AirlineLogo carrierCode={seg.carrier} size={28} />
@@ -402,7 +414,14 @@ export default function PlanChoiceCardFlights({ choice, onSelect }) {
 
       <div className="plan-card-footer">
         {displayTotalPrice && <div className="plan-card-price">{displayTotalPrice}</div>}
-        <button className="plan-card-button" onClick={() => onSelect && onSelect(id)}>เลือกช้อยส์ {id}</button>
+        <button
+          className="plan-card-button"
+          disabled={disableSelect}
+          onClick={() => onSelect && onSelect(id)}
+          title={disableSelect ? 'กรุณาเลือกเที่ยวบินขาไปก่อน' : undefined}
+        >
+          {disableSelect ? 'กรุณาเลือกขาไปก่อน' : `เลือกช้อยส์ ${id}`}
+        </button>
       </div>
     </div>
   );

@@ -6,9 +6,9 @@ import { useTheme } from '../../context/ThemeContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { useFontSize } from '../../context/FontSizeContext';
 import PaymentPopup from '../../components/bookings/PaymentPopup';
-import { formatPriceInThb } from '../../utils/currency';
+import { formatPriceInThb, toThb } from '../../utils/currency';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 
 function formatThaiDate(isoDate) {
   if (!isoDate) return '';
@@ -394,7 +394,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
   const handlePayment = async (bookingId) => {
     const booking = bookings.find(b => b._id === bookingId);
     if (!booking) {
-      alert('ไม่พบข้อมูลการจอง');
+      Swal.fire({ icon: 'warning', text: 'ไม่พบข้อมูลการจอง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
 
@@ -438,7 +438,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
       if (data?.ok) {
         // If payment is already processed
         if (data.status === 'paid' || data.status === 'confirmed') {
-          alert(data.message || 'ชำระเงินสำเร็จ');
+          Swal.fire({ icon: 'success', text: data.message || 'ชำระเงินสำเร็จ', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
           await loadBookings(); // Reload bookings
           return;
         }
@@ -481,11 +481,11 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
             errorMsg = JSON.stringify(data.detail);
           }
         }
-        alert('เกิดข้อผิดพลาด: ' + errorMsg);
+        Swal.fire({ icon: 'error', text: 'เกิดข้อผิดพลาด: ' + errorMsg, toast: true, position: 'top', showConfirmButton: false, timer: 3000 });
       }
     } catch (err) {
       const errorMessage = err.message || 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
-      alert(`⚠️ ${errorMessage}`);
+      Swal.fire({ icon: 'error', text: errorMessage, toast: true, position: 'top', showConfirmButton: false, timer: 3000 });
     } finally {
       setProcessing({ ...processing, [bookingId]: null });
     }
@@ -519,7 +519,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
         // For real payment URL (e.g. omise.co) OR our mock endpoint, just redirect.
         window.location.href = paymentModal.paymentUrl;
       } else {
-        alert('ลิงก์ชำระเงินไม่พร้อมใช้งาน กรุณาลองใหม่อีกครั้ง');
+        Swal.fire({ icon: 'warning', text: 'ลิงก์ชำระเงินไม่พร้อมใช้งาน กรุณาลองใหม่อีกครั้ง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       }
     }
   };
@@ -527,7 +527,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
   const handleEdit = (bookingId) => {
     const booking = bookings.find(b => b._id === bookingId);
     if (!booking) {
-      alert('ไม่พบข้อมูลการจอง');
+      Swal.fire({ icon: 'warning', text: 'ไม่พบข้อมูลการจอง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
 
@@ -663,15 +663,15 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
 
     // Validate
     if (!fd.origin_city?.trim() || !fd.destination_city?.trim()) {
-      alert('กรุณากรอกต้นทางและปลายทาง');
+      Swal.fire({ icon: 'warning', text: 'กรุณากรอกต้นทางและปลายทาง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
     if (!fd.departure_date) {
-      alert('กรุณาเลือกวันเดินทาง');
+      Swal.fire({ icon: 'warning', text: 'กรุณาเลือกวันเดินทาง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
     if (fd.return_date && fd.return_date < fd.departure_date) {
-      alert('วันกลับต้องไม่ก่อนวันเดินทาง');
+      Swal.fire({ icon: 'warning', text: 'วันกลับต้องไม่ก่อนวันเดินทาง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
 
@@ -715,7 +715,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
         throw new Error(data.detail || 'Unknown error');
       }
     } catch (err) {
-      alert('เกิดข้อผิดพลาด: ' + (err.message || 'Unknown error'));
+      Swal.fire({ icon: 'error', text: 'เกิดข้อผิดพลาด: ' + (err.message || 'Unknown error'), toast: true, position: 'top', showConfirmButton: false, timer: 3000 });
     } finally {
       setProcessing(prev => ({ ...prev, [editModal.bookingId]: null }));
     }
@@ -924,6 +924,18 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
 
             // ✅ ที่พักอย่างเดียว = มีที่พัก แต่ไม่มีเที่ยวบิน
             const isAccommodationOnly = hotelInfo && !outboundFlight && !inboundFlight;
+
+            // ✅ ราคารวมที่แสดง: แปลงทุกส่วนเป็น THB ก่อนบวก แล้วใช้ผลรวมให้ตรงกับขาไป+ขากลับ+ที่พักที่แสดง
+            const outPrice = Number(outboundFlight?.price) || 0;
+            const inPrice = Number(inboundFlight?.price) || 0;
+            const hotelPriceNum = Number(hotelInfo?.price) || 0;
+            const outThb = toThb(outPrice, outboundFlight?.currency || 'THB') ?? 0;
+            const inThb = toThb(inPrice, inboundFlight?.currency || 'THB') ?? 0;
+            const hotelThb = toThb(hotelPriceNum, hotelInfo?.currency || 'THB') ?? 0;
+            const hasComponentPrices = outPrice > 0 || inPrice > 0 || hotelPriceNum > 0;
+            const summedTotalThb = outThb + inThb + hotelThb;
+            const displayTotalPrice = hasComponentPrices && summedTotalThb > 0 ? summedTotalThb : (booking.total_price || 0);
+            const displayCurrency = 'THB';
             
             return (
               <div key={booking._id} className="booking-card">
@@ -1149,12 +1161,12 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                     </div>
                   )}
                   
-                  {/* ✅ แสดงราคารวมทั้งหมด (เด่นชัด) */}
-                  {booking.total_price && booking.total_price > 0 && (
+                  {/* ✅ แสดงราคารวมทั้งหมด (เด่นชัด) — ใช้ผลรวมขาไป+ขากลับ+ที่พักเมื่อมี เพื่อให้ตรงกับรายการด้านล่าง */}
+                  {displayTotalPrice > 0 && (
                     <div className="booking-total-price">
                       <div className="total-price-label">💰 ราคารวมทั้งหมด</div>
                       <div className="total-price-value">
-                        {formatPriceInThb(booking.total_price, booking.currency || 'THB')}
+                        {formatPriceInThb(displayTotalPrice, displayCurrency)}
                       </div>
                     </div>
                   )}

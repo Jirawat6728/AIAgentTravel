@@ -245,6 +245,9 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
                 timeout = settings.chat_middleware_timeout
             elif request.url.path.startswith("/api/amadeus-viewer/search"):
                 timeout = 60
+            elif request.url.path.startswith("/api/auth"):
+                # Auth (login, /me, register) can be slow on cold start (MongoDB init)
+                timeout = 60
             else:
                 timeout = 30
             
@@ -315,6 +318,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # CORS preflight (OPTIONS) must never be rate-limited so browser can get 2xx and allow actual request
         if request.method == "OPTIONS":
+            return await call_next(request)
+
+        # Root and health check: do not rate-limit (often hit by load balancers / "is server up" checks)
+        if request.method == "GET" and request.url.path in ("/", "/health"):
             return await call_next(request)
 
         # Get client identifier
@@ -625,9 +632,10 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
+    port = int(os.environ.get("PORT", "8000"))
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=port,
         log_config=None  # Use our custom logging
     )
