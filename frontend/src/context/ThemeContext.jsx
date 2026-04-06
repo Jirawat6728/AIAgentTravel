@@ -56,6 +56,17 @@ export function ThemeProvider({ user, children }) {
 
   const value = useMemo(() => ({ theme }), [theme]);
 
+  // Sync Tailwind dark mode class with current theme
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const root = document.documentElement;
+    if (theme === 'dark') {
+      root.classList.add('dark');
+    } else {
+      root.classList.remove('dark');
+    }
+  }, [theme]);
+
   return (
     <ThemeContext.Provider value={value}>
       {children}

@@ -1295,7 +1295,11 @@ export default function SettingsPage({
       <div className="settings-item">
         <div className="settings-item-label">
           <label>{t('settings.privacyLevel')}</label>
-          <small>{t('settings.privacyLevelDesc')}</small>
+          <small>
+            {t('settings.privacyLevelDesc')}
+            <br />
+            {(settings.privacyLevel === 'private' ? t('settings.privacyPrivateDesc') : t('settings.privacyPublicDesc'))}
+          </small>
         </div>
         <div className="settings-item-control">
           <select
@@ -1312,7 +1316,11 @@ export default function SettingsPage({
       <div className="settings-item">
         <div className="settings-item-label">
           <label>{t('settings.dataSharing')}</label>
-          <small>{t('settings.dataSharingDesc')}</small>
+          <small>
+            {t('settings.dataSharingDesc')}
+            <br />
+            {settings.dataSharing ? t('settings.dataSharingOnDesc') : t('settings.dataSharingOffDesc')}
+          </small>
         </div>
         <div className="settings-item-control">
           <label className="toggle-switch">
@@ -1329,7 +1337,13 @@ export default function SettingsPage({
       <div className="settings-item">
         <div className="settings-item-label">
           <label>{t('settings.autoDelete')}</label>
-          <small>{t('settings.autoDeleteDesc')}</small>
+          <small>
+            {t('settings.autoDeleteDesc')}
+            <br />
+            {settings.autoDeleteConversations
+              ? `${t('settings.autoDeleteOnDesc')} ${settings.autoDeleteDays || 30} ${t('settings.dayUnit')}`
+              : t('settings.autoDeleteOffDesc')}
+          </small>
         </div>
         <div className="settings-item-control">
           <label className="toggle-switch">

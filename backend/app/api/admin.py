@@ -27,6 +27,7 @@ from app.storage.connection_manager import MongoConnectionManager
 from app.services.llm import LLMService
 from app.services.agent_monitor import agent_monitor
 from app.services.memory import MemoryService
+from app.services.options_cache import get_options_cache
 
 logger = get_logger(__name__)
 
@@ -80,6 +81,77 @@ def serialize_datetime(obj: Any) -> Any:
         return serialize_datetime(obj.__dict__)
     else:
         return obj
+
+
+def _clamp(value: float, min_v: float, max_v: float) -> float:
+    return max(min_v, min(max_v, value))
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _trip_user_satisfaction_pct(trip: Dict[str, Any]) -> Optional[float]:
+    """
+    ความพึงพอใจผู้ใช้เป็นสเกล 0–100% ให้สอดคล้องกับ /api/chat/agent-feedback:
+    ใช้ satisfaction_pct จาก DB ถ้ามี ไม่เช่นนั้นแปลงจากดาวรวม (1–5) เทียบ %
+    """
+    sp = _safe_float(trip.get("satisfaction_pct"))
+    if sp is not None:
+        return round(_clamp(sp, 0.0, 100.0), 1)
+    stars = _safe_float(trip.get("user_stars"))
+    if stars is not None:
+        stars = _clamp(stars, 1.0, 5.0)
+        return round((stars / 5.0) * 100.0, 1)
+    return None
+
+
+def _estimate_self_ai_score(trip: Dict[str, Any]) -> int:
+    """
+    ประเมินคะแนน AI อัตโนมัติเมื่อยังไม่มีคะแนนจริงจาก evaluator
+    ใช้สัญญาณพื้นฐานจาก mode/source/status และดาวจากผู้ใช้ (ถ้ามี)
+    """
+    mode = str(trip.get("mode") or "").strip().lower()
+    source = str(trip.get("source") or "").strip().lower()
+    # booking_status: ดึงจาก trip โดยตรง; สำหรับ source=chat ให้ใช้ status ด้วย (บาง session มีสถานะ)
+    booking_status = str(
+        trip.get("booking_status") or trip.get("status") or ""
+    ).strip().lower()
+    user_sat_pct = _trip_user_satisfaction_pct(trip)
+
+    baseline_by_mode = {
+        "agent": 78.0,
+        "ask": 72.0,
+        "chat": 72.0,
+        "booking": 76.0,
+    }
+    baseline = baseline_by_mode.get(mode, 74.0)
+    if source == "booking":
+        baseline = max(baseline, 76.0)
+
+    if booking_status in {"confirmed", "completed", "paid", "success"}:
+        baseline += 6.0
+    elif booking_status in {"pending", "processing", "pending_payment"}:
+        baseline += 2.0
+    elif booking_status in {"failed", "cancelled", "rejected", "error"}:
+        baseline -= 8.0
+
+    if trip.get("auto_booked") is True:
+        baseline += 3.0
+
+    if user_sat_pct is not None:
+        score = (baseline * 0.55) + (float(user_sat_pct) * 0.45)
+    else:
+        score = baseline
+
+    return int(round(_clamp(score, 45.0, 98.0)))
+
+
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 security = HTTPBasic()
 security_optional = HTTPBasic(auto_error=False)
@@ -200,13 +272,39 @@ def get_admin_dashboard_html() -> str:
             </div>
         </div>
 
+        <div class="bg-white rounded-lg shadow mb-6 border-l-4 border-sky-500">
+            <div class="px-6 py-4 border-b flex justify-between items-center">
+                <h2 class="text-lg font-bold text-gray-900">🧩 AI Trip Planning Flow — กระบวนการคิดและการเลือก Choice ต่อทริป</h2>
+                <button onclick="loadAITripPlanningFlow()" class="text-sm text-sky-600 hover:underline">Refresh</button>
+            </div>
+            <div class="p-6 space-y-4">
+                <p class="text-sm text-gray-600">
+                    แสดงภาพรวมว่าในแต่ละทริป AI วางแผนอย่างไร: รับ context อะไร, สร้าง candidate choices อะไรบ้าง, ให้คะแนน/จัดอันดับอย่างไร และเลือก choice สุดท้ายจากเหตุผลอะไร
+                </p>
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div>
+                        <h3 class="font-semibold text-gray-800 mb-2">สรุป Workflow ต่อทริป</h3>
+                        <div id="tripPlanningFlowSummary" class="text-sm text-gray-700">กำลังโหลด...</div>
+                    </div>
+                    <div>
+                        <h3 class="font-semibold text-gray-800 mb-2">ตัวอย่างลำดับขั้นตอน (ล่าสุด)</h3>
+                        <div id="tripPlanningFlowSteps" class="text-sm max-h-64 overflow-y-auto bg-sky-50 border border-sky-100 rounded p-3">—</div>
+                    </div>
+                </div>
+                <div>
+                    <h3 class="font-semibold text-gray-800 mb-2">Decision per Choice</h3>
+                    <div id="tripPlanningChoiceDetails" class="text-sm overflow-x-auto">—</div>
+                </div>
+            </div>
+        </div>
+
         <div class="bg-white rounded-lg shadow mb-6 border-l-4 border-violet-500">
             <div class="px-6 py-4 border-b flex justify-between items-center">
                 <h2 class="text-lg font-bold text-gray-900">📚 Learning Monitor — AI เรียนรู้พฤติกรรม/ความชอบ User อย่างไร</h2>
                 <button onclick="loadLearningMonitor()" class="text-sm text-violet-600 hover:underline">Refresh</button>
             </div>
             <div class="p-6 space-y-4">
-                <p class="text-sm text-gray-600">แสดงให้ Dev เห็นว่า User ใหม่ (ใช้ Ask 1 ครั้ง + Agent 1 ครั้ง) ถูกเรียนรู้อย่างไร: อนุมานจากข้อความแรก (Inferred), Choice History, คะแนนดาว, RL</p>
+                <p class="text-sm text-gray-600">แสดงให้เห็นว่า User ใหม่ ถูกเรียนรู้อย่างไร: อนุมานจากข้อความแรก (Inferred), Choice History, คะแนนดาว, RL</p>
                 <div>
                     <h3 class="font-semibold text-gray-800 mb-2">ต่อ User: ข้อมูลที่ AI รู้จัก</h3>
                     <div id="learningMonitorUsers" class="overflow-x-auto text-sm">กำลังโหลด...</div>
@@ -218,19 +316,49 @@ def get_admin_dashboard_html() -> str:
             </div>
         </div>
 
+        <div class="bg-white rounded-lg shadow mb-6 border-l-4 border-amber-500">
+            <div class="px-6 py-4 border-b flex justify-between items-center">
+                <h2 class="text-lg font-bold text-gray-900">🧭 Search Relaxed Telemetry (No-Choice Fallback)</h2>
+                <button onclick="loadSearchRelaxedSummary()" class="text-sm text-amber-600 hover:underline">Refresh</button>
+            </div>
+            <div class="p-6 space-y-4">
+                <p class="text-sm text-gray-600">สรุปสาเหตุ fallback ตอนค้นหาไม่เจอ เพื่อช่วย debug และปรับ tuning ของระบบค้นหา (Ask/Agent)</p>
+                <div id="searchRelaxedSummary" class="text-sm">กำลังโหลด...</div>
+                <div>
+                    <h3 class="font-semibold text-gray-800 mb-2">เหตุผลที่เกิด relaxed search</h3>
+                    <div id="searchRelaxedByReason" class="overflow-x-auto text-sm">—</div>
+                </div>
+            </div>
+        </div>
+
         <div class="bg-white rounded-lg shadow mb-6 border-l-4 border-cyan-500">
             <div class="px-6 py-4 border-b flex justify-between items-center">
                 <h2 class="text-lg font-bold text-gray-900">🧠 AI รู้จัก User (%)</h2>
             </div>
             <div class="p-6 space-y-3">
-                <p class="text-sm text-gray-600">วัดจาก <strong>User ที่ login อยู่</strong> ว่า AI รู้จักมากน้อยแค่ไหน (จากความจำ, โปรไฟล์, ความชอบ)</p>
+                <p class="text-sm text-gray-600">วัดจาก <strong>User ที่ login อยู่</strong> ว่ามีบริบทพอให้ระบบพูดถึง user นี้มากน้อยแค่ไหน — อ่านคู่กับกล่อง &quot;วิธีคิด %&quot; ด้านล่าง</p>
+                <details class="text-sm text-gray-700 bg-gray-50 border border-gray-200 rounded-lg p-3">
+                    <summary class="cursor-pointer font-semibold text-cyan-900">วิธีคิด % และข้อมูลที่ใช้ (อ่านก่อนตีความตัวเลข)</summary>
+                    <div class="mt-3 space-y-2 text-xs leading-relaxed border-t border-gray-200 pt-3">
+                        <p><strong>1) ข้อมูลดิบที่ดึงมา:</strong> ความจำจาก MongoDB <code class="bg-gray-100 px-1 rounded">memories</code> (ผ่าน MemoryService สูงสุด 15 รายการ), โปรไฟล์จาก <code class="bg-gray-100 px-1 rounded">users</code>, และ <code class="bg-gray-100 px-1 rounded">travel_preferences</code> ล่าสุดจาก <code class="bg-gray-100 px-1 rounded">sessions</code></p>
+                        <p><strong>2) สวิตช์ มี/ไม่มี (บรรทัด &quot;ความจำ / โปรไฟล์ / ความชอบ&quot; ใต้คะแนน):</strong> ความจำ = ข้อความสรุปยาวพอ (มากกว่า 20 ตัวอักษร), โปรไฟล์ = มากกว่า 10 ตัวอักษร, ความชอบ = มี travel_preferences เมื่อแปลงเป็น string ยาวมากกว่า 10 ตัวอักษร</p>
+                        <p><strong>3) คะแนนฐาน (กฎคงที่ ไม่ใช้ LLM):</strong> มีความจำ +35%, มีโปรไฟล์ +35%, มีความชอบ +30% — รวมสูงสุด 100% (ใช้เป็นค่า fallback และใช้ในตาราง Recent Sessions ทั้งคอลัมน์)</p>
+                        <p><strong>4) คะแนนจาก LLM (การ์ดนี้เมื่อโหลดสำเร็จ):</strong> ส่งข้อความย่อจากข้อมูลข้างต้นให้โมเดลให้คะแนน 0–100 และเหตุผล — เป็นดัชนีเชิงภาษา ไม่ใช่สมการพิสูจน์ได้; ระบบสั่งให้อ้างอิงเฉพาะข้อความในบล็อกที่ส่ง ไม่ให้แต่งข้อเท็จจริงนอกบล็อก</p>
+                        <p class="text-gray-500"><strong>หมายเหตุ:</strong> ตัวเลข % ไม่ได้วัดว่า &quot;รู้จักตัวจริงในชีวิต&quot; แต่วัดว่าในระบบมีหลักฐานดิจิทัลพอให้ AI สรุป/แนะนำต่อได้หรือไม่</p>
+                    </div>
+                </details>
                 <div class="flex flex-wrap items-center gap-2">
                     <span id="familiarityLoggedInUser" class="text-sm text-gray-500">กำลังโหลด...</span>
                 </div>
                 <div id="familiarityResult" class="hidden mt-3 p-4 bg-cyan-50 border border-cyan-200 rounded-lg text-sm">
-                    <div class="font-semibold text-cyan-900"><span id="familiarityScore">0</span>% — AI รู้จัก user นี้</div>
+                    <div class="font-semibold text-cyan-900 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                        <span><span id="familiarityScore">0</span>%</span>
+                        <span id="familiarityScoreBadge" class="text-xs font-normal px-2 py-0.5 rounded bg-cyan-200 text-cyan-950"></span>
+                        <span>— ดัชนี &quot;รู้จัก user นี้ในระบบ&quot;</span>
+                    </div>
                     <div id="familiarityReason" class="text-gray-700 mt-1">—</div>
                     <div id="familiarityFactors" class="text-gray-500 mt-1">—</div>
+                    <div id="familiarityMethodology" class="hidden mt-3 text-xs text-gray-800 space-y-2 border border-cyan-100 rounded-lg p-3 bg-white"></div>
                     <div id="familiarityBreakdown" class="hidden mt-4 pt-3 border-t border-cyan-200">
                         <div class="font-semibold text-cyan-900 mb-2">📋 AI รู้จัก User นี้อย่างไรบ้าง</div>
                         <div class="space-y-2 text-xs">
@@ -253,87 +381,15 @@ def get_admin_dashboard_html() -> str:
             </div>
         </div>
 
-        <!-- ============================================================ -->
-        <!-- Notification Simulator                                       -->
-        <!-- ============================================================ -->
-        <div class="bg-white rounded-lg shadow mb-6 border-l-4 border-orange-400">
-            <div class="px-6 py-4 border-b flex justify-between items-center">
-                <div>
-                    <h2 class="text-lg font-bold text-gray-900">🔔 Notification Simulator</h2>
-                    <p class="text-sm text-gray-500 mt-1">จำลองสถานการณ์เพื่อทดสอบระบบแจ้งเตือน — ส่ง notification ไปยัง user จริงในฐานข้อมูล</p>
-                </div>
-                <button onclick="simLoadUsers()" class="px-3 py-1.5 bg-orange-500 text-white rounded text-sm hover:bg-orange-600">โหลด Users</button>
-            </div>
-            <div class="p-6">
-                <!-- Tab bar -->
-                <div class="flex gap-2 mb-5 border-b pb-3">
-                    <button onclick="simTab('single')" id="simTabSingle" class="px-4 py-1.5 rounded-full text-sm font-medium bg-orange-500 text-white">ส่งรายบุคคล</button>
-                    <button onclick="simTab('broadcast')" id="simTabBroadcast" class="px-4 py-1.5 rounded-full text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200">Broadcast ทุก User</button>
-                </div>
-
-                <!-- Single user tab -->
-                <div id="simPanelSingle">
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                        <div>
-                            <label class="block text-xs font-semibold text-gray-600 mb-1">เลือก User</label>
-                            <select id="simUserId" onchange="simLoadBookings()" class="w-full border rounded px-3 py-2 text-sm">
-                                <option value="">-- กด "โหลด Users" ก่อน --</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label class="block text-xs font-semibold text-gray-600 mb-1">เลือก Booking (ไม่บังคับ)</label>
-                            <select id="simBookingId" class="w-full border rounded px-3 py-2 text-sm">
-                                <option value="">-- ไม่ระบุ booking --</option>
-                            </select>
-                        </div>
+        <!-- Amadeus Viewer Modal (ข้อมูลที่ดึงจาก Amadeus ต่อทริป) -->
+        <div id="amadeusViewerModal" class="hidden fixed inset-0 z-50 overflow-y-auto bg-black bg-opacity-50" aria-modal="true">
+            <div class="flex min-h-full items-center justify-center p-4">
+                <div class="relative w-full max-w-4xl max-h-[90vh] bg-white rounded-lg shadow-xl flex flex-col">
+                    <div class="px-6 py-4 border-b flex justify-between items-center">
+                        <h3 class="text-lg font-bold text-gray-900">📊 Amadeus Viewer — ข้อมูลดึงจาก Amadeus (ทริปนี้เท่านั้น)</h3>
+                        <button type="button" onclick="closeAmadeusViewer()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
                     </div>
-
-                    <div class="mb-4">
-                        <label class="block text-xs font-semibold text-gray-600 mb-2">เลือกสถานการณ์</label>
-                        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2" id="simScenarioGrid">
-                            <!-- Scenarios rendered by JS -->
-                        </div>
-                    </div>
-
-                    <!-- Delay minutes (shown only for flight_delayed) -->
-                    <div id="simDelayRow" class="hidden mb-4 flex items-center gap-3">
-                        <label class="text-sm text-gray-600 whitespace-nowrap">ล่าช้า (นาที):</label>
-                        <input type="number" id="simDelayMin" value="60" min="5" max="600" class="border rounded px-3 py-2 text-sm w-28">
-                    </div>
-
-                    <!-- Custom message (shown only for custom) -->
-                    <div id="simCustomRow" class="hidden mb-4 space-y-2">
-                        <input type="text" id="simCustomTitle" placeholder="หัวข้อแจ้งเตือน" class="w-full border rounded px-3 py-2 text-sm">
-                        <textarea id="simCustomMsg" placeholder="ข้อความแจ้งเตือน" rows="2" class="w-full border rounded px-3 py-2 text-sm"></textarea>
-                    </div>
-
-                    <button onclick="simTrigger()" id="btnSimTrigger" class="px-5 py-2 bg-orange-500 text-white rounded-lg text-sm font-semibold hover:bg-orange-600 disabled:opacity-50">
-                        🚀 ส่ง Notification
-                    </button>
-                    <div id="simResult" class="hidden mt-3 p-3 rounded text-sm"></div>
-                </div>
-
-                <!-- Broadcast tab -->
-                <div id="simPanelBroadcast" class="hidden">
-                    <p class="text-sm text-gray-500 mb-4">ส่ง notification เดียวกันไปยัง <strong>ทุก user</strong> ในระบบ (ใช้สำหรับประกาศสำคัญ)</p>
-                    <div class="space-y-3 max-w-lg">
-                        <div>
-                            <label class="block text-xs font-semibold text-gray-600 mb-1">ประเภท</label>
-                            <select id="bcType" class="w-full border rounded px-3 py-2 text-sm">
-                                <option value="trip_alert">⚠️ Trip Alert</option>
-                                <option value="flight_delayed">⏰ Flight Delayed</option>
-                                <option value="flight_cancelled">🚫 Flight Cancelled</option>
-                                <option value="payment_success">✅ Payment Success</option>
-                                <option value="booking_created">🎫 Booking Created</option>
-                            </select>
-                        </div>
-                        <input type="text" id="bcTitle" placeholder="หัวข้อ" class="w-full border rounded px-3 py-2 text-sm">
-                        <textarea id="bcMessage" placeholder="ข้อความ" rows="3" class="w-full border rounded px-3 py-2 text-sm"></textarea>
-                        <button onclick="simBroadcast()" id="btnSimBroadcast" class="px-5 py-2 bg-red-500 text-white rounded-lg text-sm font-semibold hover:bg-red-600">
-                            📢 Broadcast ทุก User
-                        </button>
-                        <div id="bcResult" class="hidden mt-2 p-3 rounded text-sm"></div>
-                    </div>
+                    <div id="amadeusViewerContent" class="p-6 overflow-auto flex-1 text-sm"></div>
                 </div>
             </div>
         </div>
@@ -428,17 +484,67 @@ def get_admin_dashboard_html() -> str:
                         }
                     } catch (e) { console.warn('Familiarity batch failed', e); }
                 }
-                document.getElementById('sessions').innerHTML = '<table class="min-w-full"><thead><tr class="border-b"><th class="text-left py-2">Session / Trip</th><th class="text-left py-2">User</th><th class="text-left py-2">AI รู้จัก %</th><th class="text-left py-2">Updated</th></tr></thead><tbody>' +
+                document.getElementById('sessions').innerHTML = '<table class="min-w-full" id="sessionsTable"><thead><tr class="border-b"><th class="text-left py-2">Session / Trip</th><th class="text-left py-2">User</th><th class="text-left py-2" title="คะแนนจากกฎคงที่เท่านั้น (ความจำ+35 โปรไฟล์+35 ความชอบ+30) ไม่เรียก LLM — ชี้เมาส์ที่หัวคอลัมน์นี้เพื่ออ่านคำอธิบาย">รู้จัก % <span class="text-gray-400 font-normal">(ฐาน)</span></th><th class="text-left py-2">Updated</th><th class="text-left py-2">Amadeus</th></tr></thead><tbody>' +
                     list.map(s => {
                         const uid = s.user_id || '';
+                        const sid = s.session_id || s.trip_id || s._id || '';
+                        const sidEsc = ('' + sid).replace(/"/g, '&quot;').replace(/</g, '&lt;');
                         const fam = familiarityMap[uid];
-                        const pct = fam ? (fam.score_percent + '%') : '—';
+                        const pctTitle = fam && fam.score_note_th ? fam.score_note_th.replace(/"/g, '&quot;') : 'คะแนนฐานจากกฎคงที่ (ไม่ใช่ LLM)';
+                        const pct = fam ? ('<span title="' + pctTitle + '">' + fam.score_percent + '%</span>') : '—';
                         const measureBtn = uid ? '<button type="button" onclick="loadUserFamiliarity(' + JSON.stringify(uid) + ')" class="text-cyan-600 hover:underline text-xs">วัดด้วย AI</button>' : '';
-                        return '<tr class="border-b"><td class="py-2">' + (s.title || s.session_id || s.trip_id || '') + '</td><td class="py-2 font-mono">' + uid + '</td><td class="py-2">' + pct + ' ' + measureBtn + '</td><td class="py-2 text-gray-500">' + (s.last_updated ? (s.last_updated + '').slice(0, 19).replace('T', ' ') : '') + '</td></tr>';
+                        const amadeusBtn = sid ? '<button type="button" class="amadeus-viewer-btn px-2 py-1 text-xs bg-indigo-100 text-indigo-700 rounded hover:bg-indigo-200 cursor-pointer" data-session-id="' + sidEsc + '">ดูข้อมูล Amadeus</button>' : '—';
+                        return '<tr class="border-b"><td class="py-2">' + (s.title || sid) + '</td><td class="py-2 font-mono">' + uid + '</td><td class="py-2">' + pct + ' ' + measureBtn + '</td><td class="py-2 text-gray-500">' + (s.last_updated ? (s.last_updated + '').slice(0, 19).replace('T', ' ') : '') + '</td><td class="py-2">' + amadeusBtn + '</td></tr>';
                     }).join('') + '</tbody></table>';
+                document.querySelectorAll('.amadeus-viewer-btn').forEach(btn => {
+                    btn.addEventListener('click', function() { openAmadeusViewer(this.getAttribute('data-session-id') || ''); });
+                });
             } catch (e) {
                 document.getElementById('sessions').textContent = 'Error: ' + e.message;
             }
+        }
+
+        function closeAmadeusViewer() {
+            document.getElementById('amadeusViewerModal').classList.add('hidden');
+        }
+        async function openAmadeusViewer(sessionId) {
+            const modal = document.getElementById('amadeusViewerModal');
+            const content = document.getElementById('amadeusViewerContent');
+            modal.classList.remove('hidden');
+            content.innerHTML = '<p class="text-gray-500">กำลังโหลด...</p>';
+            try {
+                const r = await fetch(API + '/api/admin/sessions/' + encodeURIComponent(sessionId) + '/amadeus-viewer', opts);
+                if (!r.ok) { content.innerHTML = '<p class="text-red-600">โหลดไม่สำเร็จ: ' + r.status + '</p>'; return; }
+                const d = await r.json();
+                const sum = d.summary || {};
+                const total = (sum.flights_outbound || 0) + (sum.flights_inbound || 0) + (sum.ground_transport || 0) + (sum.accommodation || 0);
+                const scopeText = d.source_scope === 'trip' ? 'Trip aggregate fallback' : 'Session only';
+                let html = '<div class="mb-3 p-3 bg-gray-50 rounded text-sm"><strong>Session:</strong> <code class="text-xs">' + (d.session_id || '') + '</code><span class="ml-2 inline-block px-2 py-0.5 rounded bg-indigo-100 text-indigo-700 text-xs">' + scopeText + '</span></div>';
+                html += '<div class="mb-4 p-4 bg-white border border-gray-200 rounded-lg shadow-sm">';
+                html += '<div class="flex items-center gap-2 mb-3"><span class="text-lg">📄</span><span class="font-bold text-gray-800">ตัวเลือก (' + total + ' รายการ)</span></div>';
+                html += '<p class="text-sm text-gray-600 mb-3">ทริปนี้ดึงข้อมูลจาก Amadeus แบ่งเป็นหมวดดังนี้:</p>';
+                html += '<ul class="list-disc list-inside space-y-1.5 text-sm text-gray-700">';
+                html += '<li>✈️ <strong>เที่ยวบินขาออก:</strong> ' + (sum.flights_outbound || 0) + ' รายการ</li>';
+                html += '<li>✈️ <strong>เที่ยวบินขากลับ:</strong> ' + (sum.flights_inbound || 0) + ' รายการ</li>';
+                html += '<li>🏨 <strong>ที่พัก:</strong> ' + (sum.accommodation || 0) + ' รายการ</li>';
+                html += '<li>🚗 <strong>รถรับส่ง:</strong> ' + (sum.ground_transport || 0) + ' รายการ</li>';
+                html += '</ul>';
+                html += '<p class="mt-3 text-sm text-gray-500">รวมทั้งหมด <strong>' + total + '</strong> รายการ</p>';
+                html += '</div>';
+                html += '<div class="mb-4 grid grid-cols-2 md:grid-cols-4 gap-2"><div class="p-2 bg-blue-50 rounded text-center"><span class="block font-semibold text-blue-800">' + (sum.flights_outbound || 0) + '</span><span class="text-xs text-blue-600">เที่ยวบินขาออก</span></div><div class="p-2 bg-blue-50 rounded text-center"><span class="block font-semibold text-blue-800">' + (sum.flights_inbound || 0) + '</span><span class="text-xs text-blue-600">เที่ยวบินขากลับ</span></div><div class="p-2 bg-amber-50 rounded text-center"><span class="block font-semibold text-amber-800">' + (sum.ground_transport || 0) + '</span><span class="text-xs text-amber-600">รถรับส่ง</span></div><div class="p-2 bg-green-50 rounded text-center"><span class="block font-semibold text-green-800">' + (sum.accommodation || 0) + '</span><span class="text-xs text-green-600">ที่พัก</span></div></div>';
+                html += '<details class="mb-2"><summary class="font-semibold cursor-pointer text-gray-700">Options (ตัวเลือกที่แคชไว้ — คลิกขยาย)</summary><pre id="amadeusOptionsJson" class="mt-2 p-3 bg-gray-100 rounded overflow-x-auto text-xs max-h-64 overflow-y-auto"></pre></details>';
+                html += '<details class="mt-4"><summary class="font-semibold cursor-pointer text-gray-700">Raw Amadeus (response ดิบจาก Amadeus ต่อ slot — คลิกขยาย)</summary><pre id="amadeusRawJson" class="mt-2 p-3 bg-gray-100 rounded overflow-x-auto text-xs max-h-96 overflow-y-auto"></pre></details>';
+                content.innerHTML = html;
+                document.getElementById('amadeusOptionsJson').textContent = JSON.stringify(d.options || {}, null, 2);
+                document.getElementById('amadeusRawJson').textContent = Object.keys(d.raw_amadeus || {}).length ? JSON.stringify(d.raw_amadeus, null, 2) : '(ไม่มี raw data — ข้อมูลอาจหมดอายุหรือทริปนี้ยังไม่ได้ดึงจาก Amadeus)';
+            } catch (e) {
+                content.innerHTML = '<p class="text-red-600">Error: ' + e.message + '</p>';
+            }
+        }
+
+        function escFamiliarityHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         }
 
         async function loadUserFamiliarity(optionalUserId) {
@@ -450,20 +556,47 @@ def get_admin_dashboard_html() -> str:
             }
             const resultEl = document.getElementById('familiarityResult');
             const scoreEl = document.getElementById('familiarityScore');
+            const badgeEl = document.getElementById('familiarityScoreBadge');
             const reasonEl = document.getElementById('familiarityReason');
             const factorsEl = document.getElementById('familiarityFactors');
+            const methEl = document.getElementById('familiarityMethodology');
             resultEl.classList.remove('hidden');
             scoreEl.textContent = '...';
+            if (badgeEl) badgeEl.textContent = '';
             reasonEl.textContent = 'กำลังวัดด้วย AI...';
             factorsEl.textContent = '';
+            if (methEl) { methEl.classList.add('hidden'); methEl.innerHTML = ''; }
             try {
                 const r = await fetch(API + '/api/admin/user-familiarity?user_id=' + encodeURIComponent(uid), opts);
                 if (!r.ok) { reasonEl.textContent = 'Error: ' + r.status; return; }
                 const d = await r.json();
                 scoreEl.textContent = d.score_percent != null ? d.score_percent : '—';
+                if (badgeEl) {
+                    if (d.source === 'ai') {
+                        badgeEl.textContent = 'คะแนนจาก LLM';
+                        badgeEl.className = 'text-xs font-normal px-2 py-0.5 rounded bg-violet-200 text-violet-950';
+                    } else {
+                        badgeEl.textContent = 'คะแนนฐาน (กฎคงที่)';
+                        badgeEl.className = 'text-xs font-normal px-2 py-0.5 rounded bg-cyan-200 text-cyan-950';
+                    }
+                }
                 reasonEl.textContent = d.reason || '—';
                 const f = d.factors || {};
-                factorsEl.textContent = 'ความจำ: ' + (f.has_memory ? 'มี' : 'ไม่มี') + ' | โปรไฟล์: ' + (f.has_profile ? 'มี' : 'ไม่มี') + ' | ความชอบ: ' + (f.has_preferences ? 'มี' : 'ไม่มี') + (d.source === 'ai' ? ' (วัดโดย AI)' : ' (ประมาณ)');
+                factorsEl.textContent = 'ความจำ: ' + (f.has_memory ? 'มี' : 'ไม่มี') + ' | โปรไฟล์: ' + (f.has_profile ? 'มี' : 'ไม่มี') + ' | ความชอบ: ' + (f.has_preferences ? 'มี' : 'ไม่มี');
+                const m = d.methodology || {};
+                if (methEl && m.score_source_th) {
+                    let mh = '<p><strong>แหล่งที่มาของตัวเลข %:</strong> ' + escFamiliarityHtml(m.score_source_th) + '</p>';
+                    mh += '<p><strong>ความหมายของ % นี้:</strong> ' + escFamiliarityHtml(m.this_score_th) + '</p>';
+                    if (d.source === 'ai' && d.heuristic_baseline_percent != null && m.baseline_compare_th) {
+                        mh += '<p><strong>เทียบกับคะแนนฐาน:</strong> ' + escFamiliarityHtml(m.baseline_compare_th) + '</p>';
+                    }
+                    mh += '<p><strong>ข้อมูลที่ส่งเข้าประเมิน:</strong> ' + escFamiliarityHtml(m.data_pipeline_th) + '</p>';
+                    mh += '<p><strong>เงื่อนไขสวิตช์ มี/ไม่มี:</strong> ' + escFamiliarityHtml(m.factor_gates_th) + '</p>';
+                    mh += '<p><strong>สูตรคะแนนฐาน (fallback / ตาราง Sessions):</strong> ' + escFamiliarityHtml(m.base_rule_th) + '</p>';
+                    mh += '<p class="text-gray-500">' + escFamiliarityHtml(m.batch_sessions_note_th) + '</p>';
+                    methEl.innerHTML = mh;
+                    methEl.classList.remove('hidden');
+                }
                 const breakdown = d.breakdown || {};
                 const breakdownEl = document.getElementById('familiarityBreakdown');
                 const memEl = document.getElementById('breakdownMemory');
@@ -506,6 +639,14 @@ def get_admin_dashboard_html() -> str:
                 const rl = d.rl || {};
                 const ch = d.choice_history || {};
                 const mem = d.memory || {};
+                const escNote = (s) => String(s == null ? '' : s)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;');
+                const noteBox = (label, text) => text
+                    ? '<p class="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-md p-2 mt-2 leading-relaxed"><span class="font-semibold">' + label + '</span> ' + escNote(text) + '</p>'
+                    : '';
                 const scoreVal = (rl.score_normalized_0_1 ?? scores.rl_score_normalized ?? 0);
                 const confVal = (rl.confidence_pct ?? scores.rl_confidence_pct ?? 0);
                 const scorePct = Math.round(scoreVal * 100);
@@ -516,38 +657,46 @@ def get_admin_dashboard_html() -> str:
                     '<div><span class="text-gray-600">คะแนน RL (0–1)</span><br><span class="text-xl font-bold text-indigo-700">' + scoreVal + '</span></div>' +
                     '<div><span class="text-gray-600">คะแนน RL (%)</span><br><span class="text-xl font-bold text-indigo-700">' + scorePct + '%</span></div>' +
                     '<div><span class="text-gray-600">ความมั่นใจ (สัดส่วนบวก)</span><br><span class="text-xl font-bold text-indigo-700">' + confVal + '%</span></div>' +
-                    '<div><span class="text-gray-600">ค่าเฉลี่ย reward (100 ล่าสุด)</span><br><span class="text-xl font-bold text-indigo-700">' + (rl.recent_avg_reward ?? 0) + '</span></div>' +
+                    '<div><span class="text-gray-600">ค่าเฉลี่ย reward (100 ล่าสุด)</span><br><span class="text-xl font-bold ' + ((rl.recent_avg_reward ?? 0) >= 0 ? 'text-indigo-700' : 'text-red-600') + '">' + (rl.recent_avg_reward != null ? (rl.recent_avg_reward >= 0 ? '+' : '') + Number(rl.recent_avg_reward).toFixed(3) : '0') + '</span></div>' +
                     '</div>' +
-                    (scores.description ? '<p class="text-xs text-gray-500 mt-2">' + scores.description + '</p>' : '') +
+                    (scores.description ? '<p class="text-xs text-gray-500 mt-2">' + escNote(scores.description) + '</p>' : '') +
+                    noteBox('📌 แหล่งข้อมูล:', scores.source_note) +
                     '</div>';
                 el.innerHTML =
                     summaryHtml +
                     '<div class="grid grid-cols-1 md:grid-cols-3 gap-4">' +
                     '<div class="border border-gray-200 rounded-lg p-4 bg-gray-50">' +
                     '<h3 class="font-semibold text-gray-800 mb-2">🧠 Reinforcement Learning (RL)</h3>' +
-                    '<p class="text-gray-600 text-xs mb-2">' + (rl.description || '') + '</p>' +
+                    '<p class="text-gray-600 text-xs mb-2">' + escNote(rl.description || '') + '</p>' +
                     '<ul class="space-y-1 text-gray-700">' +
                     '<li>ประวัติ reward: <strong>' + (rl.total_reward_records ?? 0) + '</strong> รายการ</li>' +
                     '<li>Q-table: <strong>' + (rl.total_q_entries ?? 0) + '</strong> รายการ</li>' +
                     '<li>User ที่มีข้อมูล RL: <strong>' + (rl.users_with_rewards ?? 0) + '</strong></li>' +
                     '<li>คะแนน RL (normalized 0–1): <strong>' + scoreVal + '</strong></li>' +
                     '<li>ความมั่นใจ (reward บวก): <strong>' + confVal + '%</strong></li>' +
-                    '</ul></div>' +
+                    '</ul>' +
+                    noteBox('📌 แหล่งข้อมูล:', rl.source_note) +
+                    '</div>' +
                     '<div class="border border-gray-200 rounded-lg p-4 bg-gray-50">' +
                     '<h3 class="font-semibold text-gray-800 mb-2">🎯 Choice History (Selection Preferences)</h3>' +
-                    '<p class="text-gray-600 text-xs mb-2">' + (ch.description || '') + '</p>' +
+                    '<p class="text-gray-600 text-xs mb-2">' + escNote(ch.description || '') + '</p>' +
                     '<ul class="space-y-1 text-gray-700">' +
                     '<li>จำนวนการเลือกบันทึก: <strong>' + (ch.total_records ?? 0) + '</strong></li>' +
                     '<li>User ที่มีประวัติเลือก: <strong>' + (ch.users_with_choices ?? 0) + '</strong></li>' +
-                    '</ul></div>' +
+                    '</ul>' +
+                    noteBox('📌 แหล่งข้อมูล:', ch.source_note) +
+                    '</div>' +
                     '<div class="border border-gray-200 rounded-lg p-4 bg-gray-50">' +
                     '<h3 class="font-semibold text-gray-800 mb-2">💡 Memory (ความจำระยะยาว)</h3>' +
-                    '<p class="text-gray-600 text-xs mb-2">' + (mem.description || '') + '</p>' +
+                    '<p class="text-gray-600 text-xs mb-2">' + escNote(mem.description || '') + '</p>' +
                     '<ul class="space-y-1 text-gray-700">' +
                     '<li>ความจำทั้งหมด: <strong>' + (mem.total_memories ?? 0) + '</strong></li>' +
                     '<li>User ที่มีความจำ: <strong>' + (mem.users_with_memories ?? 0) + '</strong></li>' +
-                    '</ul></div>' +
-                    '</div>';
+                    '</ul>' +
+                    noteBox('📌 แหล่งข้อมูล:', mem.source_note) +
+                    '</div>' +
+                    '</div>' +
+                    '<p class="text-xs text-gray-500 mt-4 border-t border-gray-200 pt-3">หมายเหตุรวม: ตัวเลขทั้งหมดในบล็อกนี้เป็นสถิติจากฐานข้อมูล MongoDB ของแอปนี้เท่านั้น อัปเดตตามข้อมูลที่ backend บันทึกจริง ไม่ได้สะท้อนโมเดลภายนอกโดยตรง</p>';
             } catch (e) {
                 el.innerHTML = '<p class="text-red-600">Error: ' + e.message + '</p>';
             }
@@ -569,24 +718,96 @@ def get_admin_dashboard_html() -> str:
                 const overall = d.overall || {};
                 const perUser = d.per_user || [];
                 const trips = d.trips || [];
+                const esc = (v) => String(v == null ? '' : v)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;');
+
                 overallEl.innerHTML =
-                    '<div class="grid grid-cols-2 md:grid-cols-4 gap-4 p-4 bg-emerald-50 border border-emerald-200 rounded-lg">' +
+                    '<div class="p-4 bg-emerald-50 border border-emerald-200 rounded-lg">' +
+                    '<div class="grid grid-cols-2 md:grid-cols-4 gap-4">' +
                     '<div><span class="text-gray-600 block">จำนวนทริปที่ประเมิน</span><span class="text-xl font-bold text-emerald-700">' + (overall.total_trips || 0) + '</span></div>' +
-                    '<div><span class="text-gray-600 block">คะแนนความแม่นยำ AI เฉลี่ย (%)</span><span class="text-xl font-bold text-emerald-700">' + (overall.avg_accuracy != null ? overall.avg_accuracy + '%' : '—') + '</span></div>' +
-                    '<div><span class="text-gray-600 block">คะแนนดาวจาก User เฉลี่ย</span><span class="text-xl font-bold text-emerald-700">' + (overall.avg_user_stars != null ? overall.avg_user_stars + ' / 5' : '—') + '</span></div>' +
-                    '<div title="' + (overall.combined_score_formula || '') + '"><span class="text-gray-600 block">ความสามารถรวม (ภาพรวม)</span><span class="text-xl font-bold text-emerald-700">' + (overall.combined_score_pct != null ? overall.combined_score_pct + '%' : (overall.avg_accuracy != null && overall.avg_user_stars != null ? ((overall.avg_accuracy/100 + overall.avg_user_stars/5)/2 * 100).toFixed(0) + '%' : '—')) + '</span></div>' +
+                    '<div><span class="text-gray-600 block">คะแนนความแม่นยำ AI เฉลี่ย</span>' +
+                    (overall.avg_accuracy != null
+                        ? '<span class="text-xl font-bold text-emerald-700">' + overall.avg_accuracy + ' / 100</span><span class="text-xs text-gray-500 block">คะแนนเต็ม 100</span>'
+                        : '<span class="text-xl font-bold text-emerald-700">—</span>') +
+                    '</div>' +
+                    '<div title="สอดคล้องกับฟอร์มให้คะแนน: satisfaction_pct จากดาวรวม+หัวข้อย่อย หรือแปลงจากดาวรวม">' +
+                    '<span class="text-gray-600 block">ความพึงพอใจผู้ใช้เฉลี่ย</span>' +
+                    (overall.avg_user_satisfaction_pct != null
+                        ? '<span class="text-xl font-bold text-emerald-700">' + overall.avg_user_satisfaction_pct + ' / 100</span><span class="text-xs text-gray-500 block">คะแนนเต็ม 100 (เฉลี่ยจากทริปที่มีคะแนน)</span>'
+                        : '<span class="text-xl font-bold text-emerald-700">—</span>') +
+                    (overall.avg_user_stars != null
+                        ? '<span class="text-sm font-semibold text-emerald-800 block mt-1">' + overall.avg_user_stars + ' / 5</span><span class="text-xs text-gray-500 block">ดาวรวมเฉลี่ย · คะแนนเต็ม 5</span>'
+                        : '') +
+                    '</div>' +
+                    '<div title="' + esc(overall.combined_score_formula || '') + '"><span class="text-gray-600 block">ความสามารถรวม (ภาพรวม)</span>' +
+                    (overall.combined_score_pct != null
+                        ? '<span class="text-xl font-bold text-emerald-700">' + overall.combined_score_pct + ' / 100</span><span class="text-xs text-gray-500 block">คะแนนเต็ม 100</span>'
+                        : '<span class="text-xl font-bold text-emerald-700">—</span>') +
+                    '</div>' +
+                    '</div>' +
+                    (overall.sum_user_stars != null && overall.max_user_stars_possible != null
+                        ? '<p class="text-sm text-gray-800 mt-4 pt-3 border-t border-emerald-200">' +
+                          '<span class="text-gray-600">คะแนนดาวรวมจาก User (สะสมทุกทริปที่ให้คะแนน): </span>' +
+                          '<strong class="text-emerald-800">' + overall.sum_user_stars + '</strong> / <strong class="text-emerald-800">' + overall.max_user_stars_possible + '</strong>' +
+                          '<span class="text-gray-500 text-xs"> · คะแนนเต็ม = 5 ดาว × ' + (overall.trips_with_user_stars || 0) + ' ทริป</span></p>'
+                        : '') +
                     '</div>';
-                perUserEl.innerHTML = perUser.length === 0 ? '<p class="text-gray-500">ยังไม่มีข้อมูลต่อ User</p>' :
-                    '<table class="min-w-full border"><thead><tr class="border-b bg-gray-50">' +
-                    '<th class="text-left py-2 px-2">User ID</th><th class="text-left py-2 px-2">จำนวนทริป</th><th class="text-left py-2 px-2">คะแนน AI (%)</th><th class="text-left py-2 px-2">คะแนนดาว</th><th class="text-left py-2 px-2">ความสามารถรวม</th><th class="text-left py-2 px-2">RL</th><th class="text-left py-2 px-2">Q-table</th></tr></thead><tbody>' +
-                    perUser.map(u => '<tr class="border-b"><td class="py-2 px-2 font-mono text-xs">' + (u.user_id || '').slice(0, 24) + '</td><td class="py-2 px-2">' + (u.trip_count || 0) + '</td><td class="py-2 px-2">' + (u.avg_accuracy != null ? u.avg_accuracy + '%' : '—') + '</td><td class="py-2 px-2">' + (u.avg_user_stars != null ? u.avg_user_stars + ' / 5' : '—') + '</td><td class="py-2 px-2">' + (u.combined_score_pct != null ? u.combined_score_pct + '%' : '—') + '</td><td class="py-2 px-2">' + (u.rl_reward_records || 0) + '</td><td class="py-2 px-2">' + (u.rl_q_entries || 0) + '</td></tr>').join('') +
-                    '</tbody></table>';
-                const tripLimit = 100;
-                tripsEl.innerHTML = trips.length === 0 ? '<p class="text-gray-500">ยังไม่มีประเมินทริป</p>' :
-                    '<table class="min-w-full border"><thead><tr class="border-b bg-gray-50">' +
-                    '<th class="text-left py-2 px-2">Session</th><th class="text-left py-2 px-2">User</th><th class="text-left py-2 px-2">โหมด</th><th class="text-left py-2 px-2">คะแนน AI (%)</th><th class="text-left py-2 px-2">ดาว User</th><th class="text-left py-2 px-2">อัปเดต</th></tr></thead><tbody>' +
-                    trips.slice(0, tripLimit).map(t => { const sid = t.session_id || ''; const label = sid.startsWith('booking:') ? ('Booking ' + sid.slice(8, 24)) : (sid.slice(0, 28) + (sid.length > 28 ? '…' : '')); const ut = (t.updated_at || '').slice(0, 19).replace('T', ' '); return '<tr class="border-b"><td class="py-2 px-2 font-mono text-xs">' + label + '</td><td class="py-2 px-2 font-mono text-xs">' + (t.user_id || '').slice(0, 16) + '</td><td class="py-2 px-2">' + (t.mode || '—') + '</td><td class="py-2 px-2">' + (t.agent_accuracy_score != null ? t.agent_accuracy_score + '%' : '—') + '</td><td class="py-2 px-2">' + (t.user_stars != null ? t.user_stars + ' ★' : '—') + '</td><td class="py-2 px-2 text-gray-500">' + ut + '</td></tr>'; }).join('') +
-                    '</tbody></table>' + (trips.length > tripLimit ? '<p class="text-gray-500 mt-2">แสดง ' + tripLimit + ' รายการล่าสุดจากทั้งหมด ' + trips.length + ' รายการ</p>' : '');
+
+                perUserEl.innerHTML = perUser.length === 0
+                    ? '<p class="text-gray-500">ยังไม่มีข้อมูลต่อผู้ใช้</p>'
+                    : (
+                        '<table class="min-w-full border text-xs"><thead><tr class="border-b bg-emerald-50">' +
+                        '<th class="text-left py-2 px-2">User</th>' +
+                        '<th class="text-left py-2 px-2">Trips</th>' +
+                        '<th class="text-left py-2 px-2">AI Avg</th>' +
+                        '<th class="text-left py-2 px-2">พึงพอใจ</th>' +
+                        '<th class="text-left py-2 px-2">ดาวรวม (ได้/เต็ม)</th>' +
+                        '<th class="text-left py-2 px-2">Combined</th>' +
+                        '<th class="text-left py-2 px-2">RL Rewards</th>' +
+                        '<th class="text-left py-2 px-2">Q-Entries</th>' +
+                        '</tr></thead><tbody>' +
+                        perUser.map(u =>
+                            '<tr class="border-b hover:bg-gray-50">' +
+                            '<td class="py-2 px-2 font-mono" title="' + esc(u.user_id) + '">' + esc(u.user_id || '') + '</td>' +
+                            '<td class="py-2 px-2 text-center">' + (u.trip_count || 0) + '</td>' +
+                            '<td class="py-2 px-2 text-center">' + (u.avg_accuracy != null ? (u.avg_accuracy + ' / 100') : '—') + '</td>' +
+                            '<td class="py-2 px-2 text-center">' + (u.avg_user_satisfaction_pct != null ? (u.avg_user_satisfaction_pct + ' / 100') : '—') + (u.avg_user_stars != null ? '<br><span class="text-gray-500 text-xs">เฉลี่ย ' + u.avg_user_stars + '/5 ★</span>' : '') + '</td>' +
+                            '<td class="py-2 px-2 text-center">' + (u.sum_user_stars != null && u.max_user_stars_possible != null ? (u.sum_user_stars + ' / ' + u.max_user_stars_possible) : '—') + '</td>' +
+                            '<td class="py-2 px-2 text-center font-semibold text-emerald-700">' + (u.combined_score_pct != null ? (u.combined_score_pct + ' / 100') : '—') + '</td>' +
+                            '<td class="py-2 px-2 text-center">' + (u.rl_reward_records || 0) + '</td>' +
+                            '<td class="py-2 px-2 text-center">' + (u.rl_q_entries || 0) + '</td>' +
+                            '</tr>'
+                        ).join('') +
+                        '</tbody></table>'
+                    );
+
+                const tripLimit = 60;
+                const tripRows = trips.slice(0, tripLimit).map(t =>
+                    '<tr class="border-b hover:bg-gray-50">' +
+                    '<td class="py-2 px-2 font-mono text-xs" title="' + esc(t.session_id || '') + '">' + esc(t.session_id || '') + '</td>' +
+                    '<td class="py-2 px-2 font-mono text-xs" title="' + esc(t.user_id || '') + '">' + esc(t.user_id || '') + '</td>' +
+                    '<td class="py-2 px-2">' + esc(t.mode || t.source || '—') + '</td>' +
+                    '<td class="py-2 px-2 text-center">' + (t.agent_accuracy_score != null ? (t.agent_accuracy_score + ' / 100') : '—') + '</td>' +
+                    '<td class="py-2 px-2 text-center">' + (t.user_satisfaction_pct != null ? (t.user_satisfaction_pct + ' / 100') : '—') + (t.user_stars != null ? '<br><span class="text-gray-500 text-xs">' + t.user_stars + ' / 5 ★</span>' : '') + '</td>' +
+                    '<td class="py-2 px-2 text-xs text-gray-600">' + esc(t.updated_at || '') + '</td>' +
+                    '</tr>'
+                ).join('');
+                tripsEl.innerHTML = trips.length === 0
+                    ? '<p class="text-gray-500">ยังไม่มีข้อมูลทริป</p>'
+                    : (
+                        '<table class="min-w-full border text-xs"><thead><tr class="border-b bg-gray-100">' +
+                        '<th class="text-left py-2 px-2">Session/Trip</th>' +
+                        '<th class="text-left py-2 px-2">User</th>' +
+                        '<th class="text-left py-2 px-2">Mode</th>' +
+                        '<th class="text-left py-2 px-2">AI Score</th>' +
+                        '<th class="text-left py-2 px-2">พึงพอใจ (ได้/เต็ม)</th>' +
+                        '<th class="text-left py-2 px-2">Updated</th>' +
+                        '</tr></thead><tbody>' + tripRows + '</tbody></table>' +
+                        (trips.length > tripLimit ? '<p class="text-xs text-gray-500 mt-2">แสดง ' + tripLimit + ' รายการล่าสุดจากทั้งหมด ' + trips.length + ' รายการ</p>' : '')
+                    );
             } catch (e) {
                 overallEl.innerHTML = '<p class="text-red-600">Error: ' + e.message + '</p>';
             }
@@ -607,23 +828,205 @@ def get_admin_dashboard_html() -> str:
                 const events = d.learning_events || [];
                 usersEl.innerHTML = users.length === 0 ? '<p class="text-gray-500">ยังไม่มีข้อมูลการเรียนรู้</p>' :
                     '<table class="min-w-full border text-xs"><thead><tr class="border-b bg-violet-50">' +
-                    '<th class="text-left py-2 px-2">User ID</th><th class="text-left py-2 px-2">Inferred</th><th class="text-left py-2 px-2">ความชอบ (จากข้อความ/เลือก)</th><th class="text-left py-2 px-2">Choices</th><th class="text-left py-2 px-2">Last ★</th><th class="text-left py-2 px-2">RL</th><th class="text-left py-2 px-2">Q</th><th class="text-left py-2 px-2">Last activity</th></tr></thead><tbody>' +
-                    users.map(u => '<tr class="border-b"><td class="py-2 px-2 font-mono">' + (u.user_id || '').slice(0, 16) + '</td><td class="py-2 px-2">' + (u.inferred_from_chat ? '✅' : '—') + '</td><td class="py-2 px-2">' + (u.travel_prefs_summary || '—') + '</td><td class="py-2 px-2">' + (u.choice_count || 0) + '</td><td class="py-2 px-2">' + (u.last_user_stars != null ? u.last_user_stars + ' ★' : '—') + '</td><td class="py-2 px-2">' + (u.rl_reward_count || 0) + '</td><td class="py-2 px-2">' + (u.rl_q_entries || 0) + '</td><td class="py-2 px-2 text-gray-500">' + (u.last_activity ? (u.last_activity + '').slice(0, 19) : '—') + '</td></tr>').join('') +
+                    '<th class="text-left py-2 px-2">User ID</th><th class="text-left py-2 px-2">รู้จัก</th><th class="text-left py-2 px-2">ความชอบ (RL/Text)</th><th class="text-left py-2 px-2">ML Feature</th><th class="text-left py-2 px-2">Choices</th><th class="text-left py-2 px-2">Last ความพึงพอใจ</th><th class="text-left py-2 px-2">RL</th><th class="text-left py-2 px-2">Q</th><th class="text-left py-2 px-2">FWL</th><th class="text-left py-2 px-2">Last activity</th></tr></thead><tbody>' +
+                    users.map(u => {
+                        const knownBadge = u.inferred_from_chat
+                            ? '<span class="bg-green-100 text-green-700 rounded px-1">✅ รู้จัก</span>'
+                            : (u.rl_q_entries > 0 ? '<span class="bg-blue-100 text-blue-700 rounded px-1">🧠 RL</span>' : '—');
+                        const prefCell = u.travel_prefs_summary !== '—'
+                            ? '<span title="' + u.travel_prefs_summary + '">' + u.travel_prefs_summary.slice(0, 40) + (u.travel_prefs_summary.length > 40 ? '…' : '') + '</span>'
+                            : '—';
+                        const fwlCell = u.fwl_summary
+                            ? '<span class="text-indigo-700" title="ML Feature Weights">' + u.fwl_summary.slice(0, 40) + (u.fwl_summary.length > 40 ? '…' : '') + '</span>'
+                            : (u.fwl_updates > 0 ? '<span class="text-gray-400">' + u.fwl_updates + ' updates</span>' : '—');
+                        const fwlSlots = u.fwl_slots > 0
+                            ? '<span class="bg-indigo-100 text-indigo-700 rounded px-1">' + u.fwl_slots + ' slot</span>'
+                            : '—';
+                        const starsCell = (u.last_user_satisfaction_pct != null || u.last_user_stars != null)
+                            ? '<span class="text-amber-600 font-semibold">' +
+                              (u.last_user_satisfaction_pct != null ? u.last_user_satisfaction_pct + '%' : '') +
+                              (u.last_user_satisfaction_pct != null && u.last_user_stars != null ? ' · ' : '') +
+                              (u.last_user_stars != null ? (u.last_user_stars + ' ★') : '') +
+                              '</span>'
+                            : '—';
+                        return '<tr class="border-b hover:bg-gray-50">' +
+                            '<td class="py-2 px-2 font-mono text-gray-600">' + (u.user_id || '').slice(0, 16) + '</td>' +
+                            '<td class="py-2 px-2">' + knownBadge + '</td>' +
+                            '<td class="py-2 px-2 max-w-xs">' + prefCell + '</td>' +
+                            '<td class="py-2 px-2 max-w-xs">' + fwlCell + '</td>' +
+                            '<td class="py-2 px-2 text-center">' + (u.choice_count || 0) + '</td>' +
+                            '<td class="py-2 px-2 text-center">' + starsCell + '</td>' +
+                            '<td class="py-2 px-2 text-center">' + (u.rl_reward_count || 0) + '</td>' +
+                            '<td class="py-2 px-2 text-center font-semibold ' + (u.rl_q_entries > 0 ? 'text-blue-700' : 'text-gray-400') + '">' + (u.rl_q_entries || 0) + '</td>' +
+                            '<td class="py-2 px-2 text-center">' + fwlSlots + '</td>' +
+                            '<td class="py-2 px-2 text-gray-500">' + (u.last_activity ? (u.last_activity + '').slice(0, 19) : '—') + '</td>' +
+                            '</tr>';
+                    }).join('') +
                     '</tbody></table>';
-                const evLabels = { 'user_star_rating': '⭐ ให้คะแนนดาว', 'select_option': '✅ เลือกตัวเลือก' };
+                // name map สำหรับแสดงชื่อย่อของ user ในตาราง events
+                const userNameMap = {};
+                users.forEach(u => {
+                    if (!u || !u.user_id) return;
+                    const display =
+                        u.user_name ||
+                        u.email ||
+                        (u.user_id || '').slice(0, 12);
+                    userNameMap[u.user_id] = display;
+                });
+
+                const evLabels = {
+                    'user_star_rating':   '⭐ ให้คะแนนดาว',
+                    'select_option':      '✅ เลือกตัวเลือก',
+                    'book':               '🎫 จองสำเร็จ',
+                    'complete_booking':   '🎫 จองสำเร็จ',
+                    'reject':             '❌ ปฏิเสธตัวเลือก',
+                    'reject_option':      '❌ ปฏิเสธตัวเลือก',
+                    'cancel':             '🚫 ยกเลิกการจอง',
+                    'cancel_booking':     '🚫 ยกเลิกการจอง',
+                    'positive_feedback':  '👍 Feedback บวก',
+                    'negative_feedback':  '👎 Feedback ลบ',
+                    'edit':               '✏️ แก้ไขการเลือก',
+                    'edit_selection':     '✏️ แก้ไขการเลือก',
+                };
                 eventsEl.innerHTML = events.length === 0 ? '<p class="text-gray-500">ยังไม่มีเหตุการณ์</p>' :
-                    '<table class="min-w-full border text-xs"><thead><tr class="border-b bg-gray-100"><th class="text-left py-1 px-2">เวลา</th><th class="text-left py-1 px-2">User</th><th class="text-left py-1 px-2">เหตุการณ์</th><th class="text-left py-1 px-2">รายละเอียด</th></tr></thead><tbody>' +
-                    events.map(ev => '<tr class="border-b"><td class="py-1 px-2 text-gray-500">' + (ev.created_at ? (ev.created_at + '').slice(0, 19) : '') + '</td><td class="py-1 px-2 font-mono">' + (ev.user_id || '').slice(0, 12) + '</td><td class="py-1 px-2">' + (evLabels[ev.event_type] || ev.event_type) + '</td><td class="py-1 px-2">' + (ev.detail || '') + '</td></tr>').join('') +
+                    '<table class="min-w-full border text-xs"><thead><tr class="border-b bg-gray-100"><th class="text-left py-1 px-2">เวลา</th><th class="text-left py-1 px-2">User</th><th class="text-left py-1 px-2">เหตุการณ์</th><th class="text-left py-1 px-2">รายละเอียด</th><th class="text-left py-1 px-2">Reward</th></tr></thead><tbody>' +
+                    events.map(ev => { const rewardVal = ev.reward != null ? ev.reward : null; const rewardCell = rewardVal != null ? '<span class="' + (rewardVal >= 0 ? 'text-green-600' : 'text-red-600') + ' font-semibold">' + (rewardVal >= 0 ? '+' : '') + Number(rewardVal).toFixed(2) + '</span>' : '—'; const evName = userNameMap[ev.user_id] || (ev.user_id || '').slice(0, 12); return '<tr class="border-b"><td class="py-1 px-2 text-gray-500">' + (ev.created_at ? (ev.created_at + '').slice(0, 19) : '') + '</td><td class="py-1 px-2" title="' + (ev.user_id || '') + '">' + evName + '</td><td class="py-1 px-2">' + (evLabels[ev.event_type] || ev.event_type) + '</td><td class="py-1 px-2">' + (ev.detail || '') + '</td><td class="py-1 px-2">' + rewardCell + '</td></tr>'; }).join('') +
                     '</tbody></table>';
             } catch (e) {
                 usersEl.innerHTML = '<p class="text-red-600">Error: ' + e.message + '</p>';
             }
         }
 
+        async function loadSearchRelaxedSummary() {
+            const summaryEl = document.getElementById('searchRelaxedSummary');
+            const byReasonEl = document.getElementById('searchRelaxedByReason');
+            if (!summaryEl || !byReasonEl) return;
+            summaryEl.textContent = 'กำลังโหลด...';
+            byReasonEl.innerHTML = '—';
+            try {
+                const r = await fetch(API + '/api/monitoring/search-relaxed/summary', opts);
+                if (!r.ok) {
+                    summaryEl.innerHTML = '<p class="text-red-600">โหลดไม่สำเร็จ: ' + r.status + '</p>';
+                    return;
+                }
+                const d = await r.json();
+                const s = d.summary || {};
+                const totalRelaxed = s.total_relaxed || 0;
+                const noResultAfterRelax = s.no_result_after_relax || 0;
+                const windowSize = s.window_size || 0;
+                const byReason = s.by_reason || {};
+
+                summaryEl.innerHTML =
+                    '<div class="grid grid-cols-1 md:grid-cols-3 gap-4 p-4 bg-amber-50 border border-amber-200 rounded-lg">' +
+                    '<div><span class="text-gray-600 block">Relaxed Search ทั้งหมด</span><span class="text-xl font-bold text-amber-700">' + totalRelaxed + '</span></div>' +
+                    '<div><span class="text-gray-600 block">ยังไม่เจอผลหลัง Relaxed</span><span class="text-xl font-bold text-amber-700">' + noResultAfterRelax + '</span></div>' +
+                    '<div><span class="text-gray-600 block">ขนาดหน้าต่างข้อมูล</span><span class="text-xl font-bold text-amber-700">' + windowSize + ' events</span></div>' +
+                    '</div>';
+
+                const rows = Object.entries(byReason)
+                    .sort((a, b) => (b[1] || 0) - (a[1] || 0))
+                    .map(([reason, count]) =>
+                        '<tr class="border-b"><td class="py-2 px-2 font-mono text-xs">' + reason + '</td><td class="py-2 px-2">' + count + '</td></tr>'
+                    )
+                    .join('');
+                byReasonEl.innerHTML = rows
+                    ? ('<table class="min-w-full border"><thead><tr class="border-b bg-amber-50"><th class="text-left py-2 px-2">Reason</th><th class="text-left py-2 px-2">Count</th></tr></thead><tbody>' + rows + '</tbody></table>')
+                    : '<p class="text-gray-500">ยังไม่มีข้อมูล reason</p>';
+            } catch (e) {
+                summaryEl.innerHTML = '<p class="text-red-600">Error: ' + e.message + '</p>';
+            }
+        }
+
+        async function loadAITripPlanningFlow() {
+            const summaryEl = document.getElementById('tripPlanningFlowSummary');
+            const stepsEl = document.getElementById('tripPlanningFlowSteps');
+            const choiceEl = document.getElementById('tripPlanningChoiceDetails');
+            if (!summaryEl || !stepsEl || !choiceEl) return;
+            summaryEl.textContent = 'กำลังโหลด...';
+            stepsEl.textContent = 'กำลังโหลด...';
+            choiceEl.textContent = 'กำลังโหลด...';
+            try {
+                const r = await fetch(API + '/api/admin/ai-trip-planning-flow', opts);
+                if (!r.ok) {
+                    const msg = 'โหลดไม่สำเร็จ: ' + r.status;
+                    summaryEl.innerHTML = '<p class="text-red-600">' + msg + '</p>';
+                    stepsEl.textContent = msg;
+                    choiceEl.textContent = msg;
+                    return;
+                }
+                const d = await r.json();
+                if (d.error) {
+                    const msg = d.error || 'ไม่พบข้อมูล';
+                    summaryEl.innerHTML = '<p class="text-amber-600">' + msg + '</p>';
+                    stepsEl.textContent = msg;
+                    choiceEl.textContent = msg;
+                    return;
+                }
+
+                const meta = d.meta || {};
+                const latest = d.latest || {};
+                const choices = Array.isArray(d.choices) ? d.choices : (latest.choices || []);
+
+                const esc = (v) => String(v == null ? '' : v)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;');
+
+                summaryEl.innerHTML =
+                    '<div class="space-y-2">' +
+                    '<div class="text-sm text-gray-700">ทริปที่ใช้คำนวณ: <strong>' + (meta.total_trips || 0) + '</strong> ทริป • ตัวอย่างล่าสุดจาก session <code class="bg-gray-100 px-1 rounded">' + esc(latest.session_id || '-') + '</code></div>' +
+                    (meta.common_pattern ? '<p class="text-xs text-gray-500">Pattern โดยรวม: ' + esc(meta.common_pattern) + '</p>' : '') +
+                    '</div>';
+
+                const steps = Array.isArray(latest.steps) ? latest.steps : [];
+                stepsEl.innerHTML = steps.length === 0
+                    ? '<p class="text-gray-500 text-sm">ยังไม่มี log กระบวนการละเอียด — ลองใช้งานระบบ Trip Planner แล้วกด Refresh อีกครั้ง</p>'
+                    : (
+                        '<ol class="list-decimal list-inside space-y-1 text-sm text-gray-800">' +
+                        steps.map(s =>
+                            '<li><span class="font-medium">' + esc(s.stage || s.name || 'ขั้นตอน') + ':</span> ' +
+                            esc(s.description || s.detail || '') +
+                            (s.score != null ? ' <span class="text-xs text-gray-500">(score: ' + esc(s.score) + ')</span>' : '') +
+                            '</li>'
+                        ).join('') +
+                        '</ol>'
+                    );
+
+                choiceEl.innerHTML = choices.length === 0
+                    ? '<p class="text-gray-500 text-sm">ยังไม่มีข้อมูล choice ต่อทริป</p>'
+                    : (
+                        '<table class="min-w-full border text-xs">' +
+                        '<thead><tr class="border-b bg-sky-50">' +
+                        '<th class="text-left py-2 px-2">Choice</th>' +
+                        '<th class="text-left py-2 px-2">ประเภท</th>' +
+                        '<th class="text-left py-2 px-2">Score / Rank</th>' +
+                        '<th class="text-left py-2 px-2">เหตุผลที่เลือก</th>' +
+                        '<th class="text-left py-2 px-2">ถูกเลือกหรือไม่</th>' +
+                        '</tr></thead><tbody>' +
+                        choices.map(c =>
+                            '<tr class="border-b hover:bg-sky-50">' +
+                            '<td class="py-2 px-2">' + esc(c.name || c.title || c.id || '-') + '</td>' +
+                            '<td class="py-2 px-2">' + esc(c.type || c.category || '-') + '</td>' +
+                            '<td class="py-2 px-2 text-center">' + esc(c.score != null ? c.score : (c.rank != null ? ('#' + c.rank) : '-')) + '</td>' +
+                            '<td class="py-2 px-2 text-xs text-gray-700">' + esc(c.reason || c.explanation || '-') + '</td>' +
+                            '<td class="py-2 px-2 text-center">' + (c.selected ? '<span class="text-emerald-600 font-semibold">✅ ใช้จริง</span>' : '<span class="text-gray-400">—</span>') + '</td>' +
+                            '</tr>'
+                        ).join('') +
+                        '</tbody></table>'
+                    );
+            } catch (e) {
+                const msg = 'Error: ' + e.message;
+                summaryEl.innerHTML = '<p class="text-red-600">' + msg + '</p>';
+                stepsEl.textContent = msg;
+                choiceEl.textContent = msg;
+            }
+        }
+
         function refreshAll() {
             const btn = document.getElementById('btnRefresh');
             if (btn) btn.disabled = true;
-            Promise.all([loadStatus(), loadCurrentUser(), loadSessions(), loadAILearningMetrics(), loadAIScores(), loadLearningMonitor()]).finally(() => { if (btn) btn.disabled = false; });
+            Promise.all([loadStatus(), loadCurrentUser(), loadSessions(), loadAILearningMetrics(), loadAIScores(), loadLearningMonitor(), loadSearchRelaxedSummary(), loadAITripPlanningFlow()]).finally(() => { if (btn) btn.disabled = false; });
         }
 
         loadStatus();
@@ -632,6 +1035,8 @@ def get_admin_dashboard_html() -> str:
         loadAILearningMetrics();
         loadAIScores();
         loadLearningMonitor();
+        loadSearchRelaxedSummary();
+        loadAITripPlanningFlow();
 
         // ============================================================
         // Notification Simulator JS
@@ -1020,7 +1425,8 @@ async def get_ai_learning_metrics(_auth: bool = Depends(verify_admin_auth)):
                 "rl_score": round(avg_reward, 3),
                 "rl_score_normalized": rl_score_normalized,
                 "rl_confidence_pct": rl_confidence_pct,
-                "description": "คะแนน RL จากค่าเฉลี่ย reward (100 ล่าสุด); ความมั่นใจ = สัดส่วนการเลือกที่เป็นบวก (%)"
+                "description": "คะแนน RL จากค่าเฉลี่ย reward (100 ล่าสุด); ความมั่นใจ = สัดส่วนการเลือกที่เป็นบวก (%)",
+                "source_note": "คำนวณจาก MongoDB collection user_feedback_history ทั้งระบบ — เรียงตามเวลาล่าสุด 100 รายการ แล้วหาค่าเฉลี่ย reward และสัดส่วน reward บวก (ไม่ได้ดึงจากบริการภายนอก)",
             },
             "rl": {
                 "total_reward_records": total_rewards,
@@ -1031,22 +1437,151 @@ async def get_ai_learning_metrics(_auth: bool = Depends(verify_admin_auth)):
                 "recent_positive_ratio_pct": round(reward_positive_ratio, 1),
                 "score_normalized_0_1": rl_score_normalized,
                 "confidence_pct": rl_confidence_pct,
-                "description": "Reinforcement Learning: ประวัติการเลือก/ปฏิเสธและ Q-values ต่อ user"
+                "description": "Reinforcement Learning: ประวัติการเลือก/ปฏิเสธและ Q-values ต่อ user",
+                "source_note": "MongoDB: user_feedback_history = บันทึก reward ต่อเหตุการณ์ (เลือก/ปฏิเสธ/feedback); user_preference_scores = Q-table / คะแนนความชอบต่อ state–action ที่ระบบอัปเดตจากพฤติกรรม",
             },
             "choice_history": {
                 "total_records": total_choices,
                 "users_with_choices": users_with_choices,
-                "description": "ประวัติการเลือกตัวเลือก (flight/hotel/transport) สำหรับสรุปความชอบ"
+                "description": "ประวัติการเลือกตัวเลือก (flight/hotel/transport) สำหรับสรุปความชอบ",
+                "source_note": "MongoDB: user_choice_history — บันทึกเมื่อผู้ใช้เลือกตัวเลือก (เที่ยวบิน/โรงแรม/ขนส่ง ฯลฯ) ในฟลโวที่ระบบบันทึกประวัติการเลือก",
             },
             "memory": {
                 "total_memories": total_memories,
                 "users_with_memories": users_with_memories,
-                "description": "ความจำระยะยาวของ AI ต่อผู้ใช้ (memory consolidation)"
-            }
+                "description": "ความจำระยะยาวของ AI ต่อผู้ใช้ (memory consolidation)",
+                "source_note": "MongoDB: memories — ข้อความ/ข้อเท็จจริงที่สรุปเก็บเป็น long-term memory ต่อ user_id (consolidation จากบทสนทนาและบริบทที่ระบบบันทึก)",
+            },
         }
     except Exception as e:
         logger.warning(f"AI learning metrics failed: {e}", exc_info=True)
         return {"error": str(e), "rl": {}, "choice_history": {}, "memory": {}, "scores": {}}
+
+
+@router.get("/ai-trip-planning-flow")
+async def get_ai_trip_planning_flow(
+    limit: int = 50,
+    session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    _auth: bool = Depends(verify_admin_auth),
+):
+    """
+    ภาพรวม workflow การวางแผนทริปของ AI แบบทริปต่อทริป
+
+    - ดึงทริปล่าสุดจาก collection `sessions`
+    - ผูกกับ workflow_history เพื่อดูลำดับ step (planning → searching → selecting → summary → booking → done)
+    - สรุปลำดับ slot/segment ตาม TripPlan (flights_outbound / flights_inbound / accommodation / ground_transport)
+    """
+    try:
+        from app.storage.connection_manager import ConnectionManager
+        from app.services.workflow_history import get_workflow_history
+        from app.models.trip_plan import TripPlan
+        from app.engine.workflow_manager import get_slot_manager
+
+        db = ConnectionManager.get_instance().get_mongo_database()
+        if db is None:
+            return {"error": "Database not available"}
+
+        q: Dict[str, Any] = {}
+        if session_id:
+            q["session_id"] = session_id
+        if user_id:
+            q["user_id"] = user_id
+
+        cursor = db.sessions.find(
+            q,
+            {"session_id": 1, "user_id": 1, "trip_plan": 1, "last_updated": 1},
+        ).sort("last_updated", -1).limit(limit)
+
+        slot_manager = get_slot_manager()
+        trips: List[Dict[str, Any]] = []
+
+        async for doc in cursor:
+            sid = doc.get("session_id")
+            uid = doc.get("user_id")
+            raw_plan = doc.get("trip_plan") or {}
+
+            trip_summary: Dict[str, Any] = {
+                "session_id": sid,
+                "user_id": uid,
+                "updated_at": serialize_datetime(doc.get("last_updated")),
+                "steps": [],
+                "slots": [],
+                "choices": [],
+            }
+
+            # 1) Workflow history → step sequence
+            history_items = await get_workflow_history(session_id=sid, limit=50)
+            if history_items:
+                # เรียงเวลาเก่า → ใหม่
+                ordered = list(reversed(history_items))
+                step_seq: List[Dict[str, Any]] = []
+                for idx, item in enumerate(ordered, start=1):
+                    step_seq.append(
+                        {
+                            "index": idx,
+                            "stage": item.get("to_step") or item.get("from_step") or "",
+                            "from_step": item.get("from_step"),
+                            "to_step": item.get("to_step"),
+                            "at": item.get("ts") or item.get("at"),
+                        }
+                    )
+                trip_summary["steps"] = step_seq
+
+            # 2) TripPlan → slot/segment sequence
+            try:
+                if raw_plan:
+                    plan = TripPlan.model_validate(raw_plan)
+                    slot_rows = []
+                    for slot_name, seg, idx in slot_manager.get_all_segments(plan):
+                        status_val = getattr(seg, "status", None)
+                        if hasattr(status_val, "value"):
+                            status_str = status_val.value  # type: ignore[assignment]
+                        else:
+                            status_str = str(status_val) if status_val is not None else None
+                        row = {
+                            "slot": slot_name,
+                            "segment_index": idx,
+                            "status": status_str,
+                            "has_options": bool(getattr(seg, "options_pool", [])),
+                            "has_selected": bool(getattr(seg, "selected_option", None)),
+                        }
+                        slot_rows.append(row)
+                    trip_summary["slots"] = slot_rows
+            except Exception as plan_err:
+                logger.debug(f"ai-trip-planning-flow: TripPlan parse failed for session {sid}: {plan_err}")
+
+            trips.append(trip_summary)
+
+        latest = trips[0] if trips else {}
+        meta: Dict[str, Any] = {
+            "total_trips": len(trips),
+            "has_latest": bool(latest),
+        }
+
+        # สรุป pattern รวมแบบสั้น ๆ จากทุกทริป
+        common_pattern = None
+        if trips:
+            step_counts: Dict[str, int] = {}
+            for t in trips:
+                for s in t.get("steps", []):
+                    stage = (s.get("stage") or "").lower()
+                    if not stage:
+                        continue
+                    step_counts[stage] = step_counts.get(stage, 0) + 1
+            if step_counts:
+                ordered = sorted(step_counts.items(), key=lambda x: -x[1])
+                common_pattern = " → ".join(name for name, _ in ordered[:5])
+        meta["common_pattern"] = common_pattern
+
+        return {
+            "meta": meta,
+            "latest": latest,
+            "trips": trips,
+        }
+    except Exception as e:
+        logger.warning(f"ai-trip-planning-flow failed: {e}", exc_info=True)
+        return {"error": str(e)}
 
 
 @router.get("/ai-scores")
@@ -1094,12 +1629,16 @@ async def get_ai_scores(
             }
 
         # 3) My Bookings — การจองจาก bookings
-        booking_cursor = db["bookings"].find({}, {"booking_id": 1, "user_id": 1, "created_at": 1}).sort("created_at", -1).limit(limit)
+        booking_cursor = db["bookings"].find(
+            {},
+            {"booking_id": 1, "user_id": 1, "created_at": 1, "status": 1, "metadata.auto_booked": 1},
+        ).sort("created_at", -1).limit(limit)
         async for doc in booking_cursor:
             bid = doc.get("booking_id") or str(doc.get("_id", ""))
             sid = "booking:" + str(bid)
             if sid in eval_by_session:
                 continue
+            metadata = doc.get("metadata") or {}
             eval_by_session[sid] = {
                 "session_id": sid,
                 "user_id": doc.get("user_id") or "",
@@ -1108,6 +1647,8 @@ async def get_ai_scores(
                 "user_stars": None,
                 "updated_at": serialize_datetime(doc.get("created_at")) if doc.get("created_at") else None,
                 "source": "booking",
+                "booking_status": doc.get("status"),
+                "auto_booked": bool(metadata.get("auto_booked")),
             }
 
         # รวมเป็น list แล้วเรียงตาม updated_at ล่าสุด
@@ -1120,27 +1661,50 @@ async def get_ai_scores(
         trips.sort(key=_sort_key, reverse=True)
         trips = trips[:limit]
 
+        # ถ้ายังไม่มีคะแนนความแม่นยำจาก evaluator ให้ AI ประเมินตนเองอัตโนมัติ
+        for t in trips:
+            if t.get("agent_accuracy_score") is None:
+                t["agent_accuracy_score"] = _estimate_self_ai_score(t)
+                t["ai_score_source"] = "self_estimated"
+            else:
+                t["ai_score_source"] = t.get("ai_score_source") or "evaluated"
+
+        # ความพึงพอใจ % ต่อทริป (สอดคล้องกับ agent-feedback / satisfaction_pct)
+        for t in trips:
+            u_sat = _trip_user_satisfaction_pct(t)
+            if u_sat is not None:
+                t["user_satisfaction_pct"] = u_sat
+
         # Overall: คะแนนเฉลี่ยคิดจากแถวที่มีคะแนนเท่านั้น
         acc_list = [t["agent_accuracy_score"] for t in trips if t.get("agent_accuracy_score") is not None]
         stars_list = [t["user_stars"] for t in trips if t.get("user_stars") is not None]
+        sat_list = [t["user_satisfaction_pct"] for t in trips if t.get("user_satisfaction_pct") is not None]
         avg_accuracy = round(sum(acc_list) / len(acc_list), 1) if acc_list else None
         avg_user_stars = round(sum(stars_list) / len(stars_list), 1) if stars_list else None
-        # ความสามารถรวม: ถ้ามีทั้งคู่ใช้ค่าเฉลี่ย; ถ้ามีอย่างเดียวใช้ค่าที่มี (ให้แสดงครบ)
+        avg_user_satisfaction_pct = round(sum(sat_list) / len(sat_list), 1) if sat_list else None
+        n_star_trips = len(stars_list)
+        sum_user_stars = round(sum(float(x) for x in stars_list), 1) if stars_list else None
+        max_user_stars_possible = n_star_trips * 5 if n_star_trips else None
+        # ความสามารถรวม: เฉลี่ย arithmetic ของ AI % กับความพึงพอใจ % (สเกลเดียวกัน)
         combined_pct = None
-        if avg_accuracy is not None and avg_user_stars is not None:
-            combined_pct = round((avg_accuracy / 100 + avg_user_stars / 5) / 2 * 100, 0)
-        elif avg_user_stars is not None:
-            combined_pct = round((avg_user_stars / 5) * 100, 0)  # จากคะแนนดาวอย่างเดียว
+        if avg_accuracy is not None and avg_user_satisfaction_pct is not None:
+            combined_pct = round((avg_accuracy + avg_user_satisfaction_pct) / 2, 0)
+        elif avg_user_satisfaction_pct is not None:
+            combined_pct = round(avg_user_satisfaction_pct, 0)
         elif avg_accuracy is not None:
-            combined_pct = round(avg_accuracy, 0)  # จากความแม่นยำอย่างเดียว
+            combined_pct = round(avg_accuracy, 0)
         overall = {
             "total_trips": len(trips),
             "trips_with_accuracy": len(acc_list),
             "trips_with_user_stars": len(stars_list),
+            "trips_with_user_satisfaction": len(sat_list),
             "avg_accuracy": avg_accuracy,
             "avg_user_stars": avg_user_stars,
+            "avg_user_satisfaction_pct": avg_user_satisfaction_pct,
+            "sum_user_stars": sum_user_stars,
+            "max_user_stars_possible": max_user_stars_possible,
             "combined_score_pct": combined_pct,
-            "combined_score_formula": "ความสามารถรวม = (คะแนนความแม่นยำ AI % / 100 + คะแนนดาว / 5) / 2 × 100",
+            "combined_score_formula": "ความสามารถรวม = (คะแนนความแม่นยำ AI % + ความพึงพอใจผู้ใช้ %) ÷ 2 — ความพึงพอใจใช้ satisfaction_pct (ดาวรวม+หัวข้อย่อย) หรือแปลงจากดาวรวม",
         }
 
         # Per-user: จากทริปรวม (แชท + บุ๊คกิ้ง + ประเมิน)
@@ -1150,7 +1714,16 @@ async def get_ai_scores(
             if not uid:
                 continue
             if uid not in user_agg:
-                user_agg[uid] = {"user_id": uid, "trips": [], "acc_sum": 0, "acc_n": 0, "stars_sum": 0, "stars_n": 0}
+                user_agg[uid] = {
+                    "user_id": uid,
+                    "trips": [],
+                    "acc_sum": 0,
+                    "acc_n": 0,
+                    "stars_sum": 0,
+                    "stars_n": 0,
+                    "sat_sum": 0.0,
+                    "sat_n": 0,
+                }
             user_agg[uid]["trips"].append(t)
             if t.get("agent_accuracy_score") is not None:
                 user_agg[uid]["acc_sum"] += t["agent_accuracy_score"]
@@ -1158,6 +1731,9 @@ async def get_ai_scores(
             if t.get("user_stars") is not None:
                 user_agg[uid]["stars_sum"] += t["user_stars"]
                 user_agg[uid]["stars_n"] += 1
+            if t.get("user_satisfaction_pct") is not None:
+                user_agg[uid]["sat_sum"] += float(t["user_satisfaction_pct"])
+                user_agg[uid]["sat_n"] += 1
 
         rl_svc = get_rl_service()
         per_user = []
@@ -1165,20 +1741,25 @@ async def get_ai_scores(
             trip_count = len(agg["trips"])
             avg_acc = round(agg["acc_sum"] / agg["acc_n"], 1) if agg["acc_n"] else None
             avg_stars = round(agg["stars_sum"] / agg["stars_n"], 1) if agg["stars_n"] else None
-            # ความสามารถรวมต่อ User (สูตรเดียวกับ overall)
+            avg_sat = round(agg["sat_sum"] / agg["sat_n"], 1) if agg["sat_n"] else None
             combined = None
-            if avg_acc is not None and avg_stars is not None:
-                combined = round((avg_acc / 100 + avg_stars / 5) / 2 * 100, 0)
-            elif avg_stars is not None:
-                combined = round((avg_stars / 5) * 100, 0)
+            if avg_acc is not None and avg_sat is not None:
+                combined = round((avg_acc + avg_sat) / 2, 0)
+            elif avg_sat is not None:
+                combined = round(avg_sat, 0)
             elif avg_acc is not None:
                 combined = round(avg_acc, 0)
             rl_stats = await rl_svc.get_user_stats(uid)
+            stars_n = agg["stars_n"]
+            stars_sum = agg["stars_sum"]
             per_user.append({
                 "user_id": uid,
                 "trip_count": trip_count,
                 "avg_accuracy": avg_acc,
                 "avg_user_stars": avg_stars,
+                "avg_user_satisfaction_pct": avg_sat,
+                "sum_user_stars": round(float(stars_sum), 1) if stars_n else None,
+                "max_user_stars_possible": stars_n * 5 if stars_n else None,
                 "combined_score_pct": combined,
                 "rl_reward_records": rl_stats.get("total_reward_records", 0),
                 "rl_q_entries": rl_stats.get("qtable_entries", 0),
@@ -1231,8 +1812,23 @@ async def get_learning_monitor(
 
         users_learning = []
         for uid in user_ids:
-            user_doc = await db["users"].find_one({"user_id": uid}, {"preferences": 1})
-            prefs = (user_doc or {}).get("preferences") or {}
+            user_doc = await db["users"].find_one(
+                {"user_id": uid},
+                {"preferences": 1, "full_name": 1, "first_name": 1, "last_name": 1,
+                 "first_name_th": 1, "last_name_th": 1, "email": 1},
+            )
+            # บุคคลอ่านชื่อ: ภาษาไทย → ไทย+อังกฤษ → email prefix → uidสั้น
+            ud = user_doc or {}
+            name_th = f"{ud.get('first_name_th', '')} {ud.get('last_name_th', '')}".strip()
+            name_en = ud.get("full_name") or f"{ud.get('first_name', '')} {ud.get('last_name', '')}".strip()
+            email = ud.get("email", "")
+            display_name = (
+                name_th
+                or name_en
+                or (email.split("@")[0] if email else "")
+                or uid[:16]
+            )
+            prefs = ud.get("preferences") or {}
             travel = prefs.get("travelPreferences") or {}
             inferred = bool(prefs.get("inferred_from_chat"))
             prefs_summary = []
@@ -1263,10 +1859,13 @@ async def get_learning_monitor(
             trip_col = db[TRIP_EVAL_COL]
             last_trip = await trip_col.find_one(
                 {"user_id": uid},
-                {"user_stars": 1, "agent_accuracy_score": 1, "updated_at": 1},
+                {"user_stars": 1, "satisfaction_pct": 1, "agent_accuracy_score": 1, "updated_at": 1},
                 sort=[("updated_at", -1)],
             )
             last_stars = last_trip.get("user_stars") if last_trip else None
+            last_sat_pct = None
+            if last_trip:
+                last_sat_pct = _trip_user_satisfaction_pct(last_trip)
             last_activity = last_trip.get("updated_at") if last_trip else None
             if last_activity is None:
                 last_session = await db["sessions"].find_one(
@@ -1280,15 +1879,71 @@ async def get_learning_monitor(
             reward_count = await db["user_feedback_history"].count_documents({"user_id": uid})
             q_count = await db["user_preference_scores"].count_documents({"user_id": uid})
 
+            # ── ถ้ายังไม่มี prefs_summary ให้ดึงจาก Q-table (RL) รายการที่คะแนนสูงสุด ──
+            if not prefs_summary and q_count > 0:
+                try:
+                    top_q = await db["user_preference_scores"].find(
+                        {"user_id": uid, "q_value": {"$gt": 0}},
+                        {"slot_name": 1, "option_key": 1, "q_value": 1},
+                    ).sort("q_value", -1).limit(3).to_list(length=3)
+                    for q in top_q:
+                        slot = q.get("slot_name") or ""
+                        key = q.get("option_key") or ""
+                        qval = q.get("q_value", 0)
+                        # ตัด slot: prefix และ key ให้สั้น
+                        slot_short = slot.replace("flights_", "✈").replace("accommodation", "🏨").replace("ground_transport", "🚗")
+                        key_short = key.split(":")[-1][:18] if ":" in key else key[:18]
+                        prefs_summary.append(f"{slot_short} {key_short}({qval:+.2f})")
+                    if prefs_summary:
+                        inferred = True  # มีข้อมูล RL = AI รู้จัก
+                except Exception as _qe:
+                    logger.debug(f"Q-table pref lookup: {_qe}")
+
+            # ── FWL: ดึง feature weights สรุปสั้นๆ ──────────────────────────────────
+            fwl_slots = 0
+            fwl_updates = 0
+            fwl_summary = ""
+            try:
+                from app.engine.feature_learning import get_feature_learner
+                fwl_docs = await get_feature_learner().get_user_weights_doc(uid)
+                fwl_slots = len(fwl_docs)
+                fwl_updates = sum(d.get("update_count", 0) for d in fwl_docs)
+                # สรุปสั้นๆ: top positive weight per slot
+                fwl_parts = []
+                FEAT_EMOJI = {
+                    "f_is_direct": "✈ตรง", "f_budget_airline": "LCC",
+                    "f_price": "💰", "f_cabin": "🌟", "h_stars": "⭐",
+                    "h_price": "🏨💰", "t_is_private": "🚗ส่วนตัว",
+                }
+                for doc in fwl_docs:
+                    ws = doc.get("weights") or {}
+                    if not ws:
+                        continue
+                    best = max(ws.items(), key=lambda x: x[1], default=(None, 0))
+                    worst = min(ws.items(), key=lambda x: x[1], default=(None, 0))
+                    slot_label = doc.get("slot_type", "")
+                    if best[0] and best[1] > 0.15:
+                        fwl_parts.append(f"{slot_label}:{FEAT_EMOJI.get(best[0], best[0])}(⮝{best[1]:+.1f})")
+                    if worst[0] and worst[1] < -0.15:
+                        fwl_parts.append(f"{slot_label}:{FEAT_EMOJI.get(worst[0], worst[0])}(⮛{worst[1]:+.1f})")
+                fwl_summary = " ".join(fwl_parts[:4])
+            except Exception as _fe:
+                logger.debug(f"FWL summary for user {uid}: {_fe}")
+
             users_learning.append({
                 "user_id": uid,
+                "user_name": display_name,
                 "inferred_from_chat": inferred,
                 "travel_prefs_summary": " | ".join(prefs_summary) if prefs_summary else "—",
                 "choice_count": choice_count,
                 "last_user_stars": last_stars,
+                "last_user_satisfaction_pct": last_sat_pct,
                 "last_activity": serialize_datetime(last_activity) if last_activity else None,
                 "rl_reward_count": reward_count,
                 "rl_q_entries": q_count,
+                "fwl_slots": fwl_slots,
+                "fwl_updates": fwl_updates,
+                "fwl_summary": fwl_summary,
             })
 
         # เรียงตาม last_activity ล่าสุด (มีกิจกรรมล่าสุดอยู่บน)
@@ -1297,21 +1952,44 @@ async def get_learning_monitor(
             reverse=True,
         )
 
-        # Learning events: จาก user_feedback_history (select_option, user_star_rating) เพื่อให้ Dev เห็นลำดับการเรียนรู้
+        # Learning events: จาก user_feedback_history — ครอบคลุมทุก action type
         events = []
         ev_cursor = db["user_feedback_history"].find({}).sort("created_at", -1).limit(50)
         async for doc in ev_cursor:
             action = doc.get("action_type", "")
             ctx = doc.get("context") or {}
+            slot = doc.get("slot_name") or ""
+            reward = doc.get("reward")
+            reward_str = f" (reward={reward:+.2f})" if isinstance(reward, (int, float)) else ""
             detail = ""
             if action == "user_star_rating":
-                detail = f"ให้คะแนน {ctx.get('stars', '?')} ดาว"
+                pct = ctx.get("satisfaction_pct")
+                pct_s = f" ({pct}% รวมหัวข้อ)" if pct is not None else ""
+                detail = f"ให้คะแนน {ctx.get('stars', '?')} ดาว{pct_s}{reward_str}"
             elif action == "select_option":
-                detail = doc.get("slot_name", "")
+                detail = f"Slot: {slot}{reward_str}"
+            elif action in ("book", "complete_booking"):
+                detail = f"จองสำเร็จ Slot: {slot}{reward_str}"
+            elif action in ("reject", "reject_option"):
+                detail = f"ปฏิเสธตัวเลือก Slot: {slot}{reward_str}"
+            elif action in ("cancel", "cancel_booking"):
+                detail = f"ยกเลิกการจอง Slot: {slot}{reward_str}"
+            elif action == "positive_feedback":
+                detail = f"Feedback บวก Slot: {slot}{reward_str}"
+            elif action == "negative_feedback":
+                detail = f"Feedback ลบ Slot: {slot}{reward_str}"
+            elif action in ("edit", "edit_selection"):
+                detail = f"แก้ไขการเลือก Slot: {slot}{reward_str}"
+            else:
+                detail = f"Slot: {slot}{reward_str}" if slot else reward_str
+            uid_short = doc.get("user_id", "")
+            # ดึงชื่อ user จาก users_learning map
+            ev_uid = uid_short
             events.append({
-                "user_id": doc.get("user_id", ""),
+                "user_id": ev_uid,
                 "event_type": action,
                 "detail": detail,
+                "reward": reward,
                 "created_at": serialize_datetime(doc.get("created_at")),
             })
         events = serialize_datetime(events)
@@ -1446,6 +2124,116 @@ async def get_recent_sessions(
         )
 
 
+@router.get("/sessions/{session_id}/amadeus-viewer")
+async def get_session_amadeus_viewer(
+    session_id: str,
+    _auth: bool = Depends(verify_admin_auth),
+):
+    """
+    ดึงข้อมูลที่ได้จาก Amadeus สำหรับทริป (session) นั้นเท่านั้น
+    คืนค่า: options (เที่ยวบิน/ที่พัก/รถรับส่ง ที่แคชไว้) และ raw_amadeus (response ดิบจาก Amadeus ต่อ slot)
+    """
+    try:
+        from app.storage.connection_manager import ConnectionManager
+
+        cache = get_options_cache()
+
+        def _empty_options() -> Dict[str, Any]:
+            return {
+                "flights_outbound": [],
+                "flights_inbound": [],
+                "ground_transport": [],
+                "accommodation": [],
+            }
+
+        def _merge_options(target: Dict[str, Any], incoming: Dict[str, Any]) -> None:
+            for slot in ("flights_outbound", "flights_inbound", "ground_transport", "accommodation"):
+                segments = incoming.get(slot) or []
+                if not isinstance(segments, list):
+                    continue
+                for seg in segments:
+                    if isinstance(seg, list) and seg:
+                        target[slot].append(seg)
+
+        def _count_slot(val: Any) -> int:
+            if not val:
+                return 0
+            if isinstance(val, list):
+                return sum(len(seg) if isinstance(seg, list) else 1 for seg in val)
+            return 0
+
+        options = _empty_options()
+        raw_amadeus: Dict[str, Any] = {}
+        resolved_session_ids: List[str] = []
+
+        # 1) Try exact session_id first
+        one_options = await cache.get_all_session_options(session_id)
+        one_raw = await cache.get_raw_amadeus(session_id)
+        _merge_options(options, one_options or {})
+        if isinstance(one_raw, dict):
+            raw_amadeus.update(one_raw)
+        resolved_session_ids.append(session_id)
+
+        def _total_count(data: Dict[str, Any]) -> int:
+            return (
+                _count_slot(data.get("flights_outbound"))
+                + _count_slot(data.get("flights_inbound"))
+                + _count_slot(data.get("ground_transport"))
+                + _count_slot(data.get("accommodation"))
+            )
+
+        # 2) Fallback: if empty, aggregate by trip sessions (covers old rows that pass trip_id)
+        source_scope = "session"
+        if _total_count(options) == 0:
+            db = ConnectionManager.get_instance().get_mongo_database()
+            if db is not None:
+                session_doc = await db.sessions.find_one(
+                    {"$or": [{"session_id": session_id}, {"trip_id": session_id}, {"chat_id": session_id}]},
+                    {"trip_id": 1, "user_id": 1, "chat_id": 1, "session_id": 1},
+                )
+                if session_doc:
+                    trip_id = session_doc.get("trip_id") or (session_id if "::" not in session_id else None)
+                    user_id = session_doc.get("user_id")
+                    if trip_id and user_id:
+                        cursor = db.sessions.find(
+                            {"trip_id": trip_id, "user_id": user_id},
+                            {"session_id": 1, "chat_id": 1},
+                        ).sort("last_updated", -1).limit(50)
+                        async for sdoc in cursor:
+                            sid = sdoc.get("session_id")
+                            if not sid and sdoc.get("chat_id"):
+                                sid = f"{user_id}::{sdoc.get('chat_id')}"
+                            if not sid or sid in resolved_session_ids:
+                                continue
+                            resolved_session_ids.append(sid)
+                            s_options = await cache.get_all_session_options(sid)
+                            s_raw = await cache.get_raw_amadeus(sid)
+                            _merge_options(options, s_options or {})
+                            if isinstance(s_raw, dict):
+                                for k, v in s_raw.items():
+                                    raw_amadeus[f"{sid}|{k}"] = v
+                        if len(resolved_session_ids) > 1:
+                            source_scope = "trip"
+
+        summary = {
+            "flights_outbound": _count_slot(options.get("flights_outbound")),
+            "flights_inbound": _count_slot(options.get("flights_inbound")),
+            "ground_transport": _count_slot(options.get("ground_transport")),
+            "accommodation": _count_slot(options.get("accommodation")),
+        }
+        return {
+            "session_id": session_id,
+            "source_scope": source_scope,
+            "resolved_session_ids": resolved_session_ids,
+            "summary": summary,
+            "options": serialize_datetime(options),
+            "raw_amadeus": serialize_datetime(raw_amadeus),
+        }
+    except Exception as e:
+        logger.error(f"Amadeus viewer for session {session_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # =============================================================================
 # AI รู้จัก User (%) — วัดด้วย AI ว่า AI รู้จัก user มากน้อยแค่ไหน
 # =============================================================================
@@ -1509,7 +2297,7 @@ async def _gather_user_context_for_familiarity(user_id: str) -> Dict[str, Any]:
 
 
 def _heuristic_familiarity_score(factors: Dict[str, bool]) -> int:
-    """คะแนนประมาณ 0–100 จาก factors (ไม่ใช้ AI)."""
+    """คะแนนประมาณ 0–100 จาก factors (ไม่ใช้ AI): ความจำ +35, โปรไฟล์ +35, ความชอบ +30."""
     score = 0
     if factors.get("has_memory"):
         score += 35
@@ -1520,14 +2308,77 @@ def _heuristic_familiarity_score(factors: Dict[str, bool]) -> int:
     return min(100, score)
 
 
+def _familiarity_methodology_payload(
+    source: str,
+    score_percent: int,
+    heuristic_baseline: int,
+) -> Dict[str, str]:
+    """คำอธิบายภาษาไทยว่า % มาจากไหน (ให้ผู้ดูแดชบอร์ดเข้าใจขอบเขตของตัวเลข)."""
+    base_rule = (
+        "คะแนนฐานแบบกฎคงที่ (ไม่ใช้ LLM): ถ้ามีความจำตามเงื่อนไข +35%, มีโปรไฟล์พอใช้ +35%, "
+        "มีความชอบการเดินทาง/เซสชัน +30% — รวมสูงสุด 100%"
+    )
+    if source == "ai":
+        return {
+            "score_source_th": "โมเดล LLM (อ่านข้อความที่ย่อจากความจำ/โปรไฟล์/ความชอบ แล้วให้คะแนน 0–100)",
+            "heuristic_baseline_percent": str(heuristic_baseline),
+            "this_score_th": (
+                f"ตัวเลข {score_percent}% มาจากคำตอบของ LLM (จำกัดช่วง 0–100 หลังรับค่า) "
+                f"— เป็นดัชนีเชิงภาษาว่ามีบริบทพอให้พูดถึง user นี้หรือไม่ ไม่ใช่ค่าวัดพฤติกรรมจริงในโลกภายนอก"
+            ),
+            "baseline_compare_th": (
+                f"คะแนนฐานจากกฎเดียวกับตาราง Sessions คือ {heuristic_baseline}% "
+                "(ใช้เปรียบเทียบกับคะแนน LLM ไม่ได้นำมาผสมเป็นค่าสุดท้าย)"
+            ),
+            "data_pipeline_th": (
+                "ข้อมูลที่ส่งให้ประเมิน: (1) MongoDB memories ผ่าน MemoryService.recall สูงสุด 15 รายการ "
+                "(2) users — ชื่อ อีเมล preferences.travelPreferences และ memory_summaries บางส่วน "
+                "(3) sessions ล่าสุด — travel_preferences"
+            ),
+            "factor_gates_th": (
+                "เงื่อนไขสวิตช์มี/ไม่มี (สำหรับคะแนนฐานและแสดงในแดชบอร์ด): "
+                "ความจำ = ข้อความสรุปความจำยาวมากกว่า 20 ตัวอักษร, "
+                "โปรไฟล์ = ข้อความรวมโปรไฟล์ยาวมากกว่า 10 ตัวอักษร, "
+                "ความชอบ = มี travel_preferences เมื่อแปลงเป็น string ยาวมากกว่า 10 ตัวอักษร"
+            ),
+            "batch_sessions_note_th": (
+                "คอลัมน์ % ในตาราง Recent Sessions ใช้เฉพาะคะแนนฐานแบบกฎคงที่ (ไม่เรียก LLM) เพื่อความเร็ว — "
+                "กด \"วัดด้วย AI\" เพื่อได้คะแนนแบบเดียวกับการ์ดนี้"
+            ),
+            "base_rule_th": base_rule,
+        }
+    return {
+        "score_source_th": "กฎคงที่ในเซิร์ฟเวอร์ (heuristic) — ไม่เรียก LLM",
+        "heuristic_baseline_percent": str(score_percent),
+        "this_score_th": (
+            f"ตัวเลข {score_percent}% คำนวณตาม {base_rule} เท่านั้น "
+            "(สอดคล้องกับสวิตช์ ความจำ / โปรไฟล์ / ความชอบ ที่แสดงด้านบน)"
+        ),
+        "baseline_compare_th": "ในโหมดนี้ไม่มีคะแนนแยกจาก LLM — ค่าที่เห็นคือคะแนนฐานทั้งหมด",
+        "data_pipeline_th": (
+            "ข้อมูลที่ใช้ตัดสินใจสวิตช์และข้อความสรุป: memories (MemoryService), users, sessions.travel_preferences — "
+            "เหมือนกรณีที่เรียก LLM แต่คะแนนตัวเลขมาจากกฎบวกคงที่เท่านั้น"
+        ),
+        "factor_gates_th": (
+            "เงื่อนไขสวิตช์: ความจำยาวมากกว่า 20 ตัวอักษร, โปรไฟล์มากกว่า 10 ตัวอักษร, "
+            "ความชอบ (string ของ travel_preferences) มากกว่า 10 ตัวอักษร"
+        ),
+        "batch_sessions_note_th": (
+            "ตาราง Recent Sessions แสดง % แบบเดียวกับที่นี่ (heuristic) — กด \"วัดด้วย AI\" หากต้องการให้ LLM ประเมินเพิ่ม"
+        ),
+        "base_rule_th": base_rule,
+    }
+
+
 @router.get("/user-familiarity")
 async def get_user_familiarity(
     user_id: Optional[str] = None,
     _auth: bool = Depends(verify_admin_auth),
 ):
     """
-    วัดด้วย AI ว่า AI รู้จัก user นี้มากน้อยแค่ไหน (0–100%).
-    คืนค่า score_percent, reason (จาก AI), และ factors.
+    วัดว่า AI รู้จัก user นี้มากน้อยแค่ไหน (0–100%).
+    ปกติ: LLM ให้คะแนนและเหตุผลจากข้อความที่ย่อจาก DB; ถ้า LLM ใช้ไม่ได้ใช้คะแนน heuristic (+35/+35/+30).
+    คืนค่า methodology (คำอธิบายแหล่งที่มาและวิธีคิด %) ใน JSON.
     """
     if not user_id or not user_id.strip():
         raise HTTPException(status_code=400, detail="user_id is required")
@@ -1550,8 +2401,9 @@ async def get_user_familiarity(
 {json.dumps(ctx["travel_preferences"], ensure_ascii=False)[:1000]}
 
 ให้คะแนน 0–100 ว่า "AI รู้จัก user นี้มากน้อยแค่ไหน" (100 = รู้จักดีมาก มีข้อมูลเพียงพอให้วางแผน/แนะนำได้เอง)
+กฎสำคัญ: อนุมานและเหตุผลต้องอิงเฉพาะข้อความในบล็อก Memory/Profile/Travel preferences ข้างบนเท่านั้น ห้ามแต่งข้อเท็จจริงที่ไม่ปรากฏในข้อความนั้น
 ตอบเฉพาะ JSON เท่านั้น ไม่มี markdown ไม่มีคำอธิบายอื่น:
-{{"score": <ตัวเลข 0-100>, "reason": "<ประโยคสั้นๆ เป็นภาษาไทย อธิบายว่าทำไมถึงได้คะแนนนี้>"}}
+{{"score": <ตัวเลข 0-100>, "reason": "<ประโยคสั้นๆ ภาษาไทย อธิบายคะแนนโดยอ้างว่ามีข้อมูลประเภทใดจากบล็อกข้างบนบ้าง (เช่น ความจำ โปรไฟล์ ความชอบ)>"}}
 """
     try:
         llm = LLMService()
@@ -1608,7 +2460,7 @@ async def get_user_familiarity(
             if len(reason) > 300:
                 reason = reason[:300] + "…"
             return _user_familiarity_response(
-                user_id, score, reason, ctx, "ai",
+                user_id, score, reason, ctx, "ai", heuristic_baseline=heuristic,
             )
         except (TypeError, ValueError, KeyError):
             pass
@@ -1628,6 +2480,7 @@ def _user_familiarity_response(
     reason: str,
     ctx: Dict[str, Any],
     source: str,
+    heuristic_baseline: Optional[int] = None,
 ) -> Dict[str, Any]:
     """สร้าง response พร้อม breakdown สำหรับแสดงว่า AI รู้จัก user อย่างไร"""
     mem = (ctx.get("memory_context") or "").strip()
@@ -1652,12 +2505,16 @@ def _user_familiarity_response(
         if prefs.get("prefer_direct_flight"):
             prefs_parts.append("ชอบบินตรง")
     preferences_summary = " | ".join(prefs_parts) if prefs_parts else ""
+    hb = heuristic_baseline if heuristic_baseline is not None else score_percent
+    methodology = _familiarity_methodology_payload(source, score_percent, hb)
     return {
         "user_id": user_id,
         "score_percent": score_percent,
         "reason": reason,
         "factors": ctx["factors"],
         "source": source,
+        "heuristic_baseline_percent": hb,
+        "methodology": methodology,
         "breakdown": {
             "memory_summary": memory_summary or None,
             "profile_summary": profile_summary or None,
@@ -1690,10 +2547,22 @@ async def get_user_familiarity_batch(
                 "score_percent": score,
                 "factors": ctx["factors"],
                 "source": "heuristic",
+                "heuristic_baseline_percent": score,
+                "score_note_th": (
+                    "คะแนนนี้จากกฎคงที่เท่านั้น (ไม่เรียก LLM): มีความจำตามเงื่อนไข +35%, โปรไฟล์ +35%, "
+                    "ความชอบการเดินทาง/เซสชัน +30% — ดูการ์ด \"AI รู้จัก User\" แล้วกดวัดด้วย AI สำหรับคะแนนจากโมเดล"
+                ),
             })
         except Exception as e:
             logger.warning(f"Admin user-familiarity batch failed for {uid}: {e}")
-            items.append({"user_id": uid, "score_percent": 0, "factors": {}, "source": "error"})
+            items.append({
+                "user_id": uid,
+                "score_percent": 0,
+                "factors": {},
+                "source": "error",
+                "heuristic_baseline_percent": 0,
+                "score_note_th": "โหลดข้อมูล user ไม่สำเร็จ — ไม่มีคะแนน",
+            })
     return {"items": items}
 
 

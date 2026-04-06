@@ -42,8 +42,16 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
   const seatPanelRef = useRef(null);
   const [seatPanelPosition, setSeatPanelPosition] = useState(null);
 
+  const [flightType, setFlightType] = useState('all'); // 'all' | 'direct' | 'connecting'
+  const [flightTypeDropdownOpen, setFlightTypeDropdownOpen] = useState(false);
+  const flightTypeDropdownRef = useRef(null);
+  const flightTypeTriggerRef = useRef(null);
+  const flightTypePanelRef = useRef(null);
+  const [flightTypePanelPosition, setFlightTypePanelPosition] = useState(null);
+
   const PASSENGER_PANEL_WIDTH = 280;
   const SEAT_PANEL_WIDTH = 220;
+  const FLIGHT_TYPE_PANEL_WIDTH = 260;
   const updatePassengerPanelPosition = useCallback(() => {
     if (!passengerTriggerRef.current) return;
     const rect = passengerTriggerRef.current.getBoundingClientRect();
@@ -128,11 +136,59 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
     };
   }, [seatDropdownOpen, updateSeatPanelPosition]);
 
+  const updateFlightTypePanelPosition = useCallback(() => {
+    if (!flightTypeTriggerRef.current) return;
+    const rect = flightTypeTriggerRef.current.getBoundingClientRect();
+    const padding = 12;
+    let left = rect.left;
+    if (left + FLIGHT_TYPE_PANEL_WIDTH > window.innerWidth - padding) {
+      left = Math.max(padding, window.innerWidth - FLIGHT_TYPE_PANEL_WIDTH - padding);
+    }
+    setFlightTypePanelPosition({
+      top: rect.bottom + 8,
+      left,
+      width: FLIGHT_TYPE_PANEL_WIDTH,
+    });
+  }, []);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      const inTrigger = flightTypeDropdownRef.current?.contains(e.target);
+      const inPanel = flightTypePanelRef.current?.contains(e.target);
+      if (!inTrigger && !inPanel) setFlightTypeDropdownOpen(false);
+    };
+    if (flightTypeDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [flightTypeDropdownOpen]);
+
+  useEffect(() => {
+    if (!flightTypeDropdownOpen) {
+      setFlightTypePanelPosition(null);
+      return;
+    }
+    updateFlightTypePanelPosition();
+    const onScrollOrResize = () => updateFlightTypePanelPosition();
+    window.addEventListener('scroll', onScrollOrResize, true);
+    window.addEventListener('resize', onScrollOrResize);
+    return () => {
+      window.removeEventListener('scroll', onScrollOrResize, true);
+      window.removeEventListener('resize', onScrollOrResize);
+    };
+  }, [flightTypeDropdownOpen, updateFlightTypePanelPosition]);
+
   const CABIN_OPTIONS = [
     { value: 'ECONOMY', labelKey: 'flights.cabinEconomy' },
     { value: 'PREMIUM_ECONOMY', labelKey: 'flights.cabinPremiumEconomy' },
     { value: 'BUSINESS', labelKey: 'flights.cabinBusiness' },
     { value: 'FIRST', labelKey: 'flights.cabinFirst' },
+  ];
+
+  const FLIGHT_TYPE_OPTIONS = [
+    { value: 'all', labelKey: 'flights.flightTypeAll' },
+    { value: 'direct', labelKey: 'flights.flightTypeDirect' },
+    { value: 'connecting', labelKey: 'flights.flightTypeConnecting' },
   ];
 
   const IATA_CITY = {
@@ -429,6 +485,7 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
       if (p.children > 0) params.set('children', String(p.children));
       if (p.infants > 0) params.set('infants', String(p.infants));
       if (seatType && seatType !== 'ECONOMY') params.set('cabin_class', seatType);
+      if (flightType === 'direct') params.set('non_stop', 'true');
 
       const response = await fetch(`${baseUrl}/api/mcp/search/flights?${params.toString()}`, {
         method: 'POST',
@@ -443,8 +500,14 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
         throw new Error(errMsg || "ค้นหาไม่สำเร็จ");
       }
 
-      // ดึงจากฟิลด์ flights ตามที่สำเร็จใน image_612c1a.jpg (รูปแบบ Amadeus: itineraries, price)
-      setFlights(resData.flights || []);
+      let list = resData.flights || [];
+      if (flightType === 'connecting') {
+        list = list.filter((f) => {
+          const itineraries = f.itineraries || [];
+          return itineraries.every((it) => (it.segments?.length || 0) > 1);
+        });
+      }
+      setFlights(list);
       setLogoShowFallback(new Set());
     } catch (err) {
       Swal.fire({ icon: 'error', text: err.message, toast: true, position: 'top', showConfirmButton: false, timer: 3000 });
@@ -762,6 +825,71 @@ export default function FlightsPage({ user, onLogout, onSignIn, onNavigateToBook
                           e.preventDefault();
                           setSeatType(opt.value);
                           setSeatDropdownOpen(false);
+                        }
+                      }}
+                    >
+                      {t(opt.labelKey)}
+                    </div>
+                  ))}
+                </div>,
+                document.body
+              )}
+            </div>
+            <div className="flights-field-wrap flights-option-field flights-seat-dropdown-wrap" ref={flightTypeDropdownRef}>
+              <label className="flights-field-label" id="flights-flight-type-label">{t('flights.flightType')}</label>
+              <div
+                ref={flightTypeTriggerRef}
+                className="flights-seat-trigger"
+                onClick={() => setFlightTypeDropdownOpen((o) => !o)}
+                role="combobox"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setFlightTypeDropdownOpen((o) => !o);
+                  }
+                  if (e.key === 'Escape') setFlightTypeDropdownOpen(false);
+                }}
+                aria-expanded={flightTypeDropdownOpen}
+                aria-haspopup="listbox"
+                aria-labelledby="flights-flight-type-label"
+                aria-activedescendant={flightTypeDropdownOpen ? `flights-flight-type-option-${flightType}` : undefined}
+              >
+                <span className="flights-seat-trigger-text">{t(FLIGHT_TYPE_OPTIONS.find((o) => o.value === flightType)?.labelKey || 'flights.flightTypeAll')}</span>
+                <span className={`flights-seat-trigger-arrow ${flightTypeDropdownOpen ? 'open' : ''}`} aria-hidden="true">▼</span>
+              </div>
+              {flightTypeDropdownOpen && flightTypePanelPosition && createPortal(
+                <div
+                  ref={flightTypePanelRef}
+                  className="flights-seat-dropdown-panel"
+                  data-theme={theme}
+                  role="listbox"
+                  aria-labelledby="flights-flight-type-label"
+                  style={{
+                    position: 'fixed',
+                    top: flightTypePanelPosition.top,
+                    left: flightTypePanelPosition.left,
+                    width: flightTypePanelPosition.width,
+                    minWidth: flightTypePanelPosition.width,
+                    maxWidth: flightTypePanelPosition.width,
+                  }}
+                >
+                  {FLIGHT_TYPE_OPTIONS.map((opt) => (
+                    <div
+                      key={opt.value}
+                      id={`flights-flight-type-option-${opt.value}`}
+                      role="option"
+                      aria-selected={flightType === opt.value}
+                      className={`flights-seat-option ${flightType === opt.value ? 'selected' : ''}`}
+                      onClick={() => {
+                        setFlightType(opt.value);
+                        setFlightTypeDropdownOpen(false);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setFlightType(opt.value);
+                          setFlightTypeDropdownOpen(false);
                         }
                       }}
                     >

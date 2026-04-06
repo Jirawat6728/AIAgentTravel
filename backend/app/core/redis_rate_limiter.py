@@ -1,11 +1,15 @@
 """
-ตัวจำกัดอัตรา (Rate Limiter) แบบ in-memory (Redis ถูกลบออกแล้ว)
+ตัวจำกัดอัตรา (Rate Limiter)
+- ใช้ Redis เมื่อพร้อม (distributed rate limit)
+- Fallback เป็น in-memory เสมอถ้า Redis ใช้ไม่ได้
 """
 
 import time
 from collections import defaultdict
 from typing import Tuple, Optional
 from app.core.logging import get_logger
+from app.core.redis_client import get_redis, is_redis_available
+from app.core.config import settings
 
 logger = get_logger(__name__)
 
@@ -31,6 +35,27 @@ class RedisRateLimiter:
         return f"ratelimit:{identifier}"
 
     async def is_allowed(self, identifier: str) -> Tuple[bool, int]:
+        # Redis path: ใช้เมื่อมี REDIS_URL และ Redis พร้อมใช้งาน
+        if is_redis_available():
+            try:
+                redis = await get_redis()
+                if redis is not None:
+                    key = self._make_key(identifier)
+                    # ใช้ atomic INCR + TTL window (fixed window)
+                    current = await redis.incr(key)
+                    if current == 1:
+                        await redis.expire(key, self.window_seconds)
+                    remaining = max(0, self.max_requests - current)
+                    if current > self.max_requests:
+                        logger.warning(
+                            f"Rate limit (Redis) exceeded for {identifier}: {current}/{self.max_requests}"
+                        )
+                        return False, 0
+                    return True, remaining
+            except Exception as e:
+                logger.debug(f"RedisRateLimiter Redis path failed, falling back to memory: {e}")
+
+        # In-memory fallback
         return self._is_allowed_memory(identifier)
 
     def _is_allowed_memory(self, identifier: str) -> Tuple[bool, int]:

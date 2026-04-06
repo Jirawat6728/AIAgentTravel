@@ -6,6 +6,7 @@ import { useTheme } from '../../context/ThemeContext';
 import { useFontSize } from '../../context/FontSizeContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { formatPriceInThb } from '../../utils/currency';
+import { isTripPastTransactionDeadline } from '../../utils/tripDateLock';
 
 class ChatErrorBoundary extends React.Component {
   constructor(props) {
@@ -85,7 +86,6 @@ import {
   TripSummaryCard,
   UserInfoCard,
   ConfirmBookingCard,
-  FinalTripSummary,
   isLocationInThailand,
 } from '../../components/bookings/TripSummaryUI';
 import {
@@ -121,6 +121,46 @@ function shortDate(iso) {
   } catch {
     return iso || '';
   }
+}
+
+// Visa-free phase 1 (easy-to-edit whitelist)
+const VISA_FREE_WHITELIST_BY_NATIONALITY = {
+  TH: ['JP', 'KR', 'SG', 'MY', 'VN', 'LA', 'KH', 'ID', 'PH', 'HK', 'MO', 'TW'],
+};
+
+const DESTINATION_COUNTRY_KEYWORDS = {
+  JP: ['japan', 'ญี่ปุ่น', 'tokyo', 'โตเกียว', 'osaka', 'โอซาก้า', 'nrt', 'hnd', 'kix'],
+  KR: ['korea', 'เกาหลี', 'seoul', 'โซล', 'icn', 'busan', 'ปูซาน'],
+  SG: ['singapore', 'สิงคโปร์', 'sin', 'changi'],
+  MY: ['malaysia', 'มาเลเซีย', 'kuala lumpur', 'kul', 'penang', 'ปีนัง'],
+  VN: ['vietnam', 'เวียดนาม', 'hanoi', 'ฮานอย', 'ho chi minh', 'โฮจิมินห์', 'sgn', 'han'],
+  LA: ['laos', 'ลาว', 'vientiane', 'เวียงจันทน์', 'vte', 'luang prabang', 'lpq'],
+  KH: ['cambodia', 'กัมพูชา', 'phnom penh', 'พนมเปญ', 'pnh', 'siem reap', 'rep'],
+  ID: ['indonesia', 'อินโดนีเซีย', 'jakarta', 'จาการ์ตา', 'bali', 'บาหลี', 'cgk', 'dps'],
+  PH: ['philippines', 'ฟิลิปปินส์', 'manila', 'มะนิลา', 'mnl', 'cebu', 'เซบู'],
+  HK: ['hong kong', 'ฮ่องกง', 'hkg'],
+  MO: ['macau', 'มาเก๊า', 'mfm'],
+  TW: ['taiwan', 'ไต้หวัน', 'taipei', 'ไทเป', 'tpe', 'kaohsiung', 'เกาสง'],
+};
+
+function normalizeNationalityCode(nationality) {
+  if (!nationality || typeof nationality !== 'string') return '';
+  return nationality.trim().toUpperCase().slice(0, 2);
+}
+
+function resolveDestinationCountryCode(destinationText) {
+  const text = (destinationText || '').toString().trim().toLowerCase();
+  if (!text) return null;
+  return Object.entries(DESTINATION_COUNTRY_KEYWORDS).find(([, keywords]) =>
+    keywords.some((keyword) => text.includes(keyword))
+  )?.[0] || null;
+}
+
+function isVisaFreeRoute(nationality, destinationText) {
+  const nat = normalizeNationalityCode(nationality);
+  const countryCode = resolveDestinationCountryCode(destinationText);
+  if (!nat || !countryCode) return false;
+  return (VISA_FREE_WHITELIST_BY_NATIONALITY[nat] || []).includes(countryCode);
 }
 
 let _msgSeq = 0;
@@ -700,19 +740,20 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                     processingTripId === activeChat.chatId);
   const [isRecording, setIsRecording] = useState(false);
   const [isVoiceMode, setIsVoiceMode] = useState(false);
+  const [voiceModeNotice, setVoiceModeNotice] = useState('');
+  const [voiceDraft, setVoiceDraft] = useState('');
   const recognitionRef = useRef(null);
   const synthesisRef = useRef(null);
   const isVoiceModeRef = useRef(false); // ใช้ ref เพื่อตรวจสอบใน callback
-  const liveAudioWebSocketRef = useRef(null); // ✅ WebSocket สำหรับ Live Audio
-  const audioContextRef = useRef(null); // ✅ AudioContext สำหรับ real-time audio
-  const mediaRecorderRef = useRef(null); // ✅ MediaRecorder สำหรับ capture audio
+  const voiceAwaitingResponseRef = useRef(false); // รอ AI ตอบ (ปิดไมค์ชั่วคราว)
+  const voiceAiSpeakingRef = useRef(false); // AI กำลังพูด (ปิดไมค์ชั่วคราว)
   const isMountedRef = useRef(true); // ✅ ป้องกัน setState หลัง unmount
   
   // ✅ Cleanup voice mode เมื่อ component unmount
   useEffect(() => {
     return () => {
       isMountedRef.current = false;
-      stopLiveVoiceMode();
+      stopVoiceMode();
     };
   }, []);
   // #region frontend error debug log (H3 H4) - ใช้ sendTelemetry จะส่งเฉพาะเมื่อ VITE_TELEMETRY_ENABLED=true
@@ -858,6 +899,28 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
   // ===== Booking state =====
   const [isBooking, setIsBooking] = useState(false);
   const [bookingResult, setBookingResult] = useState(null);
+  /** trip_id ที่มีการจองอยู่แล้ว (จาก API by-trip) — ใช้ปิดปุ่มยืนยันจองซ้ำ */
+  const [existingBookingForTripId, setExistingBookingForTripId] = useState(null);
+
+  // ✅ เช็คว่าทริปนี้มีการจองแล้วหรือไม่ (ห้ามกดจองซ้ำ) — ใช้ activeChat เพราะ activeTrip ประกาศด้านล่าง
+  useEffect(() => {
+    const trip = activeChat;
+    const tripId = trip?.tripId || trip?.chatId;
+    if (!tripId || !userId) {
+      setExistingBookingForTripId(null);
+      return;
+    }
+    let cancelled = false;
+    fetch(`${API_BASE_URL}/api/booking/by-trip?trip_id=${encodeURIComponent(tripId)}`, { credentials: 'include' })
+      .then((res) => (cancelled ? null : res.json()))
+      .then((data) => {
+        if (cancelled) return;
+        const hasBooking = data && (data._id || data.booking_id) && data.status !== 'cancelled';
+        setExistingBookingForTripId(hasBooking ? tripId : null);
+      })
+      .catch(() => { if (!cancelled) setExistingBookingForTripId(null); });
+    return () => { cancelled = true; };
+  }, [activeChat?.tripId, activeChat?.chatId, userId]);
 
   // ===== Derived: active trip =====
   // ✅ Use activeChat as activeTrip (already computed above)
@@ -1192,6 +1255,26 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
         const cid = t.chatId || t.tripId;
         historyCache.current.set(cid, nextMessages);
         return { ...t, messages: nextMessages, updatedAt: nowISO() };
+      });
+    });
+  };
+
+  /** เก็บผลการจองลง message ที่มี plan — เพื่อไม่ให้กดยืนยันจองซ้ำ (ใช้ร่วมกับ bookingResult ใน state) */
+  const updateMessageBookingResult = (tripId, result) => {
+    if (!tripId || !result) return;
+    setTrips(prev => {
+      const currentUserId = user?.id || userId;
+      return prev.map(t => {
+        const tripUserId = t.userId || t.user_id;
+        if (tripUserId && tripUserId !== currentUserId) return t;
+        if (t.tripId !== tripId && t.chatId !== tripId) return t;
+        const messages = Array.isArray(t.messages) ? t.messages : [];
+        const withIndex = messages.map((m, i) => ({ m, i }));
+        const last = withIndex.slice().reverse().find(({ m }) => m.type === 'bot' && (m.currentPlan || m.travelSlots));
+        if (!last) return t;
+        const newMessages = messages.slice();
+        newMessages[last.i] = { ...newMessages[last.i], bookingResult: result };
+        return { ...t, messages: newMessages, updatedAt: new Date().toISOString() };
       });
     });
   };
@@ -1623,6 +1706,10 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
 
   // ===== Edit message =====
   const handleEditMessage = (messageId, messageText) => {
+    if (isChatTripPastDeadline) {
+      Swal.fire({ icon: 'info', title: 'ทริปเลยวันแล้ว', text: 'ไม่สามารถแก้ไขข้อความเพื่อส่งใหม่ได้ — ดูประวัติแชทได้ตามปกติ', confirmButtonText: 'ตกลง' });
+      return;
+    }
     setEditingMessageId(messageId);
     setInputText(messageText);
     // scroll ลงมาที่ input และ focus
@@ -1642,6 +1729,16 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
   const sendMessage = async (textToSend) => {
     const trimmed = String(textToSend || '').trim();
     if (!trimmed) return;
+
+    if (isChatTripPastDeadline) {
+      await Swal.fire({
+        icon: 'info',
+        title: 'ทริปเลยวันแล้ว',
+        text: 'ไม่สามารถส่งข้อความหรือทำรายการเพิ่มได้ — ดูประวัติแชทได้ตามปกติ',
+        confirmButtonText: 'ตกลง',
+      });
+      return;
+    }
 
     // ✅ เปิด Trip Summary เลย เมื่อผู้ใช้พิมพ์ข้อความที่มีคำว่า "จองเลย" (รองรับ จองเลย / จอง เลย)
     if (/จอง\s*เลย/.test(trimmed)) {
@@ -1908,7 +2005,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                 }
 
                 // ✅ ถ้าอยู่ในโหมดเสียง ให้ Agent พูดตอบกลับ
-                if (isVoiceMode && botMessage.text) {
+                if (isVoiceModeRef.current && botMessage.text) {
                   // ลบ emoji และ markdown formatting ออกก่อนพูด
                   const cleanText = botMessage.text
                     .replace(/[🎯💡📋✅❌⏹️💙]/g, '')
@@ -1920,6 +2017,15 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                   
                   if (cleanText) {
                     speakText(cleanText);
+                  } else {
+                    voiceAwaitingResponseRef.current = false;
+                    if (!voiceAiSpeakingRef.current && recognitionRef.current) {
+                      try {
+                        recognitionRef.current.start();
+                        setIsRecording(true);
+                        setVoiceModeNotice('โหมดเสียงใหม่พร้อมใช้งาน: พูดได้เลย');
+                      } catch (_) {}
+                    }
                   }
                 }
 
@@ -2001,6 +2107,16 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
 
         appendMessageToTrip(targetId, errorMessage);
       }
+      if (isVoiceModeRef.current) {
+        voiceAwaitingResponseRef.current = false;
+        if (!voiceAiSpeakingRef.current && !synthesisRef.current && recognitionRef.current) {
+          try {
+            recognitionRef.current.start();
+            setIsRecording(true);
+            setVoiceModeNotice('โหมดเสียงใหม่พร้อมใช้งาน: พูดได้เลย');
+          } catch (_) {}
+        }
+      }
     } finally {
       setProcessingTripId(null);
       setAgentStatus(null); // Clear status
@@ -2016,6 +2132,11 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     if (!tripId || !targetId) return;
     const trimmed = String(userText || '').trim();
     if (!trimmed) return;
+
+    if (isChatTripPastDeadline) {
+      await Swal.fire({ icon: 'info', title: 'ทริปเลยวันแล้ว', text: 'ไม่สามารถรีเฟรชหรือส่งข้อความใหม่ได้', confirmButtonText: 'ตกลง' });
+      return;
+    }
 
     const now = Date.now();
     const lastAt = lastRefreshAtRef.current[messageId] || 0;
@@ -2137,7 +2258,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                 // Notification จะแสดงใน My Bookings แทน
 
                 // ✅ ถ้าอยู่ในโหมดเสียง ให้ Agent พูดตอบกลับ
-                if (isVoiceMode && botMessage.text) {
+                if (isVoiceModeRef.current && botMessage.text) {
                   const cleanText = botMessage.text
                     .replace(/[🎯💡📋✅❌⏹️💙]/g, '')
                     .replace(/\*\*(.*?)\*\*/g, '$1')
@@ -2147,6 +2268,16 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                     .trim();
                   
                   if (cleanText) speakText(cleanText);
+                  else {
+                    voiceAwaitingResponseRef.current = false;
+                    if (!voiceAiSpeakingRef.current && recognitionRef.current) {
+                      try {
+                        recognitionRef.current.start();
+                        setIsRecording(true);
+                        setVoiceModeNotice('โหมดเสียงใหม่พร้อมใช้งาน: พูดได้เลย');
+                      } catch (_) {}
+                    }
+                  }
                 }
 
                 // Keep plan/choices in state
@@ -2231,6 +2362,16 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
           type: 'bot',
           text
         });
+      }
+      if (isVoiceModeRef.current) {
+        voiceAwaitingResponseRef.current = false;
+        if (!voiceAiSpeakingRef.current && !synthesisRef.current && recognitionRef.current) {
+          try {
+            recognitionRef.current.start();
+            setIsRecording(true);
+            setVoiceModeNotice('โหมดเสียงใหม่พร้อมใช้งาน: พูดได้เลย');
+          } catch (_) {}
+        }
       }
     } finally {
       setProcessingTripId(null);
@@ -2351,6 +2492,15 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
 
   const handleSend = async () => {
     if (!inputText.trim()) return;
+    if (isChatTripPastDeadline) {
+      await Swal.fire({
+        icon: 'info',
+        title: 'ทริปเลยวันแล้ว',
+        text: 'ไม่สามารถส่งข้อความใหม่ได้ — ดูประวัติแชทได้ตามปกติ',
+        confirmButtonText: 'ตกลง',
+      });
+      return;
+    }
     const currentInput = inputText;
     
     // Check for typos and language issues
@@ -2446,269 +2596,28 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     }
   };
 
-  // ===== Voice Conversation Mode =====
-  // ✅ โหมดสนทนาด้วยเสียง: ลอง Live API ก่อน ถ้าไม่ได้ใช้โหมดพูด→พิมพ์→อ่าน (Speech Recognition + แชท + TTS)
+  // ===== Voice Conversation Mode (Rebuilt) =====
+  // โหมดใหม่: ใช้ SpeechRecognition + sendMessage + speakText เท่านั้น (ตัด Live/WebSocket ออก)
   const handleVoiceInput = () => {
     if (!isVoiceMode) {
+      if (isChatTripPastDeadline) {
+        Swal.fire({ icon: 'info', title: 'ทริปเลยวันแล้ว', text: 'ไม่สามารถเริ่มแชทด้วยเสียงได้ — โหมดดูอย่างเดียว', confirmButtonText: 'ตกลง' });
+        return;
+      }
       if (!user?.id && !user?.user_id) {
         alert('กรุณาเข้าสู่ระบบเพื่อใช้โหมดแชทด้วยเสียง');
         return;
       }
-      startLiveVoiceMode();
+      startVoiceMode();
     } else {
-      stopLiveVoiceMode();
+      stopVoiceMode();
     }
   };
 
-  // ✅ เริ่มโหมด Live Voice Conversation (ใช้ Gemini Live API)
-  // ส่ง PCM 16-bit 16kHz mono ตรงๆ ผ่าน WebSocket binary frame
-  const startLiveVoiceMode = async () => {
-    const liveConnectedRef = { current: false };
-    const fallbackDone = { current: false };
-
-    const doFallbackToSimpleMode = (message) => {
-      if (fallbackDone.current) return;
-      fallbackDone.current = true;
-      if (mediaRecorderRef.current) {
-        try {
-          const { stream, scriptNode, sourceNode } = mediaRecorderRef.current;
-          if (scriptNode) {
-            scriptNode.onaudioprocess = null;
-            scriptNode.disconnect();
-          }
-          if (sourceNode) sourceNode.disconnect();
-          if (stream) stream.getTracks().forEach(track => track.stop());
-        } catch (e) {
-          console.error('Error stopping audio nodes:', e);
-        }
-        mediaRecorderRef.current = null;
-      }
-      if (liveAudioWebSocketRef.current) {
-        try {
-          liveAudioWebSocketRef.current.close();
-        } catch (e) {
-          console.error('Error closing WebSocket:', e);
-        }
-        liveAudioWebSocketRef.current = null;
-      }
-      if (audioContextRef.current) {
-        audioContextRef.current.close().catch(() => {});
-        audioContextRef.current = null;
-      }
-      if (playbackCtx) {
-        playbackCtx.close().catch(() => {});
-      }
-      if (message) alert(message);
-      startSimpleVoiceMode();
-    };
-
-    let playbackCtx = null;
-    try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        alert('เบราว์เซอร์ของคุณไม่รองรับการบันทึกเสียง กรุณาใช้ Chrome หรือ Edge');
-        return;
-      }
-
-      setIsVoiceMode(true);
-      setIsRecording(true);
-      isVoiceModeRef.current = true;
-
-      // ── AudioContext 16kHz สำหรับ capture + 24kHz สำหรับ playback ──
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      const captureCtx = new AudioCtx({ sampleRate: 16000 });
-      audioContextRef.current = captureCtx;
-
-      // playback context แยกต่างหาก (24kHz ตาม Gemini output)
-      playbackCtx = new AudioCtx({ sampleRate: 24000 });
-
-      // ── Audio playback queue ──────────────────────────────────────
-      let nextPlayTime = 0;
-      let isAgentSpeaking = false;
-      const isMicMutedRef = { current: false }; // หยุดส่ง mic ขณะ AI พูด
-
-      const scheduleAudioChunk = (pcmBytes) => {
-        const numSamples = pcmBytes.length / 2;
-        const audioBuffer = playbackCtx.createBuffer(1, numSamples, 24000);
-        const channelData = audioBuffer.getChannelData(0);
-        const view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
-        for (let i = 0; i < numSamples; i++) {
-          channelData[i] = view.getInt16(i * 2, true) / 32768.0;
-        }
-        const source = playbackCtx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(playbackCtx.destination);
-
-        const now = playbackCtx.currentTime;
-        const startAt = Math.max(now, nextPlayTime);
-        source.start(startAt);
-        nextPlayTime = startAt + audioBuffer.duration;
-
-        if (!isAgentSpeaking) {
-          isAgentSpeaking = true;
-          isMicMutedRef.current = true;
-          setIsRecording(false);
-        }
-
-        source.onended = () => {
-          // ถ้าไม่มี chunk ใหม่ใน 200ms ถือว่า AI พูดจบ
-          setTimeout(() => {
-            if (playbackCtx.currentTime >= nextPlayTime - 0.05) {
-              isAgentSpeaking = false;
-              isMicMutedRef.current = false;
-              if (isVoiceModeRef.current) setIsRecording(true);
-            }
-          }, 200);
-        };
-      };
-
-      // ── ขออนุญาตใช้ไมโครโฟน ──────────────────────────────────────
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        }
-      });
-
-      // ── ScriptProcessorNode: capture PCM float32 → Int16 → binary ─
-      const sourceNode = captureCtx.createMediaStreamSource(stream);
-      const bufferSize = 4096;
-      // eslint-disable-next-line no-undef
-      const scriptNode = captureCtx.createScriptProcessor(bufferSize, 1, 1);
-      sourceNode.connect(scriptNode);
-      scriptNode.connect(captureCtx.destination);
-
-      mediaRecorderRef.current = { stream, scriptNode, sourceNode }; // เก็บไว้สำหรับ cleanup
-
-      // ── เชื่อมต่อ WebSocket ───────────────────────────────────────
-      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const apiUrl = new URL(API_BASE_URL);
-      const wsUrl = `${wsProtocol}//${apiUrl.host}/api/chat/live-audio?user_id=${encodeURIComponent(userId || 'anonymous')}&chat_id=${encodeURIComponent(activeTripId || 'default')}`;
-      const ws = new WebSocket(wsUrl);
-      ws.binaryType = 'arraybuffer';
-      liveAudioWebSocketRef.current = ws;
-
-      // ── ส่ง PCM binary เมื่อ WebSocket พร้อม ─────────────────────
-      scriptNode.onaudioprocess = (e) => {
-        if (!isVoiceModeRef.current) return;
-        if (isMicMutedRef.current) return; // หยุดส่งขณะ AI พูด
-        if (ws.readyState !== WebSocket.OPEN) return;
-
-        const float32 = e.inputBuffer.getChannelData(0);
-        const int16 = new Int16Array(float32.length);
-        for (let i = 0; i < float32.length; i++) {
-          const s = Math.max(-1, Math.min(1, float32[i]));
-          int16[i] = s < 0 ? s * 32768 : s * 32767;
-        }
-        ws.send(int16.buffer); // ส่งเป็น binary frame (PCM 16-bit LE 16kHz)
-      };
-
-      // ── รับข้อมูลจาก backend ─────────────────────────────────────
-      let transcriptBuffer = '';
-
-      ws.onopen = () => {
-        console.log('✅ Live Audio WebSocket connected');
-      };
-
-      ws.onmessage = async (event) => {
-        try {
-          // binary frame = PCM audio จาก Gemini
-          if (event.data instanceof ArrayBuffer) {
-            scheduleAudioChunk(new Uint8Array(event.data));
-            return;
-          }
-
-          const message = JSON.parse(event.data);
-
-          if (message.type === 'connected') {
-            console.log('✅ Live session ready:', message.message);
-
-          } else if (message.type === 'audio') {
-            // base64 PCM fallback
-            const raw = atob(message.data);
-            const bytes = new Uint8Array(raw.length);
-            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-            scheduleAudioChunk(bytes);
-
-          } else if (message.type === 'text') {
-            // สะสม transcript แล้วแสดงใน chat bubble
-            transcriptBuffer += message.data;
-
-          } else if (message.type === 'turn_complete') {
-            // AI พูดจบ 1 ประโยค → เพิ่มข้อความใน chat
-            if (transcriptBuffer.trim()) {
-              const botMsg = {
-                id: `voice_bot_${Date.now()}`,
-                type: 'bot',
-                text: transcriptBuffer.trim(),
-                timestamp: nowISO(),
-              };
-              const targetId = activeChat?.chatId || activeChat?.tripId;
-              if (targetId) {
-                setTrips(prev => {
-                  const idx = prev.findIndex(t => (t.chatId || t.tripId) === targetId);
-                  if (idx === -1) return prev;
-                  const updated = [...prev];
-                  updated[idx] = { ...updated[idx], messages: [...(updated[idx].messages || []), botMsg] };
-                  return updated;
-                });
-              }
-              transcriptBuffer = '';
-            }
-
-          } else if (message.type === 'interruption') {
-            // ผู้ใช้ขัดจังหวะ → หยุดเสียง AI ทันที
-            nextPlayTime = 0;
-            isAgentSpeaking = false;
-            isMicMutedRef.current = false;
-            setIsRecording(true);
-            transcriptBuffer = '';
-
-          } else if (message.type === 'error') {
-            console.error('Live Audio error:', message.message);
-            if (!fallbackDone.current) doFallbackToSimpleMode('โหมดเรียลไทม์ไม่พร้อม ใช้โหมดพูดแล้วพิมพ์แทน');
-          }
-        } catch (e) {
-          console.error('Error processing WebSocket message:', e);
-        }
-      };
-
-      ws.onerror = () => {
-        console.error('WebSocket error');
-        if (!fallbackDone.current) doFallbackToSimpleMode();
-      };
-
-      ws.onclose = () => {
-        console.log('Live Audio WebSocket closed');
-        if (liveConnectedRef.current) {
-          if (isVoiceModeRef.current) stopLiveVoiceMode();
-        } else if (!fallbackDone.current) {
-          doFallbackToSimpleMode();
-        }
-      };
-
-    } catch (error) {
-      console.error('Error starting live voice mode:', error);
-      if (!navigator.mediaDevices?.getUserMedia) {
-        stopLiveVoiceMode();
-        return;
-      }
-      doFallbackToSimpleMode('ไม่สามารถเริ่มโหมดเรียลไทม์ได้ ใช้โหมดพูดแล้วพิมพ์แทน');
-    }
-  };
-
-  // ✅ โหมดเสียงแบบง่าย: พูด → แปลเป็นข้อความ → ส่งแชท → ได้คำตอบ → อ่านด้วย TTS (ใช้เมื่อ Live WebSocket ใช้ไม่ได้)
-  const startSimpleVoiceMode = () => {
+  const startVoiceMode = () => {
     const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognitionAPI) {
       alert('เบราว์เซอร์ไม่รองรับการรับเสียง (Speech Recognition) กรุณาใช้ Chrome หรือ Edge');
-      if (isMountedRef.current) {
-        setIsVoiceMode(false);
-        setIsRecording(false);
-      }
-      isVoiceModeRef.current = false;
       return;
     }
 
@@ -2717,108 +2626,87 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       recognitionRef.current = null;
     }
 
-    setIsVoiceMode(true);
-    setIsRecording(true);
-    isVoiceModeRef.current = true;
-
     const recognition = new SpeechRecognitionAPI();
     recognition.continuous = true;
-    recognition.interimResults = false;
+    recognition.interimResults = true;
     recognition.lang = 'th-TH';
 
     recognition.onresult = (event) => {
       if (!isVoiceModeRef.current) return;
       const last = event.results.length - 1;
-      const transcript = event.results[last][0].transcript?.trim();
-      if (transcript) sendMessage(transcript);
+      const result = event.results[last];
+      const transcript = result?.[0]?.transcript ?? '';
+      const trimmed = transcript.trim();
+      if (!trimmed) return;
+
+      // อัปเดตประโยคที่ได้ยินแบบ realtime
+      if (isMountedRef.current) {
+        setVoiceDraft(trimmed);
+      }
+
+      // ถ้า engine บอกว่าเป็นผลสรุปสุดท้าย ค่อยหยุดฟังชั่วคราวและรอให้ผู้ใช้กดยืนยัน
+      if (result.isFinal) {
+        try { recognition.stop(); } catch (_) {}
+        if (isMountedRef.current) {
+          setIsRecording(false);
+          setVoiceModeNotice('ตรวจสอบข้อความก่อนส่ง หรือกดพูดใหม่อีกครั้ง');
+        }
+      }
     };
 
     recognition.onend = () => {
       if (!isVoiceModeRef.current || !recognitionRef.current) return;
+      // ระหว่างรอ AI ตอบ/AI กำลังพูด ไม่ต้องเปิดไมค์
+      if (synthesisRef.current || voiceAwaitingResponseRef.current || voiceAiSpeakingRef.current) return;
       try {
         recognitionRef.current.start();
-      } catch (e) {
-        if (isVoiceModeRef.current && isMountedRef.current) setIsRecording(true);
-      }
+        if (isMountedRef.current) setIsRecording(true);
+      } catch (_) {}
     };
 
     recognition.onerror = (event) => {
-      if (event.error === 'no-speech') return;
-      if (event.error === 'aborted') return;
-      console.warn('Speech recognition error:', event.error);
+      if (!isVoiceModeRef.current) return;
+      if (event.error === 'no-speech' || event.error === 'aborted') return;
+      if (isMountedRef.current) {
+        setVoiceModeNotice(`โหมดเสียงมีปัญหา (${event.error || 'unknown'})`);
+      }
     };
 
     recognitionRef.current = recognition;
+    isVoiceModeRef.current = true;
+    setIsVoiceMode(true);
+    setIsRecording(true);
+    setVoiceModeNotice('โหมดเสียงใหม่พร้อมใช้งาน: พูดได้เลย');
     try {
       recognition.start();
     } catch (e) {
-      console.error('Recognition start error:', e);
       isVoiceModeRef.current = false;
-      if (isMountedRef.current) {
-        setIsVoiceMode(false);
-        setIsRecording(false);
-      }
       recognitionRef.current = null;
+      setIsVoiceMode(false);
+      setIsRecording(false);
+      setVoiceModeNotice('เริ่มโหมดเสียงไม่สำเร็จ กรุณาลองใหม่');
     }
   };
 
-  // ✅ หยุดโหมด Live Voice Conversation
-  const stopLiveVoiceMode = () => {
+  const stopVoiceMode = () => {
     isVoiceModeRef.current = false;
-    if (isMountedRef.current) {
-      setIsVoiceMode(false);
-      setIsRecording(false);
-    }
+    voiceAwaitingResponseRef.current = false;
+    voiceAiSpeakingRef.current = false;
+    setVoiceDraft('');
+    setIsVoiceMode(false);
+    setIsRecording(false);
+    setVoiceModeNotice('');
 
-    // ✅ ปิด ScriptProcessor + MediaStream (แทน MediaRecorder เดิม)
-    if (mediaRecorderRef.current) {
-      try {
-        const { stream, scriptNode, sourceNode } = mediaRecorderRef.current;
-        if (scriptNode) {
-          scriptNode.onaudioprocess = null;
-          scriptNode.disconnect();
-        }
-        if (sourceNode) sourceNode.disconnect();
-        if (stream) stream.getTracks().forEach(track => track.stop());
-      } catch (e) {
-        console.error('Error stopping audio nodes:', e);
-      }
-      mediaRecorderRef.current = null;
-    }
-
-    // ✅ ปิด AudioContext
-    if (audioContextRef.current) {
-      audioContextRef.current.close().catch(e => console.error('Error closing AudioContext:', e));
-      audioContextRef.current = null;
-    }
-    
-    // ✅ ปิด WebSocket
-    if (liveAudioWebSocketRef.current) {
-      try {
-        liveAudioWebSocketRef.current.close();
-      } catch (e) {
-        console.error('Error closing WebSocket:', e);
-      }
-      liveAudioWebSocketRef.current = null;
-    }
-    
-    // ✅ หยุด Speech Recognition (ถ้ามี)
     if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (e) {
-        console.error('Error stopping recognition:', e);
-      }
+      try { recognitionRef.current.stop(); } catch (_) {}
       recognitionRef.current = null;
     }
 
-    // ✅ หยุดการพูดถ้ากำลังพูดอยู่
     if (synthesisRef.current) {
-      if (synthesisRef.current.pause) {
-        synthesisRef.current.pause();
-      } else {
-        window.speechSynthesis.cancel();
+      if (typeof synthesisRef.current.pause === 'function') {
+        try { synthesisRef.current.pause(); } catch (_) {}
       }
+      try { window.speechSynthesis.cancel(); } catch (_) {}
       synthesisRef.current = null;
     }
   };
@@ -2834,6 +2722,17 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     }
     
     try {
+      voiceAwaitingResponseRef.current = false;
+      voiceAiSpeakingRef.current = true;
+      // หยุดการฟังก่อนที่ AI จะพูด เพื่อลดการดูดเสียงจากลำโพงเข้ามาเอง
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch (_) {}
+      }
+      if (isMountedRef.current) {
+        setIsRecording(false);
+        setVoiceModeNotice('AI กำลังตอบกลับด้วยเสียง...');
+      }
+
       // ✅ เรียก Gemini TTS API
       const response = await fetch(`${API_BASE_URL}/api/chat/tts`, {
         method: 'POST',
@@ -2861,9 +2760,11 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       audio.onended = () => {
         URL.revokeObjectURL(audioUrl);
         synthesisRef.current = null;
+        voiceAiSpeakingRef.current = false;
         // หลังจากพูดเสร็จ ให้เริ่มฟังต่อ
         if (isVoiceModeRef.current && recognitionRef.current) {
           setIsRecording(true);
+          setVoiceModeNotice('โหมดเสียงใหม่พร้อมใช้งาน: พูดได้เลย');
           try {
             recognitionRef.current.start();
           } catch (e) {
@@ -2876,9 +2777,11 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
         console.error('Audio playback error:', e);
         URL.revokeObjectURL(audioUrl);
         synthesisRef.current = null;
+        voiceAiSpeakingRef.current = false;
         // ถ้าเกิด error ก็ให้เริ่มฟังต่อ
         if (isVoiceModeRef.current && recognitionRef.current) {
           setIsRecording(true);
+          setVoiceModeNotice('เล่นเสียงตอบกลับไม่สำเร็จ แต่ยังฟังต่อได้');
           try {
             recognitionRef.current.start();
           } catch (e) {
@@ -2896,6 +2799,8 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     } catch (error) {
       console.error('Error generating or playing TTS:', error);
       // ✅ Fallback: ใช้ browser TTS ถ้า Gemini TTS ล้มเหลว
+      voiceAwaitingResponseRef.current = false;
+      voiceAiSpeakingRef.current = true;
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = 'th-TH';
       utterance.rate = 1.0;
@@ -2914,8 +2819,10 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       
       utterance.onend = () => {
         synthesisRef.current = null;
+        voiceAiSpeakingRef.current = false;
         if (isVoiceModeRef.current && recognitionRef.current) {
           setIsRecording(true);
+          setVoiceModeNotice('โหมดเสียงใหม่พร้อมใช้งาน: พูดได้เลย');
           try {
             recognitionRef.current.start();
           } catch (e) {
@@ -2927,8 +2834,10 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       utterance.onerror = (e) => {
         console.error('Speech synthesis error:', e);
         synthesisRef.current = null;
+        voiceAiSpeakingRef.current = false;
         if (isVoiceModeRef.current && recognitionRef.current) {
           setIsRecording(true);
+          setVoiceModeNotice('เล่นเสียงตอบกลับไม่สำเร็จ แต่ยังฟังต่อได้');
           try {
             recognitionRef.current.start();
           } catch (e) {
@@ -2944,6 +2853,10 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
 
   // ===== Select slot choice (for flight/hotel slots) =====
   const handleSelectSlotChoice = async (choiceId, slotType, slotChoice, message) => {
+    if (isChatTripPastDeadline) {
+      Swal.fire({ icon: 'info', title: 'ทริปเลยวันแล้ว', text: 'ไม่สามารถเลือกตัวเลือกใหม่ได้ — ดูประวัติได้ตามปกติ', confirmButtonText: 'ตกลง' });
+      return;
+    }
     // ✅ บันทึกว่าผู้ใช้เลือกหมวดนี้แล้ว เพื่อแสดงหมวดถัดไป (ที่พักหลังเลือกเที่ยวบิน, การเดินทางหลังเลือกที่พัก)
     if (message?.id != null) {
       if (slotType === 'flight') {
@@ -3223,6 +3136,11 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     const targetId = activeTrip?.chatId || activeTrip?.tripId;
     if (!tripId || !targetId) return;
 
+    if (isChatTripPastDeadline) {
+      Swal.fire({ icon: 'info', title: 'ทริปเลยวันแล้ว', text: 'ไม่สามารถเลือกแผนใหม่ได้ — ดูประวัติได้ตามปกติ', confirmButtonText: 'ตกลง' });
+      return;
+    }
+
     // ✅ หา choice object ถ้ายังไม่มี (จาก latest message ที่มี planChoices)
     let choiceData = choice;
     if (!choiceData) {
@@ -3416,68 +3334,147 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
 
   // ===== Slot-based editing - พิมพ์ในแชทได้เลย ไม่ต้องมี popup =====
 
-  /** แสดง SweetAlert คุณพึงพอใจแค่ไหน (ให้ดาว 1–5) แล้วส่ง feedback ไป backend */
+  /** แสดง SweetAlert คุณพึงพอใจแค่ไหน — เฉพาะโหมดถาม (normal→ask) และ Agent เท่านั้น */
   const showAgentEvaluationSwal = (accuracyScore, chatId) => {
+    if (chatMode !== 'normal' && chatMode !== 'agent') {
+      return Promise.resolve({ isDismissed: true });
+    }
     const uid = Date.now();
     const starContainerId = `agent-star-rating-${uid}`;
     const starValueId = `agent-star-value-${uid}`;
+    const isDark =
+      typeof document !== 'undefined' && document.documentElement.classList.contains('dark');
+    const evalColors = isDark
+      ? {
+          heading: '#e2e8f0',
+          label: '#cbd5e1',
+          emptyStar: 'rgba(255, 255, 255, 0.32)',
+          filledStar: '#fbbf24',
+        }
+      : {
+          heading: '#111827',
+          label: '#374151',
+          emptyStar: '#d1d5db',
+          filledStar: '#f59e0b',
+        };
+    const criteriaRows = [
+      { rowId: `cr-${uid}-1`, key: 'understanding', label: 'เข้าใจคำถามและความต้องการของคุณ' },
+      { rowId: `cr-${uid}-2`, key: 'accuracy', label: 'ความถูกต้องและน่าเชื่อถือของข้อมูล' },
+      { rowId: `cr-${uid}-3`, key: 'completeness', label: 'ความครบถ้วนของคำตอบและคำแนะนำ' },
+      { rowId: `cr-${uid}-4`, key: 'clarity', label: 'ความชัดเจน อ่านง่าย และเป็นระเบียบ' },
+      { rowId: `cr-${uid}-5`, key: 'speed', label: 'ความรวดเร็วในการตอบกลับ' },
+      { rowId: `cr-${uid}-6`, key: 'relevance', label: 'ความเหมาะสมของตัวเลือกทริปหรือแผนการเดินทาง' },
+    ];
+    const starRowHtml = () =>
+      [1, 2, 3, 4, 5]
+        .map(
+          (n) =>
+            `<span class="agent-star-sub" data-rating="${n}" style="color:${evalColors.emptyStar}">★</span>`
+        )
+        .join('');
+    const criteriaHtml = criteriaRows
+      .map(
+        (c, i) => `
+        <div style="margin-bottom: 12px;">
+          <div style="font-size: 13px; color: ${evalColors.label}; margin-bottom: 4px; line-height: 1.4;">${i + 1}. ${c.label}</div>
+          <div id="${c.rowId}-c" style="font-size: 22px; letter-spacing: 4px; cursor: pointer; user-select: none;">${starRowHtml()}</div>
+          <input type="hidden" id="${c.rowId}-v" value="0" />
+        </div>
+      `
+      )
+      .join('');
     return Swal.fire({
       icon: 'info',
-      title: 'คุณพึงพอใจแค่ไหน',
+      iconColor: isDark ? '#60a5fa' : '#2563eb',
+      title: 'คุณพอใจ AI แค่ไหน',
+      width: 'min(96vw, 440px)',
+      customClass: {
+        popup: 'swal-custom-popup agent-evaluation-swal-popup',
+        htmlContainer: 'agent-evaluation-swal-html',
+      },
       html: `
-        <div style="text-align: left;">
-          <p style="margin-bottom: 8px;">ให้คะแนน AI (ดาว):</p>
-          <div id="${starContainerId}" style="font-size: 32px; letter-spacing: 6px; margin: 12px 0; cursor: pointer; user-select: none;">
-            <span class="agent-star" data-rating="1" style="color:#ddd">★</span>
-            <span class="agent-star" data-rating="2" style="color:#ddd">★</span>
-            <span class="agent-star" data-rating="3" style="color:#ddd">★</span>
-            <span class="agent-star" data-rating="4" style="color:#ddd">★</span>
-            <span class="agent-star" data-rating="5" style="color:#ddd">★</span>
+        <div class="agent-evaluation-swal-scroll" style="text-align: left; max-height: min(62vh, 420px); overflow-y: auto; padding-right: 8px;">
+          <p style="margin-bottom: 6px; font-weight: 600; color: ${evalColors.heading};">คะแนนโดยรวม</p>
+          <div id="${starContainerId}" style="font-size: 30px; letter-spacing: 6px; margin: 8px 0 16px; cursor: pointer; user-select: none;">
+            <span class="agent-star" data-rating="1" style="color:${evalColors.emptyStar}">★</span>
+            <span class="agent-star" data-rating="2" style="color:${evalColors.emptyStar}">★</span>
+            <span class="agent-star" data-rating="3" style="color:${evalColors.emptyStar}">★</span>
+            <span class="agent-star" data-rating="4" style="color:${evalColors.emptyStar}">★</span>
+            <span class="agent-star" data-rating="5" style="color:${evalColors.emptyStar}">★</span>
           </div>
           <input type="hidden" id="${starValueId}" value="0" />
+          <p style="margin: 0 0 8px; font-weight: 600; color: ${evalColors.heading}; font-size: 14px;">ประเมินรายหัวข้อ (ให้ดาวแต่ละข้อ)</p>
+          ${criteriaHtml}
         </div>
       `,
       confirmButtonText: 'ส่งคะแนน',
       showCancelButton: true,
       cancelButtonText: 'ข้าม',
       confirmButtonColor: '#2563eb',
-      cancelButtonColor: '#6b7280',
+      cancelButtonColor: isDark ? '#4b5563' : '#9ca3af',
       allowOutsideClick: true,
       didOpen: () => {
-        const container = document.getElementById(starContainerId);
-        const input = document.getElementById(starValueId);
-        if (!container || !input) return;
-        const stars = container.querySelectorAll('.agent-star');
-        const setStars = (n) => {
-          input.value = n;
+        const emptyC = evalColors.emptyStar;
+        const fillC = evalColors.filledStar;
+        const bindStars = (containerEl, hiddenInput) => {
+          if (!containerEl || !hiddenInput) return;
+          const stars = containerEl.querySelectorAll('.agent-star, .agent-star-sub');
+          const setStars = (n) => {
+            hiddenInput.value = String(n);
+            stars.forEach((el) => {
+              const r = parseInt(el.getAttribute('data-rating'), 10);
+              el.style.color = r <= n ? fillC : emptyC;
+            });
+          };
           stars.forEach((el) => {
-            const r = parseInt(el.getAttribute('data-rating'), 10);
-            el.style.color = r <= n ? '#f59e0b' : '#ddd';
+            el.addEventListener('click', () => setStars(parseInt(el.getAttribute('data-rating'), 10)));
           });
         };
-        stars.forEach((el) => {
-          el.addEventListener('click', () => setStars(parseInt(el.getAttribute('data-rating'), 10)));
+        const mainC = document.getElementById(starContainerId);
+        const mainIn = document.getElementById(starValueId);
+        bindStars(mainC, mainIn);
+        criteriaRows.forEach((c) => {
+          bindStars(document.getElementById(`${c.rowId}-c`), document.getElementById(`${c.rowId}-v`));
         });
       },
       preConfirm: () => {
-        const v = parseInt(document.getElementById(starValueId)?.value || '0', 10);
-        if (v < 1 || v > 5) {
-          Swal.showValidationMessage('กรุณาให้ดาว 1–5 ก่อนส่งคะแนน');
+        const main = parseInt(document.getElementById(starValueId)?.value || '0', 10);
+        if (main < 1 || main > 5) {
+          Swal.showValidationMessage('กรุณาให้คะแนนรวม 1–5 ดาว');
           return false;
         }
-        return v;
+        const criteriaRatings = {};
+        for (const c of criteriaRows) {
+          const v = parseInt(document.getElementById(`${c.rowId}-v`)?.value || '0', 10);
+          if (v < 1 || v > 5) {
+            Swal.showValidationMessage('กรุณาให้คะแนนทุกหัวข้อย่อย 1–5 ดาว');
+            return false;
+          }
+          criteriaRatings[c.key] = v;
+        }
+        return { stars: main, criteria_ratings: criteriaRatings };
       }
     }).then((evalResult) => {
-      if (evalResult?.value && typeof evalResult.value === 'number' && evalResult.value >= 1 && evalResult.value <= 5) {
-        const stars = evalResult.value;
+      const val = evalResult?.value;
+      if (val && typeof val === 'object' && val.stars >= 1 && val.stars <= 5 && val.criteria_ratings) {
+        const { stars, criteria_ratings: criteriaRatings } = val;
         const mode = chatMode === 'agent' ? 'agent' : 'ask';
         return fetch(`${API_BASE_URL}/api/chat/agent-feedback`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ chat_id: chatId, stars, mode })
+          body: JSON.stringify({ chat_id: chatId, stars, mode, criteria_ratings: criteriaRatings })
         }).then((res) => res.json()).then((data) => {
-          if (data?.ok) Swal.fire({ icon: 'success', title: 'ขอบคุณค่ะ', text: 'คะแนนของท่านจะถูกนำไปปรับปรุงความแม่นยำ', timer: 2000, showConfirmButton: false });
+          if (data?.ok) {
+            const pct = data.satisfaction_pct != null ? ` คิดเป็น ${data.satisfaction_pct}% ความพึงพอใจโดยรวม` : '';
+            Swal.fire({
+              icon: 'success',
+              title: 'ขอบคุณค่ะ',
+              text: `คะแนนของท่านจะถูกนำไปปรับปรุงความแม่นยำ${pct}`,
+              timer: 2200,
+              showConfirmButton: false,
+            });
+          }
           return evalResult;
         }).catch(() => evalResult);
       }
@@ -3497,14 +3494,57 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       return;
     }
 
-    setIsBooking(true);
-    setBookingResult(null);
-    setProcessingTripId(targetId);
-    
+    if (isChatTripPastDeadline) {
+      await Swal.fire({
+        icon: 'info',
+        title: 'ทริปเลยวันแล้ว',
+        text: 'ไม่สามารถยืนยันจองหรือทำรายการเพิ่มได้ — ดูประวัติแชทได้ตามปกติ',
+        confirmButtonText: 'ตกลง',
+      });
+      return;
+    }
+
     try {
       // ✅ ดึงข้อมูล plan และ travel_slots จาก selectedPlan และ selectedTravelSlots
       const plan = selectedPlan || {};
       const travelSlots = selectedTravelSlots || {};
+
+      // ✅ Travel document validation (Ask + Agent): ทริปต่างประเทศต้องมี Passport + Visa
+      const origin = travelSlots.origin_city || travelSlots.origin || plan.flight?.outbound?.[0]?.from || plan.flight?.segments?.[0]?.from || '';
+      const destination = travelSlots.destination_city || travelSlots.destination || plan.flight?.inbound?.[0]?.to || plan.flight?.segments?.[plan.flight?.segments?.length - 1]?.to || '';
+      const isInternationalTrip = !(isLocationInThailand(origin) && isLocationInThailand(destination));
+      const visaFreeRoute = isVisaFreeRoute(userProfile?.nationality, destination);
+      const hasPassportInfo = !!(userProfile?.passport_no && userProfile?.passport_expiry && userProfile?.nationality);
+      const hasVisaInfo = !!(
+        userProfile?.visa_type ||
+        userProfile?.visa_number ||
+        (Array.isArray(user?.visa_records) && user.visa_records.length > 0)
+      );
+      if (isInternationalTrip && (!hasPassportInfo || (!visaFreeRoute && !hasVisaInfo))) {
+        const missingDocs = [
+          !hasPassportInfo ? 'Passport' : null,
+          (!visaFreeRoute && !hasVisaInfo) ? 'Visa' : null,
+        ].filter(Boolean).join(', ');
+        await Swal.fire({
+          icon: 'warning',
+          title: 'เอกสารเดินทางไม่ครบ',
+          text: `ทริปต่างประเทศต้องมีข้อมูล ${missingDocs} ก่อนยืนยันการจอง`,
+          confirmButtonText: 'ไปแก้ไขโปรไฟล์',
+        });
+        return;
+      }
+
+      if (isInternationalTrip && visaFreeRoute) {
+        appendMessageToTrip(targetId, {
+          id: Date.now() + 2,
+          type: 'bot',
+          text: 'ℹ️ เส้นทางนี้ฟรีวีซ่าสำหรับสัญชาติของคุณ ใช้ Passport ที่ยังไม่หมดอายุในการเดินทางได้',
+        });
+      }
+
+      setIsBooking(true);
+      setBookingResult(null);
+      setProcessingTripId(targetId);
       
       // ✅ คำนวณ total_price
       let totalPrice = 0.0;
@@ -3653,6 +3693,8 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
               detail: data?.detail || errorMsg,
             };
         setBookingResult(result);
+        updateMessageBookingResult(targetId, result);
+        if (isAlreadyBooked) setExistingBookingForTripId(targetId);
         appendMessageToTrip(targetId, {
           id: Date.now() + 1,
           type: 'bot',
@@ -3686,6 +3728,8 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
         needs_payment: true,
       };
       setBookingResult(result);
+      updateMessageBookingResult(targetId, result);
+      setExistingBookingForTripId(targetId);
       const messageText = toMessageText(result.message);
       appendMessageToTrip(targetId, {
         id: Date.now() + 1,
@@ -3708,10 +3752,15 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
       // ✅ Trigger event to refresh My Bookings (เมื่อเปิดอยู่จะโหลดใหม่)
       window.dispatchEvent(new Event('bookingCreated'));
       
-      // ✅ โหมดถาม: แสดง SweetAlert คะแนนวัดผล AI (แบบเดียวกับโหมด Agent) หลังกดจอง
-      showAgentEvaluationSwal(null, chatId).then(() => {
+      // ✅ ประเมิน AI เฉพาะโหมดถาม (Ask) และ Agent — หลังกดจองแล้วค่อยไป My Bookings
+      const goBookings = () => {
         if (onNavigateToBookings) onNavigateToBookings();
-      });
+      };
+      if (chatMode === 'normal' || chatMode === 'agent') {
+        showAgentEvaluationSwal(null, chatId).then(goBookings);
+      } else {
+        goBookings();
+      }
     } catch (error) {
       const result = {
         ok: false,
@@ -3726,6 +3775,15 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
   };
 
   const handlePayment = async (bookingId) => {
+    if (isChatTripPastDeadline) {
+      await Swal.fire({
+        icon: 'info',
+        title: 'ทริปเลยวันแล้ว',
+        text: 'ไม่สามารถชำระเงินสำหรับทริปนี้ได้ — ดูรายการที่ My Bookings ได้ตามปกติ',
+        confirmButtonText: 'ตกลง',
+      });
+      return;
+    }
     setIsBooking(true);
     setBookingResult(null);
     
@@ -3863,6 +3921,11 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
   const effectiveSelectedPlan = selectedPlan || latestBotWithPlan?.currentPlan || null;
   const effectiveSelectedTravelSlots = selectedTravelSlots || latestBotWithPlan?.travelSlots || null;
 
+  const isChatTripPastDeadline = useMemo(
+    () => isTripPastTransactionDeadline(effectiveSelectedTravelSlots, effectiveSelectedPlan),
+    [effectiveSelectedTravelSlots, effectiveSelectedPlan]
+  );
+
   // ✅ ข้อความบอท "ล่าสุด" ที่มี planChoices หรือ slotChoices — แสดงการ์ดเฉพาะข้อความนี้ข้อความเดียว (แก้บั๊กแชทซ้อนหลายครั้ง)
   const latestBotWithChoices = useMemo(() => {
     const msgs = activeTrip?.messages || [];
@@ -3985,6 +4048,32 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
     // ไม่แสดง heartbeat (เอาออกตามที่ผู้ใช้ขอ)
     if (step === 'heartbeat') return null;
     return toolMap[step] || null;
+  };
+
+  // ===== Choice card colors =====
+  // ถ้าช้อยส์เกิน 10 ใบ ให้สุ่มสีเพิ่มแบบ deterministic (ยึด choice id) เพื่อไม่ให้สีกระพริบทุก render
+  const hashString = (input) => {
+    const s = String(input || '');
+    let h = 0;
+    for (let i = 0; i < s.length; i += 1) {
+      h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    }
+    return h;
+  };
+
+  const getChoiceCardStyle = (choice, idx, totalChoices, scopeKey = '') => {
+    if (!totalChoices || totalChoices <= 10 || idx < 10) return undefined;
+    const stableId = `${scopeKey}|${choice?.id || choice?._original_id || choice?.title || idx}`;
+    const h = hashString(stableId);
+    const hueA = h % 360;
+    const hueB = (hueA + 35 + (h % 70)) % 360;
+    const satA = 62 + (h % 12);
+    const satB = 74 + (h % 14);
+    const lightA = 34 + (h % 8);
+    const lightB = 46 + (h % 8);
+    return {
+      background: `linear-gradient(135deg, hsl(${hueA} ${satA}% ${lightA}%), hsl(${hueB} ${satB}% ${lightB}%))`,
+    };
   };
 
   const theme = useTheme();
@@ -4642,10 +4731,11 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                             
                             // ✅ แสดงเฉพาะข้อความล่าสุดที่มี plan (รวมจองสำเร็จ) — ป้องกันซ้อน
                             const isLatestWithPlan = latestBotWithPlan && message.id === latestBotWithPlan.id;
-                            // ✅ แสดง Trip Summary ก็ต่อเมื่อมีคำว่า "จองเลย" (ในข้อความบอทหรือผู้ใช้เคยพิมพ์จองเลย หรือกำลังแก้ไขและพิมพ์จองเลย) นอกนั้นห้ามแสดง
+                            // ✅ แสดง Trip Summary เมื่อมีคำว่า "จองเลย" หรือข้อความบอทบอกให้กดจอง (Confirm Booking / ยืนยันการจอง / รายละเอียดครบถ้วน)
                             const messageText = formatMessageText(message.text || '');
                             const inputSaysBookNow = /จอง\s*เลย/.test(String(inputText || '').trim());
-                            const hasBookNowKeyword = messageText.includes('จองเลย') || showTripSummary || (editingMessageId && inputSaysBookNow);
+                            const botSaysConfirmOrSummary = /Confirm\s*Booking|ยืนยันการจอง|รายละเอียดครบถ้วน|กด\s*จอง|กด\s*Confirm/i.test(messageText);
+                            const hasBookNowKeyword = messageText.includes('จองเลย') || showTripSummary || (editingMessageId && inputSaysBookNow) || botSaysConfirmOrSummary;
                             const shouldShow = message.type === 'bot' &&
                                    hasPlan &&
                                    isCoreReady &&
@@ -4689,15 +4779,6 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                                   travelSlots={selectedTravelSlots || message.travelSlots}
                                 />
                               </div>
-                              {/* ✅ Final Trip Summary - แสดงก่อนจอง */}
-                              <FinalTripSummary
-                                plan={selectedPlan || message.currentPlan}
-                                travelSlots={selectedTravelSlots || message.travelSlots}
-                                userProfile={userProfile}
-                                cachedOptions={message.cachedOptions || finalData?.cached_options}
-                                cacheValidation={message.cacheValidation || finalData?.cache_validation}
-                                workflowValidation={message.workflowValidation || message.agentState?.workflow_validation}
-                              />
                               <UserInfoCard 
                                 userProfile={userProfile} 
                                 onEdit={handleEditUserProfile}
@@ -4710,15 +4791,32 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                                 })()}
                               />
                               <ConfirmBookingCard
-                                canBook={!!selectedPlan && !!userProfile}
+                                canBook={(() => {
+                                  if (!selectedPlan || !userProfile) return false;
+                                  const slots = selectedTravelSlots || message.travelSlots || {};
+                                  const origin = slots.origin_city || slots.origin || '';
+                                  const dest = slots.destination_city || slots.destination || '';
+                                  const isInternationalTrip = !(isLocationInThailand(origin) && isLocationInThailand(dest));
+                                  if (!isInternationalTrip) return true;
+                                  const hasPassportInfo = !!(userProfile.passport_no && userProfile.passport_expiry && userProfile.nationality);
+                                  const visaFreeRoute = isVisaFreeRoute(userProfile.nationality, dest);
+                                  const hasVisaInfo = !!(
+                                    userProfile.visa_type ||
+                                    userProfile.visa_number ||
+                                    (Array.isArray(user?.visa_records) && user.visa_records.length > 0)
+                                  );
+                                  return hasPassportInfo && (visaFreeRoute || hasVisaInfo);
+                                })()}
                                 onConfirm={handleConfirmBooking}
                                 onPayment={handlePayment}
                                 onNavigateToBookings={onNavigateToBookings}
                                 note="ระบบจะจองเฉพาะ Amadeus Sandbox (test) เท่านั้น"
                                 isBooking={isBooking}
-                                bookingResult={bookingResult}
+                                bookingResult={message.bookingResult ?? bookingResult}
                                 chatMode={chatMode}
                                 agentState={latestBotMessage?.agentState || null}
+                                existingBookingForTrip={existingBookingForTripId === (activeTrip?.tripId || activeTrip?.chatId)}
+                                pastTripLocked={isChatTripPastDeadline}
                               />
                             </div>
                           )}
@@ -4856,13 +4954,15 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                                   const SlotCard = getSlotCardComponent(intent, choice);
                                   const stableKey = `slot-${String(message.id ?? '')}-${idx}-${choice.id ?? choice._original_id ?? idx}`;
                                   const isFlightInbound = intent === 'flight' && isInboundFlightChoice(choice);
-                                  const disableSelect = isFlightInbound && !outboundAlreadySelected;
+                                  const disableSelect = (isFlightInbound && !outboundAlreadySelected) || isChatTripPastDeadline;
+                                  const cardStyle = getChoiceCardStyle(choice, idx, sortedChoices.length, `slot-${message.id || 'msg'}`);
                                   return (
                                     <SlotCard
                                       key={stableKey}
                                       choice={choice}
                                       onSelect={disableSelect ? undefined : (id) => handleSelectSlotChoice(id, intent || getCat(choice), choice, message)}
                                       disableSelect={disableSelect}
+                                      cardStyle={cardStyle}
                                     />
                                   );
                                 })}
@@ -4911,11 +5011,13 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                               <div className="plan-choices-grid">
                                 {message.planChoices.map((choice, idx) => {
                                   const PlanCard = getPlanCardComponent(choice);
+                                  const cardStyle = getChoiceCardStyle(choice, idx, message.planChoices.length, `plan-${message.id || 'msg'}`);
                                   return (
                                     <PlanCard
                                       key={choice.id || `choice-${choice.title || ''}-${idx}`}
                                       choice={choice}
-                                      onSelect={(id) => handleSelectPlanChoice(id, choice)}
+                                      onSelect={isChatTripPastDeadline ? undefined : ((id) => handleSelectPlanChoice(id, choice))}
+                                      cardStyle={cardStyle}
                                     />
                                   );
                                 })}
@@ -4932,7 +5034,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                         <button
                           className="btn-action btn-refresh"
                           onClick={() => regenerateFromUserText(message.id, message.text)}
-                          disabled={isTyping}
+                          disabled={isTyping || isChatTripPastDeadline}
                           title="รีเฟรช"
                         >
                           🔄 รีเฟรช
@@ -4940,7 +5042,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                         <button
                           className="btn-action btn-edit"
                           onClick={() => handleEditMessage(message.id, message.text)}
-                          disabled={isTyping}
+                          disabled={isTyping || isChatTripPastDeadline}
                           title="แก้ไข"
                         >
                           ✏️ แก้ไข
@@ -4971,7 +5073,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                               handleRefreshBot(userMsg.id, userMsg.text);
                             }
                           }}
-                          disabled={isTyping || (() => {
+                          disabled={isTyping || isChatTripPastDeadline || (() => {
                             const tripMessages = activeTrip?.messages || [];
                             const botIdx = tripMessages.findIndex(m => m.id === message.id);
                             const before = tripMessages.slice(0, botIdx);
@@ -5158,6 +5260,23 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
 
           {/* Input Area */}
           <div className="input-area">
+            {isChatTripPastDeadline && (
+              <div
+                className="trip-readonly-banner"
+                style={{
+                  marginBottom: 10,
+                  padding: '10px 14px',
+                  background: 'rgba(245, 158, 11, 0.15)',
+                  border: '1px solid rgba(245, 158, 11, 0.45)',
+                  borderRadius: 10,
+                  fontSize: 13,
+                  color: 'var(--text-primary, #1f2937)',
+                  lineHeight: 1.45,
+                }}
+              >
+                <strong>🔒 โหมดดูอย่างเดียว</strong> — ทริปนี้เลยวันเดินทางแล้ว ไม่สามารถส่งข้อความ จอง ชำระเงิน หรือเลือกตัวเลือกใหม่ได้ (ดูประวัติแชทได้ตามปกติ)
+              </div>
+            )}
             {/* ✅ Edit mode banner — แสดงเมื่อกำลังแก้ไขข้อความ */}
             {editingMessageId && (
               <div className="edit-mode-banner">
@@ -5181,12 +5300,22 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 onKeyPress={handleKeyPress}
-                placeholder={editingMessageId ? 'แก้ไขข้อความแล้วกด Enter หรือ Send...' : t('chat.inputPlaceholder')}
+                placeholder={
+                  isChatTripPastDeadline
+                    ? 'ทริปนี้เลยวันแล้ว — ดูประวัติด้านบนได้เท่านั้น'
+                    : editingMessageId
+                      ? 'แก้ไขข้อความแล้วกด Enter หรือ Send...'
+                      : t('chat.inputPlaceholder')
+                }
                 rows="1"
+                readOnly={isChatTripPastDeadline}
+                disabled={isChatTripPastDeadline}
                 className={`input-field${editingMessageId ? ' input-field-editing' : ''}`}
               />
               <button
+                type="button"
                 onClick={handleVoiceInput}
+                disabled={isChatTripPastDeadline && !isVoiceMode}
                 className={`btn-mic ${isVoiceMode ? 'btn-mic-active' : ''}`}
                 title={isVoiceMode ? 'กดเพื่อหยุดการสนทนาด้วยเสียง' : 'กดเพื่อเริ่มสนทนากับ Agent ด้วยเสียง'}
               >
@@ -5210,7 +5339,7 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                   </svg>
                 </button>
               ) : (
-                <button onClick={handleSend} disabled={!inputText.trim()} className="btn-send">
+                <button type="button" onClick={handleSend} disabled={!inputText.trim() || isChatTripPastDeadline} className="btn-send">
                   Send
                 </button>
               )}
@@ -5231,6 +5360,49 @@ export default function AITravelChat({ user, onLogout, onSignIn, initialPrompt =
                     </>
                   )}
                 </div>
+                {voiceDraft && (
+                  <div className="voice-draft-preview">
+                    <div className="voice-draft-label">ข้อความที่ได้ยิน:</div>
+                    <div className="voice-draft-text">{voiceDraft}</div>
+                    <div className="voice-draft-actions">
+                      <button
+                        type="button"
+                        className="btn-voice-confirm"
+                        disabled={isChatTripPastDeadline}
+                        onClick={() => {
+                          const text = voiceDraft.trim();
+                          if (!text || isChatTripPastDeadline) return;
+                          voiceAwaitingResponseRef.current = true;
+                          setIsRecording(false);
+                          setVoiceModeNotice('กำลังส่งข้อความให้ AI...');
+                          sendMessage(text);
+                          setVoiceDraft('');
+                        }}
+                      >
+                        ส่งข้อความนี้
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-voice-clear"
+                        onClick={() => {
+                          setVoiceDraft('');
+                          if (isVoiceModeRef.current && recognitionRef.current) {
+                            try {
+                              recognitionRef.current.start();
+                              setIsRecording(true);
+                              setVoiceModeNotice('โหมดเสียงใหม่พร้อมใช้งาน: พูดได้เลย');
+                            } catch (_) {}
+                          }
+                        }}
+                      >
+                        พูดใหม่
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {voiceModeNotice && (
+                  <div className="text-xs text-amber-700 mt-1">{voiceModeNotice}</div>
+                )}
               </div>
             )}
             <div className="powered-by">{t('chat.poweredBy')}</div>

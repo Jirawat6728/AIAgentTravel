@@ -77,6 +77,34 @@ async def _convert_hotel_image_urls_to_base64(slot_choices: List[Dict]) -> None:
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
+def _segment_dedup_key(seg: dict) -> tuple:
+    """Key for segment deduplication: ห้ามซ้ำกัน (from, to, เวลาออก, สายการบิน, เลขเที่ยวบิน)."""
+    dep = seg.get("depart_at") or seg.get("departure") or ""
+    num = seg.get("number") or seg.get("flight_number") or ""
+    return (
+        (seg.get("from") or ""),
+        (seg.get("to") or ""),
+        str(dep)[:19] if dep else "",
+        (seg.get("carrier") or ""),
+        str(num),
+    )
+
+
+def _dedupe_segments(segments: list) -> list:
+    """Validate: ลบ segment ซ้ำ เหลือเฉพาะอันแรกของแต่ละ key (ห้ามซ้ำกัน)."""
+    if not segments:
+        return segments
+    seen = set()
+    out = []
+    for s in segments:
+        key = _segment_dedup_key(s)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+
 # ✅ Helper function to safely write debug logs
 def _calc_nights(check_in: Optional[str], check_out: Optional[str]) -> Optional[int]:
     """คำนวณจำนวนคืนจาก check_in/check_out ISO string — คืน None ถ้าข้อมูลไม่ครบหรือ parse ไม่ได้"""
@@ -312,6 +340,8 @@ def _map_option_for_frontend(option: Dict[str, Any], index: int = 0, slot_contex
                 mapped_segments = [s for s in mapped_segments if s.get("direction") and "ขาไป" in str(s["direction"])]
             elif slot_context == "flights_inbound":
                 mapped_segments = [s for s in mapped_segments if s.get("direction") and "ขากลับ" in str(s["direction"])]
+            # ✅ Validate: ห้ามซ้ำกัน — กรอง segment ที่ซ้ำออก
+            mapped_segments = _dedupe_segments(mapped_segments)
 
             flight_price = option.get("price_amount")
             if flight_price is None and raw_data:
@@ -919,6 +949,9 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
         if selected_flight.get("currency"):
             currency = selected_flight.get("currency")
     
+    # ✅ Validate: ห้ามซ้ำกัน — กรอง segment ที่ซ้ำออก
+    outbound_segments = _dedupe_segments(outbound_segments)
+    
     # ✅ Process inbound flights
     for flight_seg in confirmed_inbound:
         selected_flight = flight_seg.selected_option
@@ -944,7 +977,10 @@ async def get_agent_metadata(session: Optional[UserSession], is_admin: bool = Fa
         if selected_flight.get("currency"):
             currency = selected_flight.get("currency")
     
-    # ✅ Combine all segments
+    # ✅ Validate: ห้ามซ้ำกัน — กรอง segment ขากลับที่ซ้ำออก
+    inbound_segments = _dedupe_segments(inbound_segments)
+    
+    # ✅ Combine all segments (outbound + inbound already deduped)
     all_flight_segments = outbound_segments + inbound_segments
     
     if all_flight_segments:
@@ -2415,10 +2451,14 @@ async def select_choice(request: dict, fastapi_request: Request):
 @router.post("/agent-feedback")
 async def agent_feedback(request: dict, fastapi_request: Request):
     """
-    บันทึกคะแนนดาว (1–5) จาก User หลัง Agent Mode จองอัตโนมัติ — ใช้สำหรับ RL ปรับปรุงความแม่นยำ
+    บันทึกคะแนนดาว (1–5) จาก User — อัปเดต RL Q-table และ FWL ต่อตัวเลือกจริงใน trip_plan
+    (เที่ยวบินขาไป/กลับ ที่พัก รถ) ถ้าโหลดจากเซสชันได้; ถ้าไม่มีจะใช้แบบหยาบที่ slot agent_booking
     """
     from app.core.security import extract_user_id_from_request, validate_session_user_id
-    from app.engine.reinforcement_learning import get_rl_service
+    from app.engine.reinforcement_learning import (
+        get_rl_service,
+        record_user_star_rating_with_selected_options,
+    )
 
     user_id = extract_user_id_from_request(fastapi_request)
     if not user_id:
@@ -2426,28 +2466,84 @@ async def agent_feedback(request: dict, fastapi_request: Request):
 
     chat_id = request.get("chat_id") or request.get("session_id")
     stars = request.get("stars")
-    mode = request.get("mode")  # "ask" หรือ "agent" ตามโหมดแชทที่ผู้ใช้ประเมิน
+    mode_raw = request.get("mode")
+    criteria_ratings = request.get("criteria_ratings")  # optional dict[str, int 1–5]
     if not chat_id:
         raise HTTPException(status_code=400, detail="chat_id required")
+    if not isinstance(mode_raw, str) or not mode_raw.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="mode is required and must be 'ask' or 'agent'",
+        )
+    mode = mode_raw.strip().lower()
+    if mode not in ("ask", "agent"):
+        raise HTTPException(
+            status_code=400,
+            detail="mode must be 'ask' or 'agent' — evaluation is only allowed for Ask and Agent chat modes",
+        )
     try:
         stars = int(stars)
         if stars < 1 or stars > 5:
             raise ValueError("stars must be 1-5")
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="stars must be 1-5")
+    if criteria_ratings is not None:
+        if not isinstance(criteria_ratings, dict):
+            raise HTTPException(status_code=400, detail="criteria_ratings must be an object")
+        for _k, v in criteria_ratings.items():
+            try:
+                iv = int(v)
+                if iv < 1 or iv > 5:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="each criteria_ratings value must be 1-5")
+
+    # % ความพึงพอใจ: ค่าเฉลี่ยดาว (1–5) ของคะแนนรวม + ทุกหัวข้อย่อย → แปลงเป็นสเกล 0–100%
+    if isinstance(criteria_ratings, dict) and len(criteria_ratings) > 0:
+        sub = [int(v) for v in criteria_ratings.values()]
+        all_stars = [stars] + sub
+        satisfaction_pct = round((sum(all_stars) / len(all_stars)) / 5.0 * 100.0, 1)
+    else:
+        satisfaction_pct = round(stars / 5.0 * 100.0, 1)
 
     session_id = f"{user_id}::{chat_id}" if "::" not in str(chat_id) else str(chat_id)
     validate_session_user_id(session_id, user_id)
 
     try:
         rl_svc = get_rl_service()
-        await rl_svc.record_reward(
-            user_id=user_id,
-            action_type="user_star_rating",
-            slot_name="agent_booking",
-            option=None,
-            context={"stars": stars, "session_id": session_id},
-        )
+        ctx = {
+            "stars": stars,
+            "session_id": session_id,
+            "satisfaction_pct": satisfaction_pct,
+            **({"criteria_ratings": criteria_ratings} if criteria_ratings else {}),
+        }
+        n_segments = 0
+        try:
+            n_segments = await record_user_star_rating_with_selected_options(
+                rl_svc,
+                user_id=user_id,
+                session_id=session_id,
+                stars=stars,
+                satisfaction_pct=satisfaction_pct,
+                criteria_ratings=criteria_ratings if isinstance(criteria_ratings, dict) else None,
+                mode=mode,
+            )
+        except Exception as seg_err:
+            logger.warning(f"Segment-level star feedback failed, will use coarse RL if needed: {seg_err}")
+        if n_segments == 0:
+            await rl_svc.record_reward(
+                user_id=user_id,
+                action_type="user_star_rating",
+                slot_name="agent_booking",
+                option=None,
+                context=ctx,
+                session_mode=mode,
+            )
+        else:
+            logger.info(
+                f"Agent feedback: user_star_rating applied to {n_segments} selected option(s) "
+                f"(RL Q-table + FWL per segment) session={session_id[:40]}..."
+            )
         # บันทึก user_stars ลง trip_evaluations เพื่อให้ AI นำไปเรียนรู้และปรับปรุง
         try:
             from app.services.trip_evaluations import upsert_trip_evaluation
@@ -2456,13 +2552,21 @@ async def agent_feedback(request: dict, fastapi_request: Request):
                 session_id=session_id,
                 user_id=user_id,
                 chat_id=chat_id_for_ev,
-                mode=mode if mode in ("ask", "agent") else None,
+                mode=mode,
                 agent_accuracy_score=None,
                 user_stars=stars,
+                criteria_ratings=criteria_ratings if isinstance(criteria_ratings, dict) else None,
+                satisfaction_pct=satisfaction_pct,
             )
         except Exception as _te:
             logger.debug(f"Trip evaluation save (feedback): {_te}")
-        return {"ok": True, "message": "บันทึกคะแนนแล้ว ใช้สำหรับปรับปรุงความแม่นยำ"}
+        return {
+            "ok": True,
+            "message": "บันทึกคะแนนแล้ว ใช้สำหรับปรับปรุงความแม่นยำ",
+            "satisfaction_pct": satisfaction_pct,
+            "learning_option_segments": n_segments if n_segments > 0 else None,
+            "learning_granular": n_segments > 0,
+        }
     except Exception as e:
         logger.warning(f"Agent feedback record error: {e}")
         return {"ok": False, "message": str(e)}
@@ -2519,6 +2623,18 @@ async def live_audio_conversation(websocket: WebSocket):
     
     live_service = None
     session = None
+    first_audio_chunk_logged = False
+    user_id = None
+    chat_id = None
+
+    def _voice_log(event: str, **extra):
+        payload = {
+            "event": event,
+            "user_id": user_id,
+            "chat_id": chat_id,
+            **extra,
+        }
+        logger.info(f"[voice] {payload}")
     
     try:
         # Initialize Live Audio Service
@@ -2535,6 +2651,7 @@ async def live_audio_conversation(websocket: WebSocket):
             return
         
         chat_id = websocket.query_params.get("chat_id")
+        _voice_log("ws_authenticated")
         
         # Build system instruction for travel agent
         system_instruction = """คุณเป็น Travel Agent AI ที่พูดคุยด้วยเสียงแบบธรรมชาติ
@@ -2565,6 +2682,7 @@ async def live_audio_conversation(websocket: WebSocket):
                 system_instruction=system_instruction
             )
             logger.info(f"Live API session created for user: {user_id}")
+            _voice_log("live_session_created")
             
             # #region agent log (Hypothesis A)
             _write_debug_log({
@@ -2598,6 +2716,7 @@ async def live_audio_conversation(websocket: WebSocket):
             "type": "connected",
             "message": "พร้อมสนทนาด้วยเสียงแล้ว"
         })
+        _voice_log("connected_sent")
         
         # ── callbacks ──────────────────────────────────────────────────
         async def send_audio_to_client(audio_bytes: bytes):
@@ -2650,6 +2769,9 @@ async def live_audio_conversation(websocket: WebSocket):
                     # ✅ binary frame = raw PCM 16-bit LE 16kHz mono จาก ScriptProcessor
                     audio_bytes = data["bytes"]
                     if audio_bytes:
+                        if not first_audio_chunk_logged:
+                            first_audio_chunk_logged = True
+                            _voice_log("first_audio_chunk_received", chunk_size=len(audio_bytes))
                         await live_service.send_audio_chunk(session, audio_bytes)
 
                 elif "text" in data:
@@ -2671,9 +2793,11 @@ async def live_audio_conversation(websocket: WebSocket):
 
             except WebSocketDisconnect:
                 logger.info("WebSocket disconnected")
+                _voice_log("ws_disconnected")
                 break
             except Exception as e:
                 logger.error(f"Error processing WebSocket message: {e}", exc_info=True)
+                _voice_log("ws_processing_error", error=str(e))
                 try:
                     await websocket.send_json({"type": "error", "message": f"Processing error: {str(e)}"})
                 except Exception:
@@ -2688,6 +2812,7 @@ async def live_audio_conversation(websocket: WebSocket):
             
     except Exception as e:
         logger.error(f"Live audio WebSocket error: {e}", exc_info=True)
+        _voice_log("ws_fatal_error", error=str(e))
         try:
             await websocket.send_json({
                 "type": "error",
@@ -2707,6 +2832,7 @@ async def live_audio_conversation(websocket: WebSocket):
         except Exception:
             pass
         logger.info("Live audio WebSocket connection closed")
+        _voice_log("ws_closed")
 
 
 @router.delete("/sessions/{chat_id}")

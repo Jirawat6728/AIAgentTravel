@@ -30,6 +30,7 @@ from app.api.options_cache import router as options_cache_router
 from app.api.notification import router as notification_router
 from app.api.diagnostics import router as diagnostics_router
 from app.api.trips import router as trips_router
+from app.api.events import router as events_router
 
 # Setup logging
 setup_logging("travel_agent", settings.log_level, settings.log_file)
@@ -119,7 +120,20 @@ async def lifespan(app: FastAPI):
                 logger.critical("Failed to initialize MongoDB after all retries. Server may be unstable.")
                 # Don't exit - allow server to start but mark as unhealthy
     
-    logger.info("[INFO] Redis disabled — using MongoDB only")
+    # Redis status (optional)
+    try:
+        from app.core.redis_client import is_redis_available
+        from app.core.config import settings as _settings
+
+        if _settings.redis_url:
+            if is_redis_available():
+                logger.info("[INFO] Redis cache configured and available")
+            else:
+                logger.info("[INFO] Redis configured (REDIS_URL set) but not yet available (falling back to in-memory)")
+        else:
+            logger.info("[INFO] Redis URL not set — using in-process memory only")
+    except Exception:
+        logger.info("[INFO] Redis status unknown (redis_client not initialized)")
     
     # Mark startup as successful if at least MongoDB is available
     if app.state.mongo_mgr:
@@ -380,6 +394,7 @@ app.include_router(amadeus_viewer_router)
 app.include_router(monitoring_router)
 app.include_router(options_cache_router)
 app.include_router(notification_router)
+app.include_router(events_router)
 
 # Admin dashboard: หน้า login หรือ dashboard (ใช้ cookie แทน Basic Auth popup)
 @app.get("/admin", include_in_schema=False)
@@ -599,7 +614,36 @@ async def health(request: Request):
         health_status["status"] = "degraded"
         logger.error(f"MongoDB health check failed: {e}")
     
-    health_status["checks"]["redis"] = {"status": "disabled", "message": "Redis removed — using MongoDB only"}
+    # Redis check
+    try:
+        from app.core.redis_client import is_redis_available
+        from app.core.config import settings as _settings
+
+        available = is_redis_available()
+        if _settings.enable_redis_cache and available:
+            health_status["checks"]["redis"] = {
+                "status": "healthy",
+                "message": "Redis cache available",
+            }
+        elif _settings.enable_redis_cache and not available:
+            health_status["checks"]["redis"] = {
+                "status": "unavailable",
+                "message": "Redis cache enabled but not connected (falling back to in-memory)",
+            }
+            if health_status["status"] == "healthy":
+                health_status["status"] = "degraded"
+        else:
+            health_status["checks"]["redis"] = {
+                "status": "disabled",
+                "message": "Redis cache disabled by configuration",
+            }
+    except Exception as e:
+        health_status["checks"]["redis"] = {
+            "status": "unknown",
+            "message": f"Redis health check failed: {str(e)[:80]}",
+        }
+        if health_status["status"] == "healthy":
+            health_status["status"] = "degraded"
 
     # Return appropriate status code
     if health_status["status"] == "unhealthy":

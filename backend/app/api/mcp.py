@@ -131,20 +131,24 @@ async def search_flights(
     children: int = Query(0, ge=0, le=9),
     infants: int = Query(0, ge=0, le=9),
     cabin_class: Optional[str] = Query(None),
+    non_stop: Optional[bool] = Query(None),
 ):
-    """Convenience endpoint for flight search"""
+    """Convenience endpoint for flight search. non_stop=true returns direct flights only."""
+    payload = {
+        "origin": origin,
+        "destination": destination,
+        "departure_date": departure_date,
+        "adults": adults,
+        "return_date": return_date,
+        "children": children,
+        "infants": infants,
+        "cabin_class": cabin_class,
+    }
+    if non_stop is not None:
+        payload["non_stop"] = non_stop
     result = await _run_tool(
         "search_flights",
-        {
-            "origin": origin,
-            "destination": destination,
-            "departure_date": departure_date,
-            "adults": adults,
-            "return_date": return_date,
-            "children": children,
-            "infants": infants,
-            "cabin_class": cabin_class,
-        },
+        payload,
         timeout=_SEARCH_TIMEOUT,
     )
     if not result.get("success"):

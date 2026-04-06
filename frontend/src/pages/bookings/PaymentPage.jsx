@@ -5,6 +5,7 @@ import { useTheme } from '../../context/ThemeContext';
 import { useFontSize } from '../../context/FontSizeContext';
 import { loadOmiseScript, createTokenAsync } from '../../utils/omiseLoader';
 import { formatPriceInThb } from '../../utils/currency';
+import { dedupeSegments } from '../../utils/flightSegments';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 
@@ -28,7 +29,10 @@ function getTripSummaryFromBooking(booking) {
   const inbound = flights.inbound || plan.flight?.inbound || [];
   const acc = plan.accommodation || {};
   const accSegments = acc.segments || plan.hotel?.segments || [];
-  const flightSegments = ts.flights || outbound.concat(inbound) || plan.flight?.segments || [];
+  const rawFlights = ts.flights || outbound.concat(inbound) || plan.flight?.segments || [];
+  const flightSegments = Array.isArray(rawFlights) && rawFlights.length > 0 && typeof rawFlights[0]?.from === 'string'
+    ? dedupeSegments(rawFlights)
+    : rawFlights;
   const accommodations = ts.accommodations || accSegments || plan.hotel?.segments || [];
 
   const firstOut = outbound[0] || flightSegments[0];
@@ -584,6 +588,14 @@ export default function PaymentPage({
         };
         if (!chargeRes.ok || !chargeData.ok) {
           throw new Error(getChargeError(chargeData));
+        }
+        if (chargeData.paid) {
+          if (onPaymentSuccess) {
+            onPaymentSuccess(bookingIdStr, chargeData);
+          } else {
+            window.location.href = `/bookings?booking_id=${bookingIdStr}&payment_status=success`;
+          }
+          return;
         }
         setPromptpayResult({
           authorize_uri: chargeData.authorize_uri,
@@ -1389,7 +1401,25 @@ export default function PaymentPage({
               >
                 {processing ? 'กำลังประมวลผล...' : paymentMethod === 'promptpay' ? `สร้าง QR PromtPay — ${formatPriceInThb(amount, currency)}` : `ชำระเงิน ${formatPriceInThb(amount, currency)}`}
               </button>
-              <p className="payment-powered-by">Powered by Omise</p>
+              <footer className="payment-omise-footer" aria-label="ข้อมูล Omise">
+                <span className="payment-omise-brand">
+                  Powered by <span className="payment-omise-logo">Omise</span>
+                </span>
+                <span className="payment-omise-sep" aria-hidden="true" />
+                <a
+                  href="https://www.omise.co"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="payment-omise-link"
+                >
+                  ดูข้อมูลเพิ่มเติมเกี่ยวกับ Omise
+                </a>
+                <span className="payment-omise-sep" aria-hidden="true" />
+                <span className="payment-omise-legal">
+                  <a href="https://www.omise.co/terms-of-service" target="_blank" rel="noopener noreferrer" className="payment-omise-link">ข้อกำหนด</a>
+                  <a href="https://www.omise.co/privacy-policy" target="_blank" rel="noopener noreferrer" className="payment-omise-link">ความเป็นส่วนตัว</a>
+                </span>
+              </footer>
             </form>
           </div>
         </div>

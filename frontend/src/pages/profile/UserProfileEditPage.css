@@ -576,17 +576,34 @@
     position: static;
     display: flex;
     flex-direction: column;
+    padding: 16px 12px 0;
+    box-sizing: border-box;
   }
 
+  /* ทำเมนูโปรไฟล์บนมือถือให้เลื่อนซ้าย-ขวาได้ เหมือนหน้า Settings */
   .profile-edit-wrapper .settings-nav {
     flex-direction: row;
-    flex-wrap: wrap;
-    gap: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding-bottom: 4px;
+    gap: 4px;
+  }
+
+  .profile-edit-wrapper .settings-nav::-webkit-scrollbar {
+    display: none;
   }
 
   .profile-edit-wrapper .settings-nav-item {
-    flex: 1 1 auto;
-    min-width: 140px;
+    flex-shrink: 0;
+    white-space: nowrap;
+    padding: 8px 12px;
+    font-size: 13px;
+    border-radius: 999px;
   }
 }
 

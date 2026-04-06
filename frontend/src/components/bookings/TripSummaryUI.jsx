@@ -1,6 +1,7 @@
 import React from 'react';
 import { AIRLINE_NAMES, AIRLINE_DOMAINS } from '../../data/airlineNames';
-import { formatPriceInThb } from '../../utils/currency';
+import { formatPriceInThb, toThb } from '../../utils/currency';
+import { dedupeSegments } from '../../utils/flightSegments';
 import './PlanChoiceCard.css';
 import './TripSummaryUI.css';
 
@@ -228,23 +229,34 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
     plan?.accommodation?.currency ||
     'THB';
 
-  // ✅ ราคารวม: รองรับทั้ง structure เก่าและใหม่
+  // ✅ ราคารวม: คำนวณแบบเดียวกับ Booking — ใช้ travelSlots เมื่อมี (แหล่งเดียวกับที่บันทึก) แปลงเป็น THB ก่อนบวก
+  const _flight = travelSlots?.flight ?? plan?.flight ?? plan?.travel?.flights ?? {};
+  const _hotel = travelSlots?.hotel ?? plan?.hotel ?? plan?.accommodation ?? {};
+  const _transport = travelSlots?.transport ?? plan?.transport ?? plan?.travel?.ground_transport;
+  const _transportObj = _transport && !Array.isArray(_transport) ? _transport : (Array.isArray(_transport) ? { segments: _transport } : {});
+  const rawF = Number(_flight?.total_price ?? _flight?.price_total ?? 0) || 0;
+  const rawH = Number(_hotel?.total_price ?? _hotel?.price_total ?? 0)
+    || (Array.isArray(_hotel?.segments) ? _hotel.segments.reduce((a, s) => a + Number(s?.price ?? s?.price_total ?? 0), 0) : 0);
+  const rawT = Number(_transportObj?.price ?? _transportObj?.price_amount ?? 0)
+    || (Array.isArray(_transportObj?.segments) ? _transportObj.segments.reduce((a, s) => a + Number(s?.price ?? s?.price_amount ?? 0), 0) : 0);
+  const sumFThb = (toThb(rawF, _flight?.currency || 'THB') ?? 0);
+  const sumHThb = (toThb(rawH, _hotel?.currency || 'THB') ?? 0);
+  const sumTThb = Array.isArray(_transportObj?.segments) && _transportObj.segments.length > 0
+    ? _transportObj.segments.reduce((a, s) => a + (toThb(Number(s?.price ?? s?.price_amount ?? 0), s?.currency || 'THB') ?? 0), 0)
+    : (toThb(rawT, _transportObj?.currency || 'THB') ?? 0);
+  const totalFromItemsThb = sumFThb + sumHThb + sumTThb;
   const total =
-    typeof plan?.total_price === 'number'
-      ? plan.total_price
-      : typeof plan?.price === 'number'
-        ? plan.price
-        : typeof plan?.summary?.total_price === 'number'
-          ? plan.summary.total_price
-          : (() => {
-              const f = (plan?.flight?.total_price ?? plan?.flight?.price_total ?? plan?.travel?.flights?.total_price) || 0;
-              const h = (plan?.hotel?.total_price ?? plan?.hotel?.price_total ?? plan?.accommodation?.total_price) || 0;
-              const t = (plan?.transport?.price ?? plan?.transport?.price_amount ?? plan?.travel?.ground_transport?.price) || 0;
-              const sum = Number(f) + Number(h) + Number(t);
-              return sum > 0 ? sum : undefined;
-            })();
+    totalFromItemsThb > 0
+      ? totalFromItemsThb
+      : typeof plan?.total_price === 'number'
+        ? (toThb(plan.total_price, plan?.currency || 'THB') ?? plan.total_price)
+        : typeof plan?.price === 'number'
+          ? (toThb(plan.price, plan?.currency || 'THB') ?? plan.price)
+          : typeof plan?.summary?.total_price === 'number'
+            ? (toThb(plan.summary.total_price, plan?.summary?.currency || plan?.currency || 'THB') ?? plan.summary.total_price)
+            : undefined;
 
-  const totalText = moneyThb(total, currency) || safeText(plan?.total_price_text || plan?.summary?.total_price_text) || '—';
+  const totalText = total != null ? moneyThb(total, 'THB') : (safeText(plan?.total_price_text || plan?.summary?.total_price_text) || '—');
 
   const legs = Array.isArray(travelSlots?.legs) ? travelSlots.legs : [];
   const isMultiCity = legs.length > 1;
@@ -274,14 +286,15 @@ export function TripSummaryCard({ plan, travelSlots, cachedOptions, cacheValidat
   // ✅ Extract flight details — รองรับทั้ง plan.flight และ plan.travel.flights
   const flightData = plan?.flight || plan?.travel?.flights || {};
   const flight = flightData;
-  const flightSegments = flight?.segments || [];
+  // ✅ Validate: ห้ามซ้ำกัน
+  const flightSegments = dedupeSegments(flight?.segments || []);
   const firstSegment = flightSegments[0];
   const lastSegment = flightSegments[flightSegments.length - 1];
   // ✅ ถ้าไม่มี outbound/inbound แยกจาก API ให้แยกจาก segments เพื่อแสดงขาไป/ขากลับ
   const hasOutboundInbound = (flight?.outbound?.length > 0) || (flight?.inbound?.length > 0);
   const split = hasOutboundInbound ? null : splitFlightSegmentsToOutboundInbound(flightSegments, travelSlots);
-  const outboundSegments = hasOutboundInbound ? (flight.outbound || []) : (split?.outbound || []);
-  const inboundSegments = hasOutboundInbound ? (flight.inbound || []) : (split?.inbound || []);
+  const outboundSegments = dedupeSegments(hasOutboundInbound ? (flight.outbound || []) : (split?.outbound || []));
+  const inboundSegments = dedupeSegments(hasOutboundInbound ? (flight.inbound || []) : (split?.inbound || []));
   
   // ✅ Extract hotel details — รองรับทั้ง plan.hotel และ plan.accommodation
   const hotel = plan?.hotel || plan?.accommodation || {};
@@ -627,6 +640,16 @@ export function UserInfoCard({ userProfile, onEdit, isDomesticTravel = false }) 
   );
 
   const showPassportSection = !isDomesticTravel;
+
+  // Production-style masking: แสดงเฉพาะบางส่วนของเลขพาสปอร์ต เช่น XX*****123
+  const maskPassportNumber = (passportNo) => {
+    if (!passportNo || typeof passportNo !== 'string') return '—';
+    const trimmed = passportNo.trim();
+    if (trimmed.length <= 3) return '*'.repeat(trimmed.length);
+    const visible = trimmed.slice(-3);
+    const masked = '*'.repeat(Math.max(trimmed.length - 3, 3));
+    return `${masked}${visible}`;
+  };
   const readyToBook = hasRequiredInfo && (isDomesticTravel || hasPassportInfo);
 
   return (
@@ -686,14 +709,14 @@ export function UserInfoCard({ userProfile, onEdit, isDomesticTravel = false }) 
                   {member.passports && member.passports.length > 0 ? (
                     (member.primary_passport || member.passports[0]).passport_no && (
                       <>
-                        {kv('เลขพาสปอร์ต', (member.primary_passport || member.passports[0]).passport_no)}
+                        {kv('เลขพาสปอร์ต', maskPassportNumber((member.primary_passport || member.passports[0]).passport_no))}
                         {kv('วันหมดอายุ', (member.primary_passport || member.passports[0]).passport_expiry ? formatDateThai((member.primary_passport || member.passports[0]).passport_expiry) : '—')}
                         {(member.primary_passport || member.passports[0]).nationality && kv('สัญชาติ', (member.primary_passport || member.passports[0]).nationality)}
                       </>
                     )
                   ) : (
                     <>
-                      {kv('เลขพาสปอร์ต', member.passport_no || '—')}
+                      {kv('เลขพาสปอร์ต', member.passport_no ? maskPassportNumber(member.passport_no) : '—')}
                       {kv('วันหมดอายุ', member.passport_expiry ? formatDateThai(member.passport_expiry) : '—')}
                       {member.nationality && kv('สัญชาติ', member.nationality)}
                       {member.passport_issue_date && kv('วันออกหนังสือเดินทาง', formatDateThai(member.passport_issue_date))}
@@ -710,7 +733,7 @@ export function UserInfoCard({ userProfile, onEdit, isDomesticTravel = false }) 
           <div className="plan-card-section">
             <div className="plan-card-section-title">ข้อมูลพาสปอร์ต</div>
             <div className="plan-card-section-body">
-              {kv('เลขพาสปอร์ต', userProfile.passport_no || '—')}
+              {kv('เลขพาสปอร์ต', userProfile.passport_no ? maskPassportNumber(userProfile.passport_no) : '—')}
               {kv('วันหมดอายุ', userProfile.passport_expiry ? formatDateThai(userProfile.passport_expiry) : '—')}
               {kv('สัญชาติ', userProfile.nationality || '—')}
               {userProfile.passport_issue_date && kv('วันออกหนังสือเดินทาง', formatDateThai(userProfile.passport_issue_date))}
@@ -774,10 +797,10 @@ export function UserInfoCard({ userProfile, onEdit, isDomesticTravel = false }) 
   );
 }
 
-export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBooking, bookingResult, chatMode = 'normal', agentState = null, onNavigateToBookings = null }) {
+export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBooking, bookingResult, chatMode = 'normal', agentState = null, onNavigateToBookings = null, existingBookingForTrip = false, pastTripLocked = false }) {
   const needsPayment = bookingResult?.needs_payment || bookingResult?.status === 'pending_payment';
   const isConfirmed = bookingResult?.status === 'confirmed' || bookingResult?.status === 'paid';
-  const isAlreadyBooked = bookingResult && !bookingResult.ok && bookingResult.already_booked === true;
+  const isAlreadyBooked = existingBookingForTrip || (bookingResult && !bookingResult.ok && bookingResult.already_booked === true);
   
   // ✅ Agent Mode: Check if auto-booked (from agentState or bookingResult)
   const isAgentMode = chatMode === 'agent';
@@ -798,6 +821,11 @@ export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBook
     <div className="plan-card plan-card-summary">
       <div className="plan-card-header">
         <div className="plan-card-title">
+          {pastTripLocked && (
+            <div style={{ width: '100%', marginBottom: 10, padding: '10px 12px', background: '#fef3c7', color: '#92400e', borderRadius: 8, fontSize: 13, fontWeight: 600 }}>
+              🔒 ทริปเลยวันเดินทางแล้ว — ดูข้อมูลได้เท่านั้น ไม่สามารถจองหรือชำระเงินได้
+            </div>
+          )}
           <span className="plan-card-label">✅ ยืนยันจอง</span>
           {(needsPayment || isConfirmed) && !isAlreadyBooked && (
             <span className="plan-card-tag">
@@ -831,6 +859,27 @@ export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBook
           </div>
           <div className="plan-card-section-body plan-card-small">
             <p style={{ margin: 0 }}>{bookingResult.message}</p>
+            {onNavigateToBookings && (
+              <div className="plan-card-footer summary-footer" style={{ marginTop: '16px' }}>
+                <button
+                  type="button"
+                  className="plan-card-button"
+                  style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
+                  onClick={onNavigateToBookings}
+                >
+                  📋 ไปที่ My Bookings
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : existingBookingForTrip ? (
+        <div className="plan-card-section">
+          <div className="plan-card-section-title" style={{ color: '#92400e' }}>
+            📋 จองไปแล้ว
+          </div>
+          <div className="plan-card-section-body plan-card-small">
+            <p style={{ margin: 0 }}>ทริปนี้มีการจองอยู่แล้ว ไม่สามารถกดยืนยันจองซ้ำได้</p>
             {onNavigateToBookings && (
               <div className="plan-card-footer summary-footer" style={{ marginTop: '16px' }}>
                 <button
@@ -882,9 +931,9 @@ export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBook
               <div className="plan-card-footer summary-footer" style={{ marginTop: '16px' }}>
                 <button
                   className="plan-card-button"
-                  style={{ background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)' }}
-                  onClick={() => onPayment(bookingResult.booking_id)}
-                  disabled={isBooking}
+                  style={{ background: pastTripLocked ? '#9ca3af' : 'linear-gradient(135deg, #10b981 0%, #059669 100%)' }}
+                  onClick={() => !pastTripLocked && onPayment(bookingResult.booking_id)}
+                  disabled={isBooking || pastTripLocked}
                 >
                   💳 ชำระเงินและยืนยันจอง
                 </button>
@@ -905,13 +954,13 @@ export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBook
             </div>
           </div>
 
-          {/* ✅ Agent Mode: ซ่อนปุ่มยืนยัน (ระบบจองให้อัตโนมัติ) — ไม่แสดงข้อความ Agent Mode ตรงนี้ ให้แชทแจ้งว่าจองแล้ว */}
-          {!isAutoBooked && !isAutoBookingInProgress && (
+          {/* ✅ ห้ามกดจองซ้ำ: ซ่อนปุ่มเมื่อจองไปแล้วหรือมี booking ของทริปนี้แล้ว */}
+          {!isAutoBooked && !isAutoBookingInProgress && !existingBookingForTrip && (
             <div className="plan-card-footer summary-footer">
               <button
-                className={`plan-card-button ${!canBook ? 'summary-disabled' : ''}`}
-                disabled={!canBook || isBooking}
-                onClick={onConfirm}
+                className={`plan-card-button ${!canBook || pastTripLocked ? 'summary-disabled' : ''}`}
+                disabled={!canBook || isBooking || pastTripLocked}
+                onClick={() => !pastTripLocked && onConfirm?.()}
               >
                 ✅ ยืนยันการจอง
               </button>
@@ -923,10 +972,8 @@ export function ConfirmBookingCard({ canBook, onConfirm, onPayment, note, isBook
   );
 }
 
-// ✅ Final Trip Summary - สรุปครบถ้วนก่อนจอง
-// ✅ ไม่แสดงการ์ด "สรุปทริปสุดท้าย พร้อมจอง" ตามที่ผู้ใช้ขอให้ลบออก
+// ✅ Final Trip Summary - สรุปครบถ้วนก่อนจอง (ต้องแสดงเพื่อให้มีปุ่มยืนยันการจอง)
 export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions, cacheValidation, workflowValidation }) {
-  return null;
   if (!plan) return null;
 
   const flight = plan.flight || plan.travel?.flights || {};
@@ -950,24 +997,31 @@ export function FinalTripSummary({ plan, travelSlots, userProfile, cachedOptions
   const cacheHasCounts = cacheSummary && ( (cacheSummary.flights_outbound || 0) + (cacheSummary.flights_inbound || 0) + (cacheSummary.ground_transport || 0) + (cacheSummary.accommodation || 0) > 0 );
   const effectiveSummary = cacheHasCounts ? cacheSummary : summaryFromPlan;
   const summaryLabel = cacheHasCounts ? '📊 สรุปตัวเลือกที่แคช:' : '📊 สรุปตัวเลือกที่เลือก:';
-  // ✅ ราคารวม: จาก plan หรือคำนวณจาก flight+hotel+transport แบบ catalog
-  const totalPrice = typeof plan.total_price === 'number' ? plan.total_price
-    : typeof plan.price === 'number' ? plan.price
-    : (() => {
-        const f = (flight.total_price ?? flight.price_total) || 0;
-        const h = (hotel.total_price ?? hotel.price_total) || 0;
-        const t = (transport.price ?? transport.price_amount) || 0;
-        return Number(f) + Number(h) + Number(t);
-      })();
+  // ✅ ราคารวม: คำนวณแบบเดียวกับ Booking — แปลงแต่ละส่วนเป็น THB ก่อนบวก (ให้ตรงกับ TripSummaryCard และ MyBookingsPage)
+  const rawFlight = Number(flight.total_price ?? flight.price_total ?? 0) || 0;
+  const rawHotel = Number(hotel.total_price ?? hotel.price_total ?? 0)
+    || (hotel.segments || []).reduce((acc, seg) => acc + Number(seg.price ?? seg.price_total ?? 0), 0);
+  const rawTransport = Number(transport.price ?? transport.price_amount ?? 0)
+    || (transport.segments || []).reduce((acc, seg) => acc + Number(seg.price ?? seg.price_amount ?? 0), 0);
+  const sumFlightThb = toThb(rawFlight, flight.currency || 'THB') ?? 0;
+  const sumHotelThb = toThb(rawHotel, hotel.currency || 'THB') ?? 0;
+  const sumTransportThb = (transport.segments || []).length > 0
+    ? (transport.segments || []).reduce((acc, seg) => acc + (toThb(Number(seg?.price ?? seg?.price_amount ?? 0), seg?.currency || 'THB') ?? 0), 0)
+    : (toThb(rawTransport, transport.currency || 'THB') ?? 0);
+  const totalFromItemsThb = sumFlightThb + sumHotelThb + sumTransportThb;
+  const totalPrice = totalFromItemsThb > 0
+    ? totalFromItemsThb
+    : (typeof plan.total_price === 'number' ? (toThb(plan.total_price, plan.currency || 'THB') ?? plan.total_price) : typeof plan.price === 'number' ? (toThb(plan.price, plan.currency || 'THB') ?? plan.price) : 0);
 
-  const flightSegments = flight.segments || [];
+  // ✅ Validate: ห้ามซ้ำกัน
+  const flightSegments = dedupeSegments(flight.segments || []);
   const hotelSegments = hotel.segments || [];
   const transportSegments = transport.segments || [];
   // ✅ ถ้าไม่มี outbound/inbound แยกจาก API ให้แยกจาก segments เพื่อแสดงขาไป/ขากลับ
   const hasOutboundInboundFinal = (flight.outbound?.length > 0) || (flight.inbound?.length > 0);
   const splitFinal = hasOutboundInboundFinal ? null : splitFlightSegmentsToOutboundInbound(flightSegments, travelSlots);
-  const outboundSegmentsFinal = hasOutboundInboundFinal ? (flight.outbound || []) : (splitFinal?.outbound || []);
-  const inboundSegmentsFinal = hasOutboundInboundFinal ? (flight.inbound || []) : (splitFinal?.inbound || []);
+  const outboundSegmentsFinal = dedupeSegments(hasOutboundInboundFinal ? (flight.outbound || []) : (splitFinal?.outbound || []));
+  const inboundSegmentsFinal = dedupeSegments(hasOutboundInboundFinal ? (flight.inbound || []) : (splitFinal?.inbound || []));
 
   // ✅ ตรวจสอบว่ามีข้อมูลอะไรบ้าง
   const hasFinalFlightData = flightSegments.length > 0 || outboundSegmentsFinal.length > 0;

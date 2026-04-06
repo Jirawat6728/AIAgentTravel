@@ -390,9 +390,25 @@ class DataAggregator:
                     try:
                         max_price = float(kwargs["max_price"])
                         original_count = len(results)
+                        original_results = list(results)
                         results = [item for item in results if not item.is_price_available or item.price_amount <= max_price]
                         if len(results) < original_count:
                             logger.info(f"Filtered {original_count - len(results)} items exceeding budget {max_price}")
+                        # ถ้ากรองแล้วว่างทั้งหมด ให้คืนตัวเลือกที่ใกล้งบที่สุดแทน (เพื่อไม่ให้ AI ตันที่ no-choice)
+                        if not results and original_results:
+                            fallback = sorted(
+                                [i for i in original_results if i.is_price_available],
+                                key=lambda x: abs((x.price_amount or 0.0) - max_price),
+                            )[:3]
+                            for item in fallback:
+                                item.tags = list(dict.fromkeys([*(item.tags or []), "Over Budget (closest)"]))
+                                item.raw_data["_fallback_over_budget"] = True
+                                item.raw_data["_requested_max_price"] = max_price
+                            if fallback:
+                                logger.info(
+                                    f"No options within budget {max_price}; returning {len(fallback)} closest over-budget options"
+                                )
+                                results = fallback
                     except (ValueError, TypeError):
                         logger.warning(f"Invalid max_price format: {kwargs['max_price']}")
 

@@ -24,7 +24,11 @@ from app.services.options_cache import get_options_cache
 from app.services.workflow_state import get_workflow_state_service, WorkflowStep as WfStep
 from app.services.mcp_server import MCPToolExecutor
 from app.services.model_selector import ModelSelector
-from app.engine.reinforcement_learning import get_rl_learner, get_rl_service
+from app.engine.reinforcement_learning import (
+    get_rl_learner,
+    get_rl_service,
+    apply_personalized_recommendation_to_options,
+)
 from app.services.ml_keyword_service import get_ml_keyword_service
 from app.engine.gemini_agent import (
     CONTROLLER_SYSTEM_PROMPT,
@@ -3018,13 +3022,39 @@ Cherry blossom Japan → start_date late March, end_date early April, suggested_
     ) -> List[Dict[str, Any]]:
         """
         ใช้ Gemini ค้นหากิจกรรม/งานจริงที่ปลายทาง ตามความสนใจของผู้ใช้
+        รวมถึงอีเวนต์จริงจาก Google Places (ถ้า config ไว้) เพื่อให้แผนใกล้เคียงโลกจริงมากขึ้น
         Returns: [ {"name": str, "description": str, "category": str}, ... ]
         """
         if not destination or not (destination or "").strip():
             return []
+
         interests = activities_interests or []
         if isinstance(interests, str):
             interests = [interests]
+
+        # 🔍 ลองดึงอีเวนต์จริงจาก Google Places (ผ่าน service ภายใน)
+        real_events_snippet = "[]"
+        try:
+            from app.services.events_service import get_events_from_google  # local import เลี่ยง circular
+
+            real_events = await get_events_from_google(destination)
+            # ไม่ต้องส่ง raw ทั้งหมด แค่ชื่อ + location ให้ LLM ใช้เป็น hint ก็พอ
+            if real_events:
+                compact = [
+                    {
+                        "name": ev.get("name"),
+                        "location": ev.get("location"),
+                        "source": ev.get("source", "google_places"),
+                    }
+                    for ev in real_events[:15]
+                    if ev.get("name")
+                ]
+                import json
+
+                real_events_snippet = json.dumps(compact, ensure_ascii=False)
+        except Exception as e:
+            logger.debug(f"Skip real events enrichment for activities (non-critical): {e}")
+
         prompt = f"""You are a travel expert. Find REAL activities, events, and things to do at the destination for trip planning.
 Return a JSON array of 5-8 real activities/events. Each item must have: "name" (Thai or English), "description" (one short sentence in Thai), "category" (e.g. ธรรมชาติ, อาหาร, ช้อปปิ้ง, ประวัติศาสตร์, ศิลปะ, อีเวนต์).
 
@@ -3033,6 +3063,11 @@ Input:
 - user interests (prioritize these): {interests if interests else 'general sightseeing and experiences'}
 - season (if relevant): {season or 'not specified'}
 - event/festival (if relevant): {event_name or 'not specified'}
+- real_events_from_google (if any): {real_events_snippet}
+
+Instructions:
+- If real_events_from_google is not empty, prioritize using/combining those events into the plan when appropriate.
+- You may add more activities to complete a well-balanced trip plan, but keep them realistic for the destination.
 
 Output: JSON array only, no markdown. Example:
 [ {{"name": "ชมซากุระที่สวนอูเอโนะ", "description": "สวนสาธารณะชื่อดังช่วงฤดูซากุระ มีนาคม-เมษายน", "category": "ธรรมชาติ"}}, {{"name": "คลาสทำซูชิ", "description": "เรียนทำซูชิกับเชฟท้องถิ่น ครึ่งวัน", "category": "อาหาร"}} ]
@@ -3042,25 +3077,32 @@ Output: JSON array only, no markdown. Example:
             if self.production_llm:
                 result = await self.production_llm.intelligence_generate(prompt=prompt, system_prompt=system)
             else:
-                result = await self.llm.generate_json(prompt=prompt, system_prompt=system, temperature=0.3, context="activities_resolve")
+                result = await self.llm.generate_json(
+                    prompt=prompt,
+                    system_prompt=system,
+                    temperature=0.3,
+                    context="activities_resolve",
+                )
             if not result:
                 return []
             # Result might be dict with "activities" key or the array itself
             arr = result.get("activities") if isinstance(result, dict) else result
             if not isinstance(arr, list):
                 return []
-            out = []
+            out: List[Dict[str, Any]] = []
             for item in arr:
                 if not isinstance(item, dict):
                     continue
                 name = item.get("name") or item.get("title")
                 if not name:
                     continue
-                out.append({
-                    "name": str(name).strip(),
-                    "description": str(item.get("description") or "").strip(),
-                    "category": str(item.get("category") or "").strip(),
-                })
+                out.append(
+                    {
+                        "name": str(name).strip(),
+                        "description": str(item.get("description") or "").strip(),
+                        "category": str(item.get("category") or "").strip(),
+                    }
+                )
             if out:
                 logger.info(f"Gemini activities resolve: {len(out)} activities for {destination}")
             return out[:10]
@@ -3180,8 +3222,9 @@ Output: JSON array only, no markdown. Example:
                 val = ml_svc.validate_extracted_data(extracted)
                 if val and val.get("valid") is False:
                     issues = val.get("issues", [])
-                    raise AgentException(
-                        "ML_VALIDATION_BLOCK_SEARCH: " + (", ".join(issues) if issues else "ข้อมูลทริปไม่ผ่านการตรวจสอบ")
+                    logger.warning(
+                        "ML validation flagged issues before CALL_SEARCH, but continuing with best-effort search. issues=%s",
+                        issues,
                     )
         except AgentException:
             raise
@@ -3206,6 +3249,10 @@ Output: JSON array only, no markdown. Example:
         
         try:
             req = segment.requirements
+            # ✅ Default behavior: สำหรับการค้นหาเที่ยวบิน ให้ลอง "บินตรง" ก่อนเสมอ
+            if "flight" in slot_name:
+                if "direct_flight" not in req and "non_stop" not in req:
+                    req["non_stop"] = True
             logger.info(f"Searching {slot_name} via Aggregator: {req}")
             
             # ✅ Cache Check: ถ้ามี options_pool อยู่แล้วและ requirements ตรงกัน ให้ใช้ raw data มาจัดใหม่
@@ -3480,6 +3527,135 @@ Output: JSON array only, no markdown. Example:
             # If no results, try alternative search or provide helpful message
             if not standardized_results:
                 logger.warning(f"No results found for {slot_name} with requirements: {req}")
+
+                # ✅ Relaxed-search fallback: broaden constraints to avoid no-choice dead end
+                try:
+                    relaxed_reason = None
+                    relaxed_results = []
+
+                    if "flight" in slot_name:
+                        base_req = dict(req)
+                        for k in ("max_price", "min_price", "preferred_departure_time", "cabin_class"):
+                            base_req.pop(k, None)
+                        base_req["non_stop"] = False
+                        base_req["direct_flight"] = False
+
+                        dep = base_req.get("departure_date") or base_req.get("date")
+                        candidate_dates: List[str] = []
+                        if isinstance(dep, str) and dep.strip():
+                            candidate_dates.append(dep.strip())
+                            try:
+                                d0 = datetime.strptime(dep[:10], "%Y-%m-%d")
+                                candidate_dates.extend([
+                                    (d0 + timedelta(days=1)).strftime("%Y-%m-%d"),
+                                    (d0 + timedelta(days=2)).strftime("%Y-%m-%d"),
+                                ])
+                                if d0.date() > datetime.now().date():
+                                    candidate_dates.append((d0 - timedelta(days=1)).strftime("%Y-%m-%d"))
+                            except Exception:
+                                pass
+                        else:
+                            candidate_dates.append(datetime.now().strftime("%Y-%m-%d"))
+
+                        for d in candidate_dates:
+                            rr = dict(base_req)
+                            rr["departure_date"] = d
+                            rr["date"] = d
+                            relaxed_results = await aggregator.search_and_normalize(
+                                request_type="flight",
+                                user_id=session.user_id,
+                                mode="normal",
+                                **rr,
+                            )
+                            if relaxed_results:
+                                relaxed_reason = f"flight_relaxed(date={d}, constraints_removed=true)"
+                                break
+
+                    elif "accommodation" in slot_name or "hotel" in slot_name:
+                        base_req = dict(req)
+                        for k in ("max_price", "min_price", "min_rating", "rating"):
+                            base_req.pop(k, None)
+                        # broaden location hints
+                        loc_candidates = [
+                            base_req.get("location"),
+                            base_req.get("destination"),
+                            base_req.get("destination_city"),
+                        ]
+                        seen_loc = set()
+                        for loc in [l for l in loc_candidates if isinstance(l, str) and l.strip()]:
+                            _loc = loc.strip()
+                            if _loc in seen_loc:
+                                continue
+                            seen_loc.add(_loc)
+                            rr = dict(base_req)
+                            rr["location"] = _loc
+                            relaxed_results = await aggregator.search_and_normalize(
+                                request_type="hotel",
+                                user_id=session.user_id,
+                                mode="normal",
+                                **rr,
+                            )
+                            if relaxed_results:
+                                relaxed_reason = f"hotel_relaxed(location={_loc})"
+                                break
+
+                    elif "ground_transport" in slot_name or "transfer" in slot_name:
+                        base_req = dict(req)
+                        for k in ("max_price", "min_price"):
+                            base_req.pop(k, None)
+                        relaxed_results = await aggregator.search_and_normalize(
+                            request_type="transfer",
+                            user_id=session.user_id,
+                            mode="normal",
+                            **base_req,
+                        )
+                        if relaxed_results:
+                            relaxed_reason = "transfer_relaxed(constraints_removed=true)"
+
+                    if relaxed_results:
+                        for item in relaxed_results:
+                            try:
+                                item.raw_data["_search_relaxed_fallback"] = True
+                                item.raw_data["_search_relaxed_reason"] = relaxed_reason or "relaxed_search"
+                            except Exception:
+                                pass
+                        standardized_results = relaxed_results
+                        logger.info(
+                            f"✅ Relaxed search recovered {len(standardized_results)} options for {slot_name}[{segment_index}] ({relaxed_reason})"
+                        )
+                        try:
+                            agent_monitor.log_activity(
+                                session.session_id,
+                                session.user_id,
+                                "search_relaxed",
+                                f"Relaxed search recovered options for {slot_name}[{segment_index}]",
+                                {
+                                    "slot": slot_name,
+                                    "segment_index": segment_index,
+                                    "reason": relaxed_reason or "relaxed_search",
+                                    "result_count": len(standardized_results),
+                                },
+                            )
+                        except Exception:
+                            pass
+                except Exception as relax_err:
+                    logger.warning(f"Relaxed search fallback failed for {slot_name}[{segment_index}]: {relax_err}")
+
+            if not standardized_results:
+                logger.warning(f"No results found for {slot_name} with requirements: {req} (after relaxed fallback)")
+                try:
+                    agent_monitor.log_activity(
+                        session.session_id,
+                        session.user_id,
+                        "search_no_results_after_relax",
+                        f"No options after relaxed fallback for {slot_name}[{segment_index}]",
+                        {
+                            "slot": slot_name,
+                            "segment_index": segment_index,
+                        },
+                    )
+                except Exception:
+                    pass
                 segment.status = SegmentStatus.PENDING
                 
                 # Check if date is close (today/tomorrow) to add specific hint for Responder
@@ -3519,6 +3695,19 @@ Output: JSON array only, no markdown. Example:
             # Update segment with standardized results (converted to dict for storage)
             # ✅ เก็บ raw data พร้อม cache key
             segment.options_pool = [item.model_dump() for item in standardized_results]
+
+            # 🧠 Recommended system: re-rank by RL+FWL + weighted_score (ask mode), tag top as แนะนำ
+            if getattr(self, "reinforcement_learning_enabled", True) and session.user_id and session.user_id != "anonymous":
+                try:
+                    segment.options_pool = await apply_personalized_recommendation_to_options(
+                        session.user_id,
+                        slot_name,
+                        segment.options_pool,
+                        session_mode="ask",
+                    )
+                except Exception as rec_err:
+                    logger.debug(f"Personalized recommendation ranking skipped: {rec_err}")
+
             if standardized_results and not segment.requirements.get("_cache_key"):
                 # เก็บ cache key ถ้ายังไม่มี
                 cache_key = self._create_cache_key(segment.requirements, slot_name)
@@ -4382,6 +4571,7 @@ Output JSON with your analysis and selection:
                         # ✅ CRUD STABILITY: Validate booking response
                         booking_id = booking_result.get("booking_id")
                         booking_status = booking_result.get("status", "pending_payment")  # ✅ Status is pending_payment (needs payment)
+                        visa_free_route = bool(booking_result.get("visa_free_route"))
                         
                         if not booking_id:
                             logger.error(f"Agent Mode: Booking API returned no booking_id. Response: {booking_result}")
@@ -4432,6 +4622,8 @@ Output JSON with your analysis and selection:
 
                         # ✅ แสดงผลการจองสำเร็จ
                         if status_callback:
+                            if visa_free_route:
+                                await status_callback("booking", "ℹ️ เส้นทางนี้ฟรีวีซ่าสำหรับสัญชาติของคุณ", "agent_visa_free_route")
                             status_text = "✅ จองสำเร็จแล้ว!" if booking_status == "confirmed" else "✅ สร้างการจองสำเร็จแล้ว (รอชำระเงิน)"
                             await status_callback("booking", f"{status_text} ราคารวม {int(total_price):,} บาท - Booking ID: {booking_id[:8]}...", "agent_auto_book_success")
                         
@@ -5616,19 +5808,24 @@ class BudgetAdvisor:
     
     @staticmethod
     def check_budget_feasibility(requested_budget: float, estimated_cost: float) -> Tuple[bool, str]:
-        """Check if requested budget is realistic"""
-        if requested_budget >= estimated_cost:
-            return True, "งบประมาณเพียงพอ"
-        
+        """
+        ตรวจว่างบรวมทริปที่ผู้ใช้กำหนด "ครอบ" ค่าใช้จ่ายประมาณการหรือไม่
+        - ถ้า estimated_cost > requested_budget ให้ถือว่า "เกินงบ" เสมอ
+        - ไม่อนุญาตเกินงบแม้เพียงเล็กน้อย (ใช้เป็น hard cap)
+        """
+        if requested_budget <= 0:
+            return False, "งบประมาณต้องมากกว่า 0 บาท"
+
+        if estimated_cost <= requested_budget:
+            return True, "งบประมาณเพียงพอ (ราคารวมทั้งหมดไม่เกินงบที่กำหนด)"
+
         shortfall = estimated_cost - requested_budget
-        percent_short = (shortfall / estimated_cost) * 100
-        
-        if percent_short < 20:
-            return True, f"งบประมาณเกือบพอ (ขาดอีก {int(shortfall):,} บาท หรือ {percent_short:.0f}%)"
-        elif percent_short < 40:
-            return False, f"งบประมาณต่ำไปหน่อย (แนะนำเพิ่มอีก {int(shortfall):,} บาท)"
-        else:
-            return False, f"งบประมาณต่ำเกินไป (ต้องการอย่างน้อย {int(estimated_cost):,} บาท)"
+        percent_over = (shortfall / requested_budget) * 100 if requested_budget else 0
+        return False, (
+            f"ราคารวมโดยประมาณ {int(estimated_cost):,} บาท เกินงบที่กำหนด "
+            f"({int(requested_budget):,} บาท) อยู่ประมาณ {int(shortfall):,} บาท "
+            f"≈ {percent_over:.0f}% — กรุณาเพิ่มงบหรือลดขอบเขตการเดินทาง"
+        )
 
 
 # =============================================================================

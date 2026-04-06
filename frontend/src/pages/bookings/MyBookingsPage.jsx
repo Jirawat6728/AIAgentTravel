@@ -7,6 +7,7 @@ import { useLanguage } from '../../context/LanguageContext';
 import { useFontSize } from '../../context/FontSizeContext';
 import PaymentPopup from '../../components/bookings/PaymentPopup';
 import { formatPriceInThb, toThb } from '../../utils/currency';
+import { isTripPastTransactionDeadline } from '../../utils/tripDateLock';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 
@@ -82,6 +83,8 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
     confirmedInbound: false,
     collapsed: false, // ซ่อนรายการหลังยืนยัน
   });
+  const [editHotelSearch, setEditHotelSearch] = useState({ loading: false, results: [], error: null });
+  const [editCarSearch, setEditCarSearch] = useState({ loading: false, results: [], error: null });
   const [refundModal, setRefundModal] = useState(null); // { bookingId, booking, eligibility: { refundable_items, total_refundable_amount, can_full_refund, message }, loading }
 
   // โหลดรายการเมื่อ user เปลี่ยน หรือเมื่อเปิดแท็บ My Bookings (หลังจองจาก Agent)
@@ -197,6 +200,16 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
   const handleRefundClick = async (bookingId) => {
     const booking = bookings.find((b) => b._id === bookingId);
     if (!booking) return;
+    if (isTripPastTransactionDeadline(booking.travel_slots, booking.plan)) {
+      await Swal.fire({
+        icon: 'info',
+        title: 'ทริปสิ้นสุดแล้ว',
+        text: 'เลยวันเดินทางแล้ว — ไม่สามารถขอคืนเงินผ่านหน้านี้ได้ (ดูรายละเอียดการจองได้ตามปกติ)',
+        confirmButtonText: 'ตกลง',
+        confirmButtonColor: '#2563eb',
+      });
+      return;
+    }
     setRefundModal({
       bookingId,
       booking,
@@ -281,6 +294,17 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
   const handleRefundConfirm = async (refundType = 'full') => {
     if (!refundModal?.bookingId) return;
     const bid = refundModal.bookingId;
+    const rb = bookings.find((b) => b._id === bid);
+    if (rb && isTripPastTransactionDeadline(rb.travel_slots, rb.plan)) {
+      await Swal.fire({
+        icon: 'info',
+        title: 'ทริปสิ้นสุดแล้ว',
+        text: 'เลยวันเดินทางแล้ว — ไม่สามารถดำเนินการคืนเงินได้',
+        confirmButtonText: 'ตกลง',
+        confirmButtonColor: '#2563eb',
+      });
+      return;
+    }
     setProcessing((p) => ({ ...p, [bid]: 'refunding' }));
     try {
       const headers = { 'Content-Type': 'application/json' };
@@ -332,6 +356,17 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
   };
 
   const handleCancel = async (bookingId) => {
+    const b = bookings.find((x) => x._id === bookingId);
+    if (b && isTripPastTransactionDeadline(b.travel_slots, b.plan)) {
+      await Swal.fire({
+        icon: 'info',
+        title: 'ทริปสิ้นสุดแล้ว',
+        text: 'เลยวันเดินทางแล้ว — ไม่สามารถยกเลิกการจองได้ (ดูรายละเอียดได้ตามปกติ)',
+        confirmButtonText: 'ตกลง',
+        confirmButtonColor: '#6366f1',
+      });
+      return;
+    }
     const result = await Swal.fire({
       title: t('bookings.confirmCancel') || 'คุณต้องการยกเลิกการจองนี้หรือไม่?',
       icon: 'warning',
@@ -395,6 +430,16 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
     const booking = bookings.find(b => b._id === bookingId);
     if (!booking) {
       Swal.fire({ icon: 'warning', text: 'ไม่พบข้อมูลการจอง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
+      return;
+    }
+    if (isTripPastTransactionDeadline(booking.travel_slots, booking.plan)) {
+      await Swal.fire({
+        icon: 'info',
+        title: 'ทริปสิ้นสุดแล้ว',
+        text: 'เลยวันเดินทางแล้ว — ไม่สามารถชำระเงินได้',
+        confirmButtonText: 'ตกลง',
+        confirmButtonColor: '#6366f1',
+      });
       return;
     }
 
@@ -493,6 +538,17 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
 
     const handlePaymentMethodSelect = (method) => {
     if (!paymentModal) return;
+    const pb = paymentModal.booking;
+    if (pb && isTripPastTransactionDeadline(pb.travel_slots, pb.plan)) {
+      Swal.fire({
+        icon: 'info',
+        title: 'ทริปสิ้นสุดแล้ว',
+        text: 'เลยวันเดินทางแล้ว — ไม่สามารถชำระเงินได้',
+        confirmButtonText: 'ตกลง',
+        confirmButtonColor: '#6366f1',
+      });
+      return;
+    }
     
     // Redirect to Omise payment gateway
     if (method === 'credit_card' || method === 'qr' || method === 'promptpay') {
@@ -530,6 +586,18 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
       Swal.fire({ icon: 'warning', text: 'ไม่พบข้อมูลการจอง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
       return;
     }
+    if (isTripPastTransactionDeadline(booking.travel_slots, booking.plan)) {
+      Swal.fire({
+        icon: 'info',
+        title: 'ทริปสิ้นสุดแล้ว',
+        text: 'เลยวันเดินทางแล้ว — ไม่สามารถแก้ไขการจองได้ (ดูรายละเอียดได้ตามปกติ)',
+        toast: true,
+        position: 'top',
+        showConfirmButton: false,
+        timer: 3200,
+      });
+      return;
+    }
 
     const tripId = booking.trip_id;
     const chatId = booking.chat_id;
@@ -557,15 +625,23 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
     const slots = booking.travel_slots || {};
     const plan = booking.plan || {};
     const flightOpt = plan?.travel?.flights?.outbound?.[0]?.selected_option || {};
+    const source = tripId?.startsWith('flight-') ? 'flight'
+          : tripId?.startsWith('hotel-')  ? 'hotel'
+          : tripId?.startsWith('car-')    ? 'car'
+          : 'direct';
+
+    const accSeg = plan?.accommodation?.segments?.[0];
+    const transportSeg = plan?.transport?.segments?.[0] || plan?.travel?.ground_transport?.[0];
 
     setEditFlightSearch({ loading: false, outbound: [], inboundResults: [], outboundError: null, inboundError: null, searched: false, activeTab: 'outbound', hasReturn: false, confirmedOutbound: false, confirmedInbound: false, collapsed: false });
+    setEditHotelSearch({ loading: false, results: [], error: null });
+    setEditCarSearch({ loading: false, results: [], error: null });
     setEditModal({
       bookingId: bookingId,
       booking: booking,
-      source: tripId?.startsWith('flight-') ? 'flight'
-            : tripId?.startsWith('hotel-')  ? 'hotel'
-            : tripId?.startsWith('car-')    ? 'car'
-            : 'direct',
+      source,
+      selectedHotel: null,
+      selectedTransfer: null,
       formData: {
         origin_city:        slots.origin_city        || '',
         destination_city:   slots.destination_city   || '',
@@ -573,8 +649,13 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
         return_date:        slots.return_date         || '',
         adults:             slots.adults              || 1,
         children:           slots.children            || 0,
-        total_price:        booking.total_price       || flightOpt.price_amount || 0,
-        currency:           booking.currency          || flightOpt.currency || 'THB',
+        passengers:         slots.passengers          || 1,
+        location:           slots.location            || slots.destination_city || '',
+        check_in:           slots.check_in            || '',
+        check_out:          slots.check_out           || '',
+        guests:             slots.guests              || 1,
+        total_price:        booking.total_price       || flightOpt.price_amount || accSeg?.selected_option?.price_amount || transportSeg?.selected_option?.price_amount || 0,
+        currency:           booking.currency          || flightOpt.currency || accSeg?.selected_option?.currency || transportSeg?.selected_option?.currency || 'THB',
         notes:              booking.notes             || '',
       }
     });
@@ -656,23 +737,134 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
     });
   };
 
+  const handleEditHotelSearch = async () => {
+    if (!editModal || editModal.source !== 'hotel') return;
+    const fd = editModal.formData;
+    if (!fd.location?.trim()) {
+      setEditHotelSearch(prev => ({ ...prev, error: 'กรุณากรอกสถานที่/เมือง', results: [] }));
+      return;
+    }
+    if (!fd.check_in || !fd.check_out) {
+      setEditHotelSearch(prev => ({ ...prev, error: 'กรุณาเลือกวันเช็คอินและเช็คเอาท์', results: [] }));
+      return;
+    }
+    setEditHotelSearch({ loading: true, results: [], error: null });
+    try {
+      const params = new URLSearchParams({
+        location: fd.location.trim(),
+        check_in: fd.check_in,
+        check_out: fd.check_out,
+        guests: String(Math.max(1, parseInt(fd.guests) || 1)),
+      });
+      const res = await fetch(`${API_BASE_URL}/api/mcp/search/hotels?${params.toString()}`, {
+        method: 'POST',
+        headers: { Accept: 'application/json' },
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || data.message || 'ค้นหาไม่สำเร็จ');
+      const list = data.hotels || data.results || (Array.isArray(data) ? data : []);
+      setEditHotelSearch({ loading: false, results: list, error: list.length === 0 ? 'ไม่พบที่พัก' : null });
+    } catch (err) {
+      setEditHotelSearch({ loading: false, results: [], error: err.message || 'เกิดข้อผิดพลาด' });
+    }
+  };
+
+  const handleSelectEditHotel = (hotel) => {
+    if (!editModal) return;
+    const name = hotel.name || hotel.hotel?.name || hotel.display_name || 'ที่พัก';
+    const priceObj = hotel.price || hotel.offers?.[0]?.price || {};
+    const total = parseFloat(priceObj.total ?? priceObj.totalAmount ?? priceObj.base ?? 0) || 0;
+    const currency = priceObj.currency || 'THB';
+    setEditModal(prev => ({
+      ...prev,
+      selectedHotel: hotel,
+      formData: { ...prev.formData, total_price: total, currency },
+    }));
+  };
+
+  const handleEditCarSearch = async () => {
+    if (!editModal || editModal.source !== 'car') return;
+    const fd = editModal.formData;
+    if (!fd.origin_city?.trim() || !fd.destination_city?.trim()) {
+      setEditCarSearch(prev => ({ ...prev, error: 'กรุณากรอกจุดรับและจุดส่ง', results: [] }));
+      return;
+    }
+    if (!fd.departure_date) {
+      setEditCarSearch(prev => ({ ...prev, error: 'กรุณาเลือกวันที่', results: [] }));
+      return;
+    }
+    setEditCarSearch({ loading: true, results: [], error: null });
+    try {
+      const params = new URLSearchParams({
+        origin: fd.origin_city.trim(),
+        destination: fd.destination_city.trim(),
+        date: fd.departure_date,
+        passengers: String(Math.max(1, parseInt(fd.passengers) || 1)),
+      });
+      const res = await fetch(`${API_BASE_URL}/api/mcp/search/transfers?${params.toString()}`, {
+        method: 'POST',
+        headers: { Accept: 'application/json' },
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || data.message || 'ค้นหาไม่สำเร็จ');
+      const list = data.transfers || (Array.isArray(data) ? data : []);
+      setEditCarSearch({ loading: false, results: list, error: list.length === 0 ? 'ไม่พบตัวเลือก' : null });
+    } catch (err) {
+      setEditCarSearch({ loading: false, results: [], error: err.message || 'เกิดข้อผิดพลาด' });
+    }
+  };
+
+  const handleSelectEditCar = (tr) => {
+    if (!editModal) return;
+    const priceObj = tr.price || tr.total_price || {};
+    const total = parseFloat(typeof priceObj === 'number' ? priceObj : (priceObj.total ?? priceObj.amount ?? priceObj ?? 0)) || 0;
+    const currency = (priceObj && priceObj.currency) || 'THB';
+    setEditModal(prev => ({
+      ...prev,
+      selectedTransfer: tr,
+      formData: { ...prev.formData, total_price: total, currency },
+    }));
+  };
+
   const handleUpdateBooking = async () => {
     if (!editModal) return;
 
     const fd = editModal.formData;
+    const source = editModal.source;
 
-    // Validate
-    if (!fd.origin_city?.trim() || !fd.destination_city?.trim()) {
-      Swal.fire({ icon: 'warning', text: 'กรุณากรอกต้นทางและปลายทาง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
-      return;
-    }
-    if (!fd.departure_date) {
-      Swal.fire({ icon: 'warning', text: 'กรุณาเลือกวันเดินทาง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
-      return;
-    }
-    if (fd.return_date && fd.return_date < fd.departure_date) {
-      Swal.fire({ icon: 'warning', text: 'วันกลับต้องไม่ก่อนวันเดินทาง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
-      return;
+    if (source === 'flight') {
+      if (!fd.origin_city?.trim() || !fd.destination_city?.trim()) {
+        Swal.fire({ icon: 'warning', text: 'กรุณากรอกต้นทางและปลายทาง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
+        return;
+      }
+      if (!fd.departure_date) {
+        Swal.fire({ icon: 'warning', text: 'กรุณาเลือกวันเดินทาง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
+        return;
+      }
+      if (fd.return_date && fd.return_date < fd.departure_date) {
+        Swal.fire({ icon: 'warning', text: 'วันกลับต้องไม่ก่อนวันเดินทาง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
+        return;
+      }
+    } else if (source === 'hotel') {
+      if (!fd.location?.trim()) {
+        Swal.fire({ icon: 'warning', text: 'กรุณากรอกสถานที่/เมือง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
+        return;
+      }
+      if (!fd.check_in || !fd.check_out) {
+        Swal.fire({ icon: 'warning', text: 'กรุณาเลือกวันเช็คอินและเช็คเอาท์', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
+        return;
+      }
+    } else if (source === 'car') {
+      if (!fd.origin_city?.trim() || !fd.destination_city?.trim()) {
+        Swal.fire({ icon: 'warning', text: 'กรุณากรอกจุดรับและจุดส่ง', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
+        return;
+      }
+      if (!fd.departure_date) {
+        Swal.fire({ icon: 'warning', text: 'กรุณาเลือกวันที่', toast: true, position: 'top', showConfirmButton: false, timer: 2500 });
+        return;
+      }
     }
 
     setProcessing(prev => ({ ...prev, [editModal.bookingId]: 'updating' }));
@@ -681,18 +873,116 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
       const headers = { 'Content-Type': 'application/json' };
       if (userId) headers['X-User-ID'] = userId;
 
-      const updatePayload = {
+      let updatePayload = {
         total_price: parseFloat(fd.total_price) || editModal.booking.total_price,
-        travel_slots: {
+        ...(fd.notes ? { notes: fd.notes } : {}),
+      };
+
+      if (source === 'flight') {
+        updatePayload.travel_slots = {
           origin_city:      fd.origin_city.trim(),
           destination_city: fd.destination_city.trim(),
           departure_date:   fd.departure_date,
           return_date:      fd.return_date || null,
           adults:           parseInt(fd.adults) || 1,
           children:         parseInt(fd.children) || 0,
-        },
-        ...(fd.notes ? { notes: fd.notes } : {}),
-      };
+        };
+      } else if (source === 'hotel') {
+        const hotel = editModal.selectedHotel;
+        const existingPlan = editModal.booking.plan || {};
+        const nights = (() => {
+          if (!fd.check_in || !fd.check_out) return 1;
+          const a = new Date(fd.check_in);
+          const b = new Date(fd.check_out);
+          return Math.max(1, Math.round((b - a) / 86400000));
+        })();
+        let segment;
+        if (hotel) {
+          const name = hotel.name || hotel.hotel?.name || hotel.display_name || 'ที่พัก';
+          const priceObj = hotel.price || hotel.offers?.[0]?.price || {};
+          const total = parseFloat(priceObj.total ?? priceObj.totalAmount ?? priceObj.base ?? 0) || 0;
+          const currency = priceObj.currency || 'THB';
+          segment = {
+            selected_option: {
+              raw_data: hotel,
+              price_amount: total,
+              currency,
+              hotel_name: name,
+            },
+          };
+        } else {
+          const acc = existingPlan.accommodation?.segments?.[0];
+          segment = acc || { selected_option: { price_amount: fd.total_price, currency: fd.currency || 'THB', hotel_name: 'ที่พัก' } };
+        }
+        updatePayload.plan = { ...existingPlan, accommodation: { segments: [segment] } };
+        updatePayload.travel_slots = {
+          ...(editModal.booking.travel_slots || {}),
+          destination_city: fd.location?.trim(),
+          location: fd.location?.trim(),
+          check_in: fd.check_in,
+          check_out: fd.check_out,
+          guests: parseInt(fd.guests) || 1,
+          nights,
+          accommodations: [segment],
+          source: 'hotel_search',
+        };
+      } else if (source === 'car') {
+        const tr = editModal.selectedTransfer;
+        const existingPlan = editModal.booking.plan || {};
+        let segment;
+        if (tr) {
+          const name = tr.name || tr.transfer_type || tr.vehicle?.name || 'รถ';
+          const priceObj = tr.price || tr.total_price || {};
+          const total = parseFloat(typeof priceObj === 'number' ? priceObj : (priceObj.total ?? priceObj.amount ?? priceObj ?? 0)) || 0;
+          const currency = (priceObj && priceObj.currency) || 'THB';
+          segment = {
+            selected_option: {
+              raw_data: tr,
+              price_amount: total,
+              currency,
+              display_name: name,
+              route: `${fd.origin_city} → ${fd.destination_city}`,
+            },
+            requirements: {
+              origin: fd.origin_city,
+              destination: fd.destination_city,
+              date: fd.departure_date,
+              passengers: parseInt(fd.passengers) || 1,
+            },
+          };
+        } else {
+          const transportSeg = existingPlan.transport?.segments?.[0] || existingPlan.travel?.ground_transport?.[0];
+          segment = transportSeg || {
+            selected_option: { price_amount: fd.total_price, currency: fd.currency || 'THB', display_name: 'รถ' },
+            requirements: { origin: fd.origin_city, destination: fd.destination_city, date: fd.departure_date, passengers: parseInt(fd.passengers) || 1 },
+          };
+        }
+        updatePayload.plan = { ...existingPlan, transport: { segments: [segment] } };
+        updatePayload.travel_slots = {
+          ...(editModal.booking.travel_slots || {}),
+          origin_city: fd.origin_city.trim(),
+          destination_city: fd.destination_city.trim(),
+          departure_date: fd.departure_date,
+          ground_transport: [segment],
+          transport: {
+            type: 'transfer',
+            route: `${fd.origin_city} → ${fd.destination_city}`,
+            price_amount: parseFloat(fd.total_price) || 0,
+            currency: fd.currency || 'THB',
+          },
+          source: 'car_search',
+          passengers: parseInt(fd.passengers) || 1,
+        };
+      } else {
+        updatePayload.travel_slots = {
+          origin_city:      fd.origin_city?.trim(),
+          destination_city: fd.destination_city?.trim(),
+          departure_date:   fd.departure_date,
+          return_date:      fd.return_date || null,
+          adults:           parseInt(fd.adults) || 1,
+          children:         parseInt(fd.children) || 0,
+        };
+      }
 
       const res = await fetch(`${API_BASE_URL}/api/booking/update?booking_id=${editModal.bookingId}`, {
         method: 'PUT',
@@ -780,6 +1070,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
           {displayBookings.map((booking) => {
             const plan = booking.plan || {};
             const travelSlots = booking.travel_slots || {};
+            const tripPastDeadline = isTripPastTransactionDeadline(travelSlots, plan);
             const statusBadge = getStatusBadge(booking.status);
             
             // ✅ ดึงข้อมูลจาก travel_slots (จาก database)
@@ -795,14 +1086,38 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
             const flights = travelSlots.flights || [];
             const accommodations = travelSlots.accommodations || [];
             const groundTransport = travelSlots.ground_transport || [];
+            const carSegments = travelSlots.cars || plan?.transport?.car_rental?.segments || [];
 
             // ✅ ตรวจสอบว่ามาจาก FlightSearch (trip_id ขึ้นต้นด้วย "flight-" หรือ source = 'flight_search')
             const isFromFlightSearch = (booking.trip_id || '').startsWith('flight-') || travelSlots.source === 'flight_search';
+
+            // ✅ ตรวจสอบว่าเป็นรถเช่า (จาก CarRentalsPage หรือ AI car rental)
+            const isCarRental =
+              (booking.trip_id || '').startsWith('car-') ||
+              travelSlots.source === 'car_rental_search' ||
+              (carSegments && carSegments.length > 0) ||
+              plan?.transport?.type === 'car_rental';
 
             // ✅ airline code สำหรับแสดง logo (จาก travel_slots หรือ plan)
             const airlineCode = travelSlots.airline_code
               || plan?.travel?.flights?.outbound?.[0]?.selected_option?.raw_data?.itineraries?.[0]?.segments?.[0]?.carrierCode
               || '';
+
+            // ✅ รุ่นรถสำหรับรถเช่า (ใช้แสดงต่อจากเส้นทาง เช่น HKT → HKT · Toyota Yaris 1.2)
+            let carModel = '';
+            if (isCarRental) {
+              const seg = Array.isArray(carSegments) && carSegments.length > 0 ? carSegments[0] : null;
+              const so = seg?.selected_option || {};
+              const raw = so.raw_data || {};
+              carModel =
+                raw.car_model ||
+                raw.name ||
+                raw.model ||
+                so.car_model ||
+                so.display_name ||
+                plan?.transport?.name ||
+                '';
+            }
 
             // ✅ ดึงข้อมูลเที่ยวบินจาก segments
             let outboundFlight = null;
@@ -922,18 +1237,74 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
               };
             }
 
+            // ✅ ดึงข้อมูลรถเช่า/การเดินทาง จาก travel_slots.transport หรือ ground_transport
+            let transportInfo = null;
+            const slotTransport = travelSlots.transport;
+            if (slotTransport && (slotTransport.price != null || slotTransport.price_amount != null || slotTransport.route || slotTransport.type)) {
+              transportInfo = {
+                type: slotTransport.type || slotTransport.category || 'transfer',
+                route: slotTransport.route || '',
+                price: slotTransport.price ?? slotTransport.price_amount ?? 0,
+                currency: slotTransport.currency || 'THB',
+                duration: slotTransport.duration,
+                vehicle_type: slotTransport.vehicle_type || slotTransport.car_type,
+                provider: slotTransport.provider || slotTransport.company
+              };
+            } else if (groundTransport.length > 0) {
+              const firstTransport = groundTransport[0];
+              const selectedOption = firstTransport?.selected_option || {};
+              const req = firstTransport?.requirements || {};
+              const origin = req?.origin ?? req?.from ?? '';
+              const dest = req?.destination ?? req?.to ?? '';
+              transportInfo = {
+                type: selectedOption?.category || firstTransport?.category || 'transfer',
+                route: (origin && dest) ? `${origin} → ${dest}` : (selectedOption?.display_name || selectedOption?.route || ''),
+                price: selectedOption?.price_amount ?? selectedOption?.price_total ?? 0,
+                currency: selectedOption?.currency || 'THB',
+                duration: selectedOption?.duration,
+                vehicle_type: selectedOption?.vehicle_type || selectedOption?.car_type,
+                provider: selectedOption?.provider || selectedOption?.company
+              };
+            }
+            // Fallback: จาก plan.transport / plan.travel.ground_transport
+            if (!transportInfo && (plan?.transport?.price != null || plan?.transport?.price_amount != null || (plan?.travel?.ground_transport?.length > 0))) {
+              const pt = plan.transport || {};
+              const gt = plan.travel?.ground_transport || [];
+              if (pt.route || pt.type || pt.price != null || pt.price_amount != null) {
+                transportInfo = {
+                  type: pt.type || pt.category || 'transfer',
+                  route: pt.route || '',
+                  price: pt.price ?? pt.price_amount ?? 0,
+                  currency: pt.currency || 'THB',
+                  duration: pt.duration
+                };
+              } else if (gt.length > 0 && gt[0]?.selected_option) {
+                const so = gt[0].selected_option;
+                const r = gt[0].requirements || {};
+                transportInfo = {
+                  type: so?.category || 'transfer',
+                  route: [r?.origin || r?.from, r?.destination || r?.to].filter(Boolean).join(' → ') || so?.display_name || '',
+                  price: so?.price_amount ?? so?.price_total ?? 0,
+                  currency: so?.currency || 'THB',
+                  duration: so?.duration
+                };
+              }
+            }
+
             // ✅ ที่พักอย่างเดียว = มีที่พัก แต่ไม่มีเที่ยวบิน
             const isAccommodationOnly = hotelInfo && !outboundFlight && !inboundFlight;
 
-            // ✅ ราคารวมที่แสดง: แปลงทุกส่วนเป็น THB ก่อนบวก แล้วใช้ผลรวมให้ตรงกับขาไป+ขากลับ+ที่พักที่แสดง
+            // ✅ ราคารวมที่แสดง: แปลงทุกส่วนเป็น THB (เที่ยวบิน + ที่พัก + รถเช่า/การเดินทาง)
             const outPrice = Number(outboundFlight?.price) || 0;
             const inPrice = Number(inboundFlight?.price) || 0;
             const hotelPriceNum = Number(hotelInfo?.price) || 0;
+            const transportPriceNum = Number(transportInfo?.price) || 0;
             const outThb = toThb(outPrice, outboundFlight?.currency || 'THB') ?? 0;
             const inThb = toThb(inPrice, inboundFlight?.currency || 'THB') ?? 0;
             const hotelThb = toThb(hotelPriceNum, hotelInfo?.currency || 'THB') ?? 0;
-            const hasComponentPrices = outPrice > 0 || inPrice > 0 || hotelPriceNum > 0;
-            const summedTotalThb = outThb + inThb + hotelThb;
+            const transportThb = toThb(transportPriceNum, transportInfo?.currency || 'THB') ?? 0;
+            const hasComponentPrices = outPrice > 0 || inPrice > 0 || hotelPriceNum > 0 || transportPriceNum > 0;
+            const summedTotalThb = outThb + inThb + hotelThb + transportThb;
             const displayTotalPrice = hasComponentPrices && summedTotalThb > 0 ? summedTotalThb : (booking.total_price || 0);
             const displayCurrency = 'THB';
             
@@ -958,7 +1329,13 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                         </span>
                       </span>
                     )}
-                    <span>{isAccommodationOnly && hotelInfo?.name ? `🏨 ${hotelInfo.name}` : (origin && dest ? `${origin} → ${dest}` : 'ทริป')}</span>
+                    <span>
+                      {isAccommodationOnly && hotelInfo?.name
+                        ? `🏨 ${hotelInfo.name}`
+                        : origin && dest
+                          ? `${origin} → ${dest}${isCarRental && carModel ? ` · ${carModel}` : ''}`
+                          : 'ทริป'}
+                    </span>
                     {/* ✅ Agent Mode Badge */}
                     {booking.metadata?.mode === 'agent' || booking.metadata?.auto_booked ? (
                       <span className="status-badge" style={{
@@ -977,9 +1354,27 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                     </span>
                   </div>
                   <div className="booking-date">
-                    {formatThaiDate(booking.created_at)}
+                    {booking.amadeus_booking_reference || booking.booking_reference || formatThaiDate(booking.created_at)}
                   </div>
                 </div>
+
+                {tripPastDeadline && (
+                  <div
+                    className="trip-readonly-banner"
+                    style={{
+                      margin: '0 0 12px',
+                      padding: '10px 14px',
+                      background: 'rgba(245, 158, 11, 0.15)',
+                      border: '1px solid rgba(245, 158, 11, 0.45)',
+                      borderRadius: 10,
+                      fontSize: 13,
+                      color: 'var(--text-primary, #1f2937)',
+                      lineHeight: 1.45,
+                    }}
+                  >
+                    <strong>🔒 โหมดดูอย่างเดียว</strong> — ทริปนี้เลยวันเดินทางแล้ว ไม่สามารถชำระเงิน แก้ไข ยกเลิก หรือคืนเงินได้
+                  </div>
+                )}
 
                 <div className="booking-details">
                   <div className="booking-detail-row">
@@ -994,8 +1389,8 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                   )}
                   {nights && (
                     <div className="booking-detail-row">
-                      <span className="detail-label">จำนวนคืน:</span>
-                      <span className="detail-value">{nights} คืน</span>
+                      <span className="detail-label">{isCarRental ? 'จำนวนวันที่เช่า:' : 'จำนวนคืน:'}</span>
+                      <span className="detail-value">{nights} {isCarRental ? 'วัน' : 'คืน'}</span>
                     </div>
                   )}
                   <div className="booking-detail-row">
@@ -1261,6 +1656,31 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                   </div>
                 )}
 
+                {/* ✅ แสดงข้อมูลรถเช่า/การเดินทาง จาก travel_slots */}
+                {transportInfo && (
+                  <div className="booking-transport-info" style={{ marginTop: '12px' }}>
+                    <div className="hotel-label">🚗 {transportInfo.type === 'car_rental' || transportInfo.vehicle_type ? 'รถเช่า' : 'การเดินทาง'}</div>
+                    {transportInfo.route && (
+                      <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '4px' }}>{transportInfo.route}</div>
+                    )}
+                    {(transportInfo.vehicle_type || transportInfo.provider) && (
+                      <div style={{ fontSize: '13px', color: '#6b7280', marginTop: '4px' }}>
+                        {[transportInfo.vehicle_type, transportInfo.provider].filter(Boolean).join(' • ')}
+                      </div>
+                    )}
+                    {transportInfo.duration && (
+                      <div style={{ fontSize: '13px', color: '#6b7280', marginTop: '4px' }}>
+                        ⏱️ {transportInfo.duration}
+                      </div>
+                    )}
+                    {(transportInfo.price > 0 || transportInfo.price != null) && (
+                      <div style={{ fontSize: '13px', color: '#2563eb', marginTop: '4px', fontWeight: 600 }}>
+                        {formatPriceInThb(transportInfo.price, transportInfo.currency)}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* ✅ Fallback: แสดงข้อมูลจาก plan.flight ถ้าไม่มีใน travel_slots */}
                 {!outboundFlight && !inboundFlight && plan.flight && (
                   <div className="booking-flight-info">
@@ -1338,21 +1758,21 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                       <button
                         className="btn-payment"
                         onClick={() => handlePayment(booking._id)}
-                        disabled={processing[booking._id] === 'paying'}
+                        disabled={tripPastDeadline || processing[booking._id] === 'paying'}
                       >
                         {processing[booking._id] === 'paying' ? t('bookings.processing') : t('bookings.pay')}
                       </button>
                       <button
                         className="btn-edit"
                         onClick={() => handleEdit(booking._id)}
-                        disabled={processing[booking._id] === 'updating'}
+                        disabled={tripPastDeadline || processing[booking._id] === 'updating'}
                       >
                         {processing[booking._id] === 'updating' ? t('bookings.processing') : t('bookings.edit')}
                       </button>
                       <button
                         className="btn-cancel"
                         onClick={() => handleCancel(booking._id)}
-                        disabled={processing[booking._id] === 'cancelling'}
+                        disabled={tripPastDeadline || processing[booking._id] === 'cancelling'}
                       >
                         {processing[booking._id] === 'cancelling' ? t('bookings.processing') : t('bookings.cancelBooking')}
                       </button>
@@ -1362,7 +1782,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                     <button
                       className="btn-cancel"
                       onClick={() => handleCancel(booking._id)}
-                      disabled={processing[booking._id] === 'cancelling'}
+                      disabled={tripPastDeadline || processing[booking._id] === 'cancelling'}
                     >
                       {processing[booking._id] === 'cancelling' ? t('bookings.processing') : t('bookings.cancelBooking')}
                     </button>
@@ -1371,7 +1791,7 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                     <button
                       className="btn-refund"
                       onClick={() => handleRefundClick(booking._id)}
-                      disabled={processing[booking._id] === 'refunding'}
+                      disabled={tripPastDeadline || processing[booking._id] === 'refunding'}
                     >
                       {processing[booking._id] === 'refunding' ? t('bookings.processing') : t('bookings.refund')}
                     </button>
@@ -1415,7 +1835,9 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
             
             <div className="payment-modal-body">
               <div className="edit-form">
-                {/* Row: ต้นทาง + ปลายทาง */}
+                {/* ── ฟอร์มเที่ยวบิน ── */}
+                {editModal.source === 'flight' && (
+                  <>
                 <div className="edit-form-row">
                 <div className="form-group">
                     <label className="form-label">📍 ต้นทาง <span className="required">*</span></label>
@@ -1438,8 +1860,6 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                     />
                   </div>
                 </div>
-
-                {/* Row: วันเดินทาง + วันกลับ */}
                 <div className="edit-form-row">
                 <div className="form-group">
                     <label className="form-label">📅 วันเดินทาง <span className="required">*</span></label>
@@ -1461,8 +1881,6 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                     />
                   </div>
                 </div>
-
-                {/* Row: ผู้โดยสาร */}
                 <div className="edit-form-row">
                 <div className="form-group">
                     <label className="form-label">👤 ผู้ใหญ่</label>
@@ -1485,8 +1903,6 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                     />
                   </div>
                 </div>
-
-                {/* ค้นหาเที่ยวบินที่รองรับ */}
                 <div className="edit-flight-search-section">
                   <div className="edit-flight-search-header">
                     <span className="edit-flight-search-label">
@@ -1649,22 +2065,188 @@ export default function MyBookingsPage({ user, onBack, onLogout, onSignIn, notif
                     );
                   })()}
                 </div>
+                  </>
+                )}
 
-                {/* หมายเหตุ */}
+                {/* ── ฟอร์มที่พัก ── */}
+                {editModal.source === 'hotel' && (
+                  <>
+                    <div className="edit-form-row">
+                      <div className="form-group">
+                        <label className="form-label">📍 สถานที่ / เมือง <span className="required">*</span></label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          value={editModal.formData.location}
+                          onChange={(e) => setEditModal({ ...editModal, formData: { ...editModal.formData, location: e.target.value }, selectedHotel: null })}
+                          placeholder="เช่น กรุงเทพมหานคร"
+                        />
+                      </div>
+                    </div>
+                    <div className="edit-form-row">
+                      <div className="form-group">
+                        <label className="form-label">📅 เช็คอิน <span className="required">*</span></label>
+                        <input
+                          type="date"
+                          className="form-input"
+                          value={editModal.formData.check_in}
+                          onChange={(e) => setEditModal({ ...editModal, formData: { ...editModal.formData, check_in: e.target.value }, selectedHotel: null })}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label className="form-label">📅 เช็คเอาท์ <span className="required">*</span></label>
+                        <input
+                          type="date"
+                          className="form-input"
+                          value={editModal.formData.check_out}
+                          min={editModal.formData.check_in}
+                          onChange={(e) => setEditModal({ ...editModal, formData: { ...editModal.formData, check_out: e.target.value }, selectedHotel: null })}
+                        />
+                      </div>
+                    </div>
+                    <div className="edit-form-row">
+                      <div className="form-group">
+                        <label className="form-label">👤 จำนวนผู้เข้าพัก</label>
+                        <input
+                          type="number"
+                          className="form-input"
+                          value={editModal.formData.guests}
+                          min="1"
+                          max="9"
+                          onChange={(e) => setEditModal({ ...editModal, formData: { ...editModal.formData, guests: e.target.value }, selectedHotel: null })}
+                        />
+                      </div>
+                    </div>
+                    <div className="edit-flight-search-section">
+                      <div className="edit-flight-search-header">
+                        <span className="edit-flight-search-label">🏨 ค้นหาที่พักใหม่</span>
+                        <button type="button" className="btn-search-flights" onClick={handleEditHotelSearch} disabled={editHotelSearch.loading}>
+                          {editHotelSearch.loading ? '🔍 กำลังค้นหา...' : '🔍 ค้นหาที่พัก'}
+                        </button>
+                      </div>
+                      {editHotelSearch.error && <div className="edit-flight-error">❌ {editHotelSearch.error}</div>}
+                      {editHotelSearch.results.length > 0 && (
+                        <div className="edit-flight-results">
+                          <div className="edit-flight-results-title">พบ {editHotelSearch.results.length} ที่พัก — เลือกเพื่ออัปเดตราคา</div>
+                          <div className="edit-flight-list">
+                            {editHotelSearch.results.slice(0, 5).map((h, idx) => {
+                              const name = h.name || h.hotel?.name || h.display_name || 'ที่พัก';
+                              const priceObj = h.price || h.offers?.[0]?.price || {};
+                              const total = parseFloat(priceObj.total ?? priceObj.totalAmount ?? priceObj.base ?? 0) || 0;
+                              const currency = priceObj.currency || 'THB';
+                              const isSelected = editModal.selectedHotel === h;
+                              return (
+                                <button key={idx} type="button" className={`edit-flight-item${isSelected ? ' selected' : ''}`} onClick={() => handleSelectEditHotel(h)}>
+                                  <span className="efi-code">🏨</span>
+                                  <span className="efi-route">{name}</span>
+                                  <span className="efi-price">{formatPriceInThb(total, currency)}</span>
+                                  {isSelected && <span className="efi-check">✓</span>}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {/* ── ฟอร์มรถเช่า/การเดินทาง ── */}
+                {editModal.source === 'car' && (
+                  <>
+                    <div className="edit-form-row">
+                      <div className="form-group">
+                        <label className="form-label">📍 จุดรับ <span className="required">*</span></label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          value={editModal.formData.origin_city}
+                          onChange={(e) => setEditModal({ ...editModal, formData: { ...editModal.formData, origin_city: e.target.value }, selectedTransfer: null })}
+                          placeholder="เช่น สนามบินสุวรรณภูมิ"
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label className="form-label">🏁 จุดส่ง <span className="required">*</span></label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          value={editModal.formData.destination_city}
+                          onChange={(e) => setEditModal({ ...editModal, formData: { ...editModal.formData, destination_city: e.target.value }, selectedTransfer: null })}
+                          placeholder="เช่น โรงแรมกลางเมือง"
+                        />
+                      </div>
+                    </div>
+                    <div className="edit-form-row">
+                      <div className="form-group">
+                        <label className="form-label">📅 วันที่ <span className="required">*</span></label>
+                        <input
+                          type="date"
+                          className="form-input"
+                          value={editModal.formData.departure_date}
+                          onChange={(e) => setEditModal({ ...editModal, formData: { ...editModal.formData, departure_date: e.target.value }, selectedTransfer: null })}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label className="form-label">👤 จำนวนผู้โดยสาร</label>
+                        <input
+                          type="number"
+                          className="form-input"
+                          value={editModal.formData.passengers}
+                          min="1"
+                          max="9"
+                          onChange={(e) => setEditModal({ ...editModal, formData: { ...editModal.formData, passengers: e.target.value }, selectedTransfer: null })}
+                        />
+                      </div>
+                    </div>
+                    <div className="edit-flight-search-section">
+                      <div className="edit-flight-search-header">
+                        <span className="edit-flight-search-label">🚗 ค้นหารถ/การเดินทาง</span>
+                        <button type="button" className="btn-search-flights" onClick={handleEditCarSearch} disabled={editCarSearch.loading}>
+                          {editCarSearch.loading ? '🔍 กำลังค้นหา...' : '🔍 ค้นหา'}
+                        </button>
+                      </div>
+                      {editCarSearch.error && <div className="edit-flight-error">❌ {editCarSearch.error}</div>}
+                      {editCarSearch.results.length > 0 && (
+                        <div className="edit-flight-results">
+                          <div className="edit-flight-results-title">พบ {editCarSearch.results.length} ตัวเลือก — เลือกเพื่ออัปเดตราคา</div>
+                          <div className="edit-flight-list">
+                            {editCarSearch.results.slice(0, 5).map((tr, idx) => {
+                              const name = tr.name || tr.transfer_type || tr.vehicle?.name || 'รถ';
+                              const priceObj = tr.price || tr.total_price || {};
+                              const total = parseFloat(typeof priceObj === 'number' ? priceObj : (priceObj.total ?? priceObj.amount ?? priceObj ?? 0)) || 0;
+                              const currency = (priceObj && priceObj.currency) || 'THB';
+                              const isSelected = editModal.selectedTransfer === tr;
+                              return (
+                                <button key={idx} type="button" className={`edit-flight-item${isSelected ? ' selected' : ''}`} onClick={() => handleSelectEditCar(tr)}>
+                                  <span className="efi-code">🚗</span>
+                                  <span className="efi-route">{name}</span>
+                                  <span className="efi-price">{formatPriceInThb(total, currency)}</span>
+                                  {isSelected && <span className="efi-check">✓</span>}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {/* หมายเหตุ (ใช้ร่วมกันทุกประเภท) */}
                 <div className="form-group">
                   <label className="form-label">📝 หมายเหตุ / ความต้องการพิเศษ</label>
                   <textarea
                     className="form-input edit-notes-input"
                     value={editModal.formData.notes}
                     onChange={(e) => setEditModal({ ...editModal, formData: { ...editModal.formData, notes: e.target.value } })}
-                    placeholder="เช่น ต้องการที่นั่งริมหน้าต่าง, อาหารมังสวิรัติ..."
+                    placeholder={editModal.source === 'hotel' ? 'เช่น ต้องการห้องติดทะเล...' : editModal.source === 'car' ? 'เช่น ต้องการคาร์ซีท...' : 'เช่น ต้องการที่นั่งริมหน้าต่าง, อาหารมังสวิรัติ...'}
                     rows={2}
                   />
                 </div>
 
                 {/* ราคา (read-only info) */}
                 <div className="edit-price-info">
-                  <span className="edit-price-label">💰 {(editModal.selectedOutbound || editModal.selectedInbound) ? 'ราคาเที่ยวบินที่เลือก' : 'ราคาปัจจุบัน'}</span>
+                  <span className="edit-price-label">💰 {editModal.source === 'flight' && (editModal.selectedOutbound || editModal.selectedInbound) ? 'ราคาเที่ยวบินที่เลือก' : editModal.source === 'hotel' && editModal.selectedHotel ? 'ราคาที่พักที่เลือก' : editModal.source === 'car' && editModal.selectedTransfer ? 'ราคารถที่เลือก' : 'ราคาปัจจุบัน'}</span>
                   <span className="edit-price-value">
                     {formatPriceInThb(editModal.formData.total_price, editModal.formData.currency)}
                   </span>

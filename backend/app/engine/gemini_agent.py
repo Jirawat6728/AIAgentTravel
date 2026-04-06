@@ -248,7 +248,7 @@ Available Actions:
    - "preferences": "direct" | "nonstop" | "no_connections" (Thai: "บินตรง", "ไม่ต่อเครื่อง")
    - "preferred_departure_time": "morning"|"afternoon"|"evening"|"night"|"HH:MM" (ช่วงเวลาออกเดินทาง เช่น "เช้า"→"morning", "บ่าย"→"afternoon", "20:00")
    - "min_price": int (ราคาขั้นต่ำ THB เช่น "ตั้งแต่ 5000" → min_price: 5000)
-   - "max_price": int (ราคาไม่เกิน THB เช่น "ไม่เกิน 15000" → max_price: 15000)
+   - "max_price": int (ราคาไม่เกิน THB เช่น "ไม่เกิน 15000" → max_price: 15000; ใช้เป็นเพดานต่อรายการ **แต่ต้องเคารพงบรวม (budget) ด้วย** ถ้ามี)
    Hotel/Accommodation updates can include:
    - "location": str (city name or address)
    - "attractions": List[str] or str (tourist spots/landmarks - use these as keywords for more accurate hotel search near attractions)

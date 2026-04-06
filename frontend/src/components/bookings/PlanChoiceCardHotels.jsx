@@ -29,13 +29,24 @@ function calcNights(checkIn, checkOut) {
   }
 }
 
-export default function PlanChoiceCardHotels({ choice, onSelect }) {
-  const { id, label, tags, recommended, hotel, currency, total_price, total_price_text, price_breakdown, price, title } = choice || {};
+export default function PlanChoiceCardHotels({ choice, onSelect, cardStyle }) {
+  const { id, label, tags, recommended, hotel, currency, total_price, total_price_text, price_breakdown, price, price_amount, title } = choice || {};
+  const toFinite = (v) => (typeof v === 'number' ? v : (typeof v === 'string' && v.trim() ? Number(v) : NaN));
+  const pickFirstNonNull = (...vals) => {
+    for (const v of vals) {
+      const n = toFinite(v);
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  };
   const displayCurrency = price_breakdown?.currency || currency || hotel?.currency || 'THB';
-  const resolvedTotal = typeof total_price === 'number' ? total_price
-    : typeof price === 'number' ? price
-    : (typeof hotel?.price_total === 'number' ? hotel.price_total : null)
-    ?? (typeof hotel?.booking?.pricing?.total_amount === 'number' ? hotel.booking.pricing.total_amount : null);
+  const resolvedTotal = pickFirstNonNull(
+    total_price,
+    price_amount,
+    price,
+    hotel?.price_total,
+    hotel?.booking?.pricing?.total_amount,
+  );
   const displayTotalPrice = resolvedTotal != null
     ? formatPriceInThb(resolvedTotal, displayCurrency)
     : (total_price_text || null);
@@ -46,9 +57,13 @@ export default function PlanChoiceCardHotels({ choice, onSelect }) {
   const checkOutStr = formatDate(hotel?.booking?.check_out_date);
 
   const pricing = hotel?.booking?.pricing;
-  const pricePerNight = pricing?.price_per_night;
-  const taxesAndFees = pricing?.taxes_and_fees;
-  const totalAmount = pricing?.total_amount ?? hotel?.price_total ?? resolvedTotal;
+  const totalAmount = pickFirstNonNull(pricing?.total_amount, hotel?.price_total, resolvedTotal);
+  const pricePerNight = pickFirstNonNull(
+    pricing?.price_per_night,
+    (totalAmount != null && hotelNights != null && hotelNights > 0) ? totalAmount / hotelNights : null,
+  );
+  const taxesAndFeesRaw = toFinite(pricing?.taxes_and_fees);
+  const taxesAndFees = Number.isFinite(taxesAndFeesRaw) && taxesAndFeesRaw > 0 ? taxesAndFeesRaw : null;
   const pricingCurrency = pricing?.currency || hotel?.currency || displayCurrency;
 
   const amenityLabels = [];
@@ -83,7 +98,7 @@ export default function PlanChoiceCardHotels({ choice, onSelect }) {
   }
 
   return (
-    <div className={`plan-card ${recommended ? 'plan-card-recommended' : ''}`}>
+    <div className={`plan-card ${recommended ? 'plan-card-recommended' : ''}`} style={cardStyle}>
       <div className="plan-card-header">
         <div className="plan-card-title">
           <span className="plan-card-label">{title || `ที่พัก ${id}${label ? ` — ${label}` : ''}`}</span>
@@ -92,7 +107,7 @@ export default function PlanChoiceCardHotels({ choice, onSelect }) {
         {tags && Array.isArray(tags) && tags.length > 0 && (
           <div className="plan-card-tags">
             {[...new Set(tags)]
-              .filter(tag => !['Amadeus', 'ราคาจริง', 'จองได้ทันที'].includes(tag))
+              .filter(tag => !['Amadeus', 'ราคาจริง', 'จองได้ทันที', 'Google', 'ไม่ใช่ราคาจริง'].includes(tag))
               .map((tag, idx) => (
                 <span key={idx} className="plan-tag-pill">{tag}</span>
               ))}
@@ -224,12 +239,14 @@ export default function PlanChoiceCardHotels({ choice, onSelect }) {
                   <span style={{ fontWeight: 600 }}>{formatPriceInThb(pricePerNight, pricingCurrency)}</span>
                 </div>
               )}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                <span style={{ fontSize: 13, opacity: 0.8 }}>ราคาค่าธรรมเนียม</span>
-                <span style={{ fontSize: 13 }}>{formatPriceInThb(taxesAndFees ?? 0, pricingCurrency)}</span>
-              </div>
+              {taxesAndFees != null && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                  <span style={{ fontSize: 13, opacity: 0.8 }}>ราคาค่าธรรมเนียม</span>
+                  <span style={{ fontSize: 13 }}>{formatPriceInThb(taxesAndFees, pricingCurrency)}</span>
+                </div>
+              )}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6, fontSize: 16 }}>
-                <span style={{ fontWeight: 600 }}>ราคาที่พักรวมค่าธรรมเนียมแล้ว</span>
+                <span style={{ fontWeight: 600 }}>ราคาที่พักจาก Amadeus</span>
                 <span style={{ fontWeight: 700, color: '#81c784' }}>{formatPriceInThb(totalAmount, pricingCurrency)}</span>
               </div>
             </div>

@@ -382,6 +382,31 @@
   color: #2e7d32;
 }
 
+.car-rentals-card-actions {
+  margin-top: 12px;
+}
+
+.car-rentals-btn-book {
+  padding: 10px 24px;
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9375rem;
+}
+
+.car-rentals-btn-book:hover:not(:disabled) {
+  background: #1d4ed8;
+  transform: translateY(-1px);
+}
+
+.car-rentals-btn-book:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
 /* Mobile — เหมือน FlightsPage */
 @media (max-width: 768px) {
   .car-rentals-content {
@@ -526,6 +551,14 @@
 
 .car-rentals-content[data-theme="dark"] .car-rentals-card-desc {
   color: var(--content-text-muted);
+}
+
+.car-rentals-content[data-theme="dark"] .car-rentals-btn-book {
+  background: #3b82f6;
+  color: #fff;
+}
+.car-rentals-content[data-theme="dark"] .car-rentals-btn-book:hover:not(:disabled) {
+  background: #2563eb;
 }
 
 .car-rentals-content[data-theme="dark"] .car-rentals-card-price {

@@ -6,8 +6,10 @@
 from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
-from datetime import datetime
+from datetime import datetime, timedelta
 from app.core.logging import get_logger
+from app.core.redis_client import get_redis, is_redis_available
+from app.core.config import settings
 
 if TYPE_CHECKING:
     from app.models.trip_plan import TripPlan
@@ -15,7 +17,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 KEY_PREFIX = "workflow:state:"
-DEFAULT_TTL_SECONDS = 86400  # kept for API compatibility, not used
+DEFAULT_TTL_SECONDS = 86400  # kept for API compatibility
 
 
 class WorkflowStep:
@@ -66,7 +68,7 @@ def _compute_completeness_issues(trip_plan: Any, step: str) -> List[str]:
     return issues[:5]
 
 
-# In-memory store: session_id -> workflow state dict
+# In-memory store: session_id -> workflow state dict (fallback)
 _workflow_store: Dict[str, Dict[str, Any]] = {}
 
 
@@ -79,12 +81,28 @@ class WorkflowStateService:
     """
 
     def __init__(self):
-        logger.info("WorkflowStateService initialized (in-memory, Redis removed)")
+        if settings.redis_url:
+            logger.info("WorkflowStateService initialized (Redis + in-memory fallback)")
+        else:
+            logger.info("WorkflowStateService initialized (in-memory only)")
 
     def _key(self, session_id: str) -> str:
         return session_id
 
     async def get_workflow_state(self, session_id: str) -> Optional[Dict[str, Any]]:
+        key = f"{KEY_PREFIX}{self._key(session_id)}"
+
+        # Redis path (ใช้เมื่อมี REDIS_URL และ Redis พร้อม)
+        if is_redis_available():
+            try:
+                redis = await get_redis()
+                if redis is not None:
+                    raw = await redis.get(key)
+                    if raw:
+                        return json.loads(raw)
+            except Exception as e:
+                logger.debug(f"get_workflow_state Redis failed: {e}")
+
         return _workflow_store.get(self._key(session_id))
 
     async def set_workflow_state(
@@ -116,6 +134,19 @@ class WorkflowStateService:
             }
             _workflow_store[self._key(session_id)] = data
             logger.info(f"Workflow state set: session={session_id}, step={step}")
+
+            # Redis path (ใช้เมื่อมี REDIS_URL และ Redis พร้อม)
+            if is_redis_available():
+                try:
+                    redis = await get_redis()
+                    if redis is not None:
+                        await redis.set(
+                            f"{KEY_PREFIX}{self._key(session_id)}",
+                            json.dumps(data, ensure_ascii=False, default=str),
+                            ex=ttl_seconds or DEFAULT_TTL_SECONDS,
+                        )
+                except Exception as e:
+                    logger.debug(f"set_workflow_state Redis failed: {e}")
 
             try:
                 _debug_path = r"c:\Users\Juins\Desktop\DEMO\AITravelAgent\.cursor\debug.log"
@@ -180,6 +211,16 @@ class WorkflowStateService:
 
     async def clear_workflow(self, session_id: str) -> bool:
         _workflow_store.pop(self._key(session_id), None)
+
+        # Redis path
+        if settings.enable_redis_cache and is_redis_available():
+            try:
+                redis = await get_redis()
+                if redis is not None:
+                    await redis.delete(f"{KEY_PREFIX}{self._key(session_id)}")
+            except Exception as e:
+                logger.debug(f"clear_workflow Redis failed: {e}")
+
         logger.info(f"Workflow state cleared: session={session_id}")
         return True
 

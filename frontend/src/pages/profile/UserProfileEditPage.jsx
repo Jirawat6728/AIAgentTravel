@@ -818,6 +818,23 @@ export default function UserProfileEditPage({
       const expiry = new Date(f.expiry_date);
       if (!isNaN(issue.getTime()) && !isNaN(expiry.getTime()) && expiry < issue) err.expiry_date = 'วันหมดอายุต้องไม่ก่อนวันออกวีซ่า';
     }
+    // ตรวจสอบวันหมดอายุวีซ่าต้องไม่อยู่ในอดีต และเตือนถ้าใกล้หมดอายุ
+    if (f.expiry_date && /^\d{4}-\d{2}-\d{2}$/.test(f.expiry_date.trim())) {
+      const expiry = new Date(f.expiry_date);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      if (!isNaN(expiry.getTime())) {
+        if (expiry < today) {
+          err.expiry_date = 'วีซ่าหมดอายุแล้ว กรุณาใช้ข้อมูลวีซ่าเล่ม/รายการอื่น';
+        } else {
+          const threeMonthsFromNow = new Date();
+          threeMonthsFromNow.setMonth(threeMonthsFromNow.getMonth() + 3);
+          if (!err.expiry_date && expiry < threeMonthsFromNow) {
+            err.expiry_date = 'วีซ่าจะหมดอายุภายใน 3 เดือน กรุณาตรวจสอบเงื่อนไขการเดินทางของประเทศปลายทาง';
+          }
+        }
+      }
+    }
     if (f.visa_number && f.visa_number.trim()) {
       if (f.visa_number.trim().length < 5) err.visa_number = 'เลขที่วีซ่าต้องมีอย่างน้อย 5 ตัวอักษร';
       else if (f.visa_number.trim().length > 50) err.visa_number = 'เลขที่วีซ่าต้องไม่เกิน 50 ตัวอักษร';

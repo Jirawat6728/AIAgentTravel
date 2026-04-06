@@ -990,6 +990,48 @@ class TravelOrchestrator:
                 except Exception as relax_e:
                     logger.debug(f"Relaxed search failed: {relax_e}")
             
+            # ✅ FALLBACK: Try adjacent days (±1) when same date returns 0 (บางเส้นทางไม่มีบินวันนั้นแต่มีวันถัดไป/ก่อน)
+            if not data:
+                from datetime import datetime as _dt, timedelta as _td
+                try:
+                    search_dt = _dt.strptime(date, "%Y-%m-%d")
+                    today = _dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                    for delta in [1, -1]:  # +1 day first, then -1 day
+                        adj_dt = search_dt + _td(days=delta)
+                        if adj_dt < today:
+                            continue
+                        adj_date = adj_dt.strftime("%Y-%m-%d")
+                        params_adj = {**params, "departureDate": adj_date}
+                        if norm_return_date:
+                            try:
+                                ret_dt = _dt.strptime(norm_return_date, "%Y-%m-%d")
+                                adj_ret = (ret_dt + _td(days=delta)).strftime("%Y-%m-%d")
+                                if adj_ret >= adj_date:
+                                    params_adj["returnDate"] = adj_ret
+                            except ValueError:
+                                pass
+                        logger.info(f"🔄 Trying adjacent day: {adj_date} (original {date})")
+                        try:
+                            adj_resp = await self.client.get(
+                                f"{self.amadeus_search_base_url}/v2/shopping/flight-offers",
+                                params=params_adj,
+                                headers={"Authorization": f"Bearer {token}"}
+                            )
+                            adj_resp.raise_for_status()
+                            adj_json = adj_resp.json()
+                            data = adj_json.get("data", [])
+                            if data and non_stop:
+                                data = [o for o in data if all(len(itin.get("segments") or []) <= 1 for itin in (o.get("itineraries") or []))]
+                            if data:
+                                logger.info(f"✅ Found {len(data)} flights on adjacent day {adj_date} (requested {date})")
+                                for o in data:
+                                    o["_fallback_date"] = adj_date
+                                return data[:10]
+                        except Exception as adj_e:
+                            logger.debug(f"Adjacent day {adj_date} failed: {adj_e}")
+                except Exception as fallback_e:
+                    logger.debug(f"Adjacent-day fallback failed: {fallback_e}")
+            
             # If still no results, log detailed diagnostic information
             full_response = response_json
             meta = full_response.get('meta', {})
@@ -1059,6 +1101,64 @@ class TravelOrchestrator:
         except Exception as e:
             logger.warning(f"Failed to convert {city_name} to IATA: {e}")
             return None
+
+    @staticmethod
+    def _format_amadeus_address(addr: Dict[str, Any]) -> str:
+        """จัดรูปแบบที่อยู่จาก Amadeus address object เป็นข้อความเดียว"""
+        if not addr or not isinstance(addr, dict):
+            return ""
+        lines = addr.get("lines") or []
+        parts = []
+        if isinstance(lines, list):
+            parts.extend([str(x).strip() for x in lines if x])
+        elif isinstance(lines, str):
+            parts.append(lines.strip())
+        city = (addr.get("cityName") or "").strip()
+        if city:
+            parts.append(city)
+        postal = (addr.get("postalCode") or "").strip()
+        if postal:
+            parts.append(postal)
+        country = (addr.get("countryCode") or "").strip()
+        if country:
+            parts.append(country)
+        return ", ".join(p for p in parts if p)
+
+    async def _enrich_offers_with_amadeus_address(
+        self, data: List[Dict[str, Any]], refs_by_id: Optional[Dict[str, Dict[str, Any]]] = None, token: Optional[str] = None
+    ) -> None:
+        """เติมที่อยู่จาก Amadeus reference (by-city/by-geocode หรือ by-hotels) เข้าแต่ละ offer (แก้ in-place)"""
+        if not data:
+            return
+        if not refs_by_id and token:
+            hotel_ids = list({item.get("hotel", {}).get("hotelId") for item in data if item.get("hotel", {}).get("hotelId")})
+            if not hotel_ids:
+                return
+            try:
+                resp = await self._amadeus_get(
+                    f"{self.amadeus_search_base_url}/v1/reference-data/locations/hotels/by-hotels",
+                    token=token,
+                    params={"hotelIds": ",".join(hotel_ids[:20])},
+                    retries=1,
+                    use_booking_env=False,
+                )
+                ref_list = (resp.json().get("data") or []) if resp else []
+                refs_by_id = {r["hotelId"]: r for r in ref_list if r.get("hotelId")}
+            except Exception as e:
+                logger.debug(f"by-hotels address fetch failed: {e}")
+                return
+        if not refs_by_id:
+            return
+        for item in data:
+            hid = item.get("hotel", {}).get("hotelId")
+            ref = refs_by_id.get(hid) if hid else None
+            if not ref or not ref.get("address"):
+                continue
+            addr = ref["address"]
+            item.setdefault("hotel", {})["address"] = addr
+            formatted = self._format_amadeus_address(addr)
+            if formatted:
+                item["address"] = formatted
 
     async def get_hotels(self, city_code: str = None, location_name: str = None, check_in: str = None, check_out: str = None, guests: int = 1) -> List[Dict[str, Any]]:
         """Fetch Hotel Offers with flexible location input"""
@@ -1170,6 +1270,7 @@ class TravelOrchestrator:
                 )
                 return []
 
+            hotel_id_to_ref = {h["hotelId"]: h for h in hotels if h.get("hotelId")}
             hotel_ids = ",".join([h["hotelId"] for h in hotels if h.get("hotelId")])
             if not hotel_ids:
                 logger.warning(f"No hotelIds returned for candidates {codes_to_try}")
@@ -1199,6 +1300,7 @@ class TravelOrchestrator:
                                 item.setdefault("_debug", {})
                                 item["_debug"]["city_code_used"] = f"cityCode:{codes_to_try[0]}"
                                 item["_debug"]["candidates_tried"] = codes_to_try
+                            await self._enrich_offers_with_amadeus_address(data, token=token)
                             return data
                     except Exception as fallback_error:
                         logger.warning(f"CityCode fallback also failed: {fallback_error}")
@@ -1230,7 +1332,6 @@ class TravelOrchestrator:
                     item.setdefault("_debug", {})
                     if "_debug" in item and not item["_debug"].get("city_code_used"):
                         item["_debug"]["city_code_used"] = f"city:{city_for_sync}" if city_for_sync else ""
-                
                 # ✅ Log hotel offers results
                 if data:
                     logger.info(f"✅ Found {len(data)} hotel offers for {len(hotel_ids.split(','))} hotels (check_in={check_in}, check_out={check_out}, guests={guests})")
@@ -1329,6 +1430,7 @@ class TravelOrchestrator:
                                 item.setdefault("_debug", {})
                                 item["_debug"]["city_code_used"] = f"cityCode:{codes_to_try[0]} (fallback)"
                                 item["_debug"]["candidates_tried"] = codes_to_try
+                            await self._enrich_offers_with_amadeus_address(data, token=token)
                             return data
                         except Exception as fallback_error:
                             logger.error(f"CityCode fallback also failed: {fallback_error}")
@@ -1338,7 +1440,8 @@ class TravelOrchestrator:
                 item.setdefault("_debug", {})
                 item["_debug"]["city_code_used"] = target_used
                 item["_debug"]["candidates_tried"] = codes_to_try
-            
+            # ✅ ดึงที่อยู่จาก Amadeus reference (by-city/by-geocode หรือ by-hotels)
+            await self._enrich_offers_with_amadeus_address(data, refs_by_id=hotel_id_to_ref, token=token)
             # ✅ Final logging
             if data:
                 logger.info(f"✅ Returning {len(data)} hotel offers for {location_name or city_code}")
@@ -1350,7 +1453,6 @@ class TravelOrchestrator:
                     f"Tried city codes: {codes_to_try if 'codes_to_try' in locals() else 'N/A'}, "
                     f"Hotel IDs searched: {hotel_ids_count}"
                 )
-            
             return data
         except Exception as e:
             logger.error(f"❌ Hotel API error for {location_name or city_code}: {e}", exc_info=True)

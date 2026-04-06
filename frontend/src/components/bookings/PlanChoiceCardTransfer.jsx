@@ -24,7 +24,7 @@ function transportTypeName(transport) {
   return names[transport.type] || transport.type;
 }
 
-export default function PlanChoiceCardTransfer({ choice, onSelect }) {
+export default function PlanChoiceCardTransfer({ choice, onSelect, cardStyle }) {
   const { id, label, tags, recommended, transport, car, ground_transport, currency, total_price, total_price_text, price, price_breakdown, title } = choice || {};
   const displayCurrency = price_breakdown?.currency || currency || transport?.currency || car?.currency || 'THB';
   // ✅ ราคารวม: total_price หรือ price (option) หรือ transport/car price แบบ catalog
@@ -49,7 +49,7 @@ export default function PlanChoiceCardTransfer({ choice, onSelect }) {
   }
 
   return (
-    <div className={`plan-card ${recommended ? 'plan-card-recommended' : ''}`}>
+    <div className={`plan-card ${recommended ? 'plan-card-recommended' : ''}`} style={cardStyle}>
       <div className="plan-card-header">
         <div className="plan-card-title">
           <span className="plan-card-label">{title || `การเดินทาง ${id}${label ? ` — ${label}` : ''}`}</span>
@@ -58,7 +58,7 @@ export default function PlanChoiceCardTransfer({ choice, onSelect }) {
         {tags && Array.isArray(tags) && tags.length > 0 && (
           <div className="plan-card-tags">
             {[...new Set(tags)]
-              .filter(tag => !['Amadeus', 'ราคาจริง', 'จองได้ทันที'].includes(tag))
+              .filter(tag => !['Amadeus', 'ราคาจริง', 'จองได้ทันที', 'Google', 'ไม่ใช่ราคาจริง'].includes(tag))
               .map((tag, idx) => (
                 <span key={idx} className="plan-tag-pill">{tag}</span>
               ))}

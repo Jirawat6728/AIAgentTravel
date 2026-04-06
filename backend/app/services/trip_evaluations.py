@@ -30,6 +30,8 @@ async def upsert_trip_evaluation(
     mode: Optional[str] = None,
     agent_accuracy_score: Optional[int] = None,
     user_stars: Optional[int] = None,
+    criteria_ratings: Optional[Dict[str, Any]] = None,
+    satisfaction_pct: Optional[float] = None,
 ) -> bool:
     """
     บันทึกหรืออัปเดตการประเมินทริป (คะแนน AI + คะแนน User)
@@ -55,6 +57,10 @@ async def upsert_trip_evaluation(
             update_fields["agent_accuracy_score"] = agent_accuracy_score
         if user_stars is not None:
             update_fields["user_stars"] = user_stars
+        if criteria_ratings is not None:
+            update_fields["criteria_ratings"] = criteria_ratings
+        if satisfaction_pct is not None:
+            update_fields["satisfaction_pct"] = satisfaction_pct
 
         if doc:
             await col.update_one(
@@ -70,6 +76,8 @@ async def upsert_trip_evaluation(
                 "mode": mode or "agent",
                 "agent_accuracy_score": agent_accuracy_score,
                 "user_stars": user_stars,
+                "criteria_ratings": criteria_ratings,
+                "satisfaction_pct": satisfaction_pct,
                 "created_at": now,
                 "updated_at": now,
             })

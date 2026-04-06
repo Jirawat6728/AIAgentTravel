@@ -6,6 +6,7 @@ import React, { useState } from 'react';
 import { formatMoney, formatDuration, parseDurationToHours, calculateCO2e } from './planChoiceCardUtils';
 import { AIRLINE_NAMES, AIRLINE_DOMAINS } from '../../data/airlineNames';
 import { getAirportDisplay } from '../../data/airportNames';
+import { dedupeSegments } from '../../utils/flightSegments';
 import './PlanChoiceCard.css';
 
 function calculateLayoverTime(prevSegment, nextSegment) {
@@ -133,7 +134,7 @@ function carriersLabel(flight) {
   return carriers.length ? carriers.join(', ') : null;
 }
 
-export default function PlanChoiceCardFlights({ choice, onSelect, disableSelect }) {
+export default function PlanChoiceCardFlights({ choice, onSelect, disableSelect, cardStyle }) {
   const [showDetails, setShowDetails] = useState(false);
   const { id, label, tags, recommended, flight, flight_details, currency, total_price, total_price_text, price, price_breakdown, title } = choice || {};
   const displayCurrency = price_breakdown?.currency || currency || flight?.currency || 'THB';
@@ -147,11 +148,12 @@ export default function PlanChoiceCardFlights({ choice, onSelect, disableSelect 
   // ✅ กรอง segments ตาม direction (ขาไป/ขากลับ) เพื่อไม่รวม round-trip ในการ์ดเดียว → แสดงบินตรงและเส้นทางถูกต้อง
   const flightDirection = choice?.flight_direction ?? (flight?.segments?.[0]?.direction && String(flight.segments[0].direction).includes('ขากลับ') ? 'inbound' : flight?.segments?.[0]?.direction && String(flight.segments[0].direction).includes('ขาไป') ? 'outbound' : null);
   const segmentsForDisplay = (() => {
-    const segs = flight?.segments || [];
+    let segs = flight?.segments || [];
     if (!segs.length) return segs;
-    if (flightDirection === 'outbound') return segs.filter((s) => s?.direction && String(s.direction).includes('ขาไป'));
-    if (flightDirection === 'inbound') return segs.filter((s) => s?.direction && String(s.direction).includes('ขากลับ'));
-    return segs;
+    if (flightDirection === 'outbound') segs = segs.filter((s) => s?.direction && String(s.direction).includes('ขาไป'));
+    else if (flightDirection === 'inbound') segs = segs.filter((s) => s?.direction && String(s.direction).includes('ขากลับ'));
+    // ✅ Validate: ห้ามซ้ำกัน
+    return dedupeSegments(segs);
   })();
   const displayFlight = segmentsForDisplay.length ? { ...flight, segments: segmentsForDisplay } : flight;
 
@@ -201,7 +203,7 @@ export default function PlanChoiceCardFlights({ choice, onSelect, disableSelect 
   }
 
   return (
-    <div className={`plan-card ${recommended ? 'plan-card-recommended' : ''}`}>
+    <div className={`plan-card ${recommended ? 'plan-card-recommended' : ''}`} style={cardStyle}>
       <div className="plan-card-header">
         <div className="plan-card-title">
           <span className="plan-card-label">{title || `เที่ยวบิน ${id}${label ? ` — ${label}` : ''}`}</span>
@@ -219,7 +221,7 @@ export default function PlanChoiceCardFlights({ choice, onSelect, disableSelect 
         {tags && Array.isArray(tags) && tags.length > 0 && (
           <div className="plan-card-tags">
             {[...new Set(tags)]
-              .filter(t => !['Amadeus', 'ราคาจริง', 'จองได้ทันที'].includes(t))
+              .filter(t => !['Amadeus', 'ราคาจริง', 'จองได้ทันที', 'Google', 'ไม่ใช่ราคาจริง'].includes(t))
               .filter(t => t !== 'แนะนำ' || !recommended)
               .filter(t => t !== 'บินตรง' || flightStops !== 'Non-stop')
               .map((tag, idx) => (

@@ -36,16 +36,31 @@ class LiveAudioService:
         self.api_key = api_key or settings.gemini_api_key
         if not self.api_key:
             raise LLMException("GEMINI_API_KEY is required for Live Audio")
-        
-        # Use model from .env or default to native audio model
-        base_model = settings.gemini_flash_model
-        # For live audio, use native audio variant
-        self.model_id = os.getenv("GEMINI_LIVE_AUDIO_MODEL", f"{base_model}-native-audio-preview-12-2025").strip()
-        # Fallback to alternative model names if needed
-        self.fallback_models = [
+
+        # Live API model selection:
+        # - Prefer explicit env model if provided
+        # - Then try stable known live models
+        # - Keep legacy/derived names as last-resort compatibility
+        env_live_model = os.getenv("GEMINI_LIVE_AUDIO_MODEL", "").strip()
+        base_model = (settings.gemini_flash_model or "gemini-2.0-flash").strip()
+        candidate_models = [
+            env_live_model,
+            "gemini-2.0-flash-live-001",
+            f"{base_model}-live-001",
+            f"{base_model}-native-audio-preview-12-2025",
             f"{base_model}-native-audio",
-            f"gemini-live-{base_model.replace('gemini-', '')}-native-audio"
+            f"gemini-live-{base_model.replace('gemini-', '')}-native-audio",
         ]
+        deduped = []
+        seen = set()
+        for m in candidate_models:
+            if not m or m in seen:
+                continue
+            seen.add(m)
+            deduped.append(m)
+
+        self.model_id = deduped[0]
+        self.fallback_models = deduped[1:]
     
     async def create_session(
         self,
@@ -103,10 +118,9 @@ class LiveAudioService:
 - ตอบสนองด้วยอารมณ์ที่เหมาะสม
 - สามารถขัดจังหวะได้เมื่อผู้ใช้ต้องการพูด"""
             
-            # ✅ FIX: Use dict config instead of types.GenerateContentConfig
-            # Based on web search, Live API uses dict config
+            # Use dict config for Live API session settings
             config = {
-                "response_modalities": ["AUDIO"],
+                "response_modalities": ["AUDIO", "TEXT"],
                 "system_instruction": system_instruction_text
             }
             
@@ -126,78 +140,58 @@ class LiveAudioService:
             # ✅ FIX: client.aio.live.connect() returns an async context manager
             # We need to enter it manually since we can't use 'async with' in this function
             # The context manager must be entered and managed by the caller
-            try:
-                # Get the async context manager
-                session_cm = client.aio.live.connect(
-                    model=self.model_id,
-                    config=config
-                )
-                
-                # #region agent log (Hypothesis A)
-                _write_debug_log({
-                    "id": f"log_{int(__import__('time').time() * 1000)}_got_context_manager",
-                    "timestamp": int(__import__('time').time() * 1000),
-                    "location": "live_audio_service.py:85",
-                    "message": "Got context manager from connect",
-                    "data": {"session_cm_type": type(session_cm).__name__},
-                    "sessionId": "debug-session",
-                    "runId": "run1",
-                    "hypothesisId": "A"
-                })
-                # #endregion
-                
-                # Enter the context manager to get the actual session
-                session = await session_cm.__aenter__()
-                
-                # #region agent log (Hypothesis A)
-                _write_debug_log({
-                    "id": f"log_{int(__import__('time').time() * 1000)}_session_entered",
-                    "timestamp": int(__import__('time').time() * 1000),
-                    "location": "live_audio_service.py:95",
-                    "message": "Session context entered successfully",
-                    "data": {"session_type": type(session).__name__},
-                    "sessionId": "debug-session",
-                    "runId": "run1",
-                    "hypothesisId": "A"
-                })
-                # #endregion
-                
-                # Store the context manager for cleanup
-                session._cm = session_cm
-                
-                logger.info(f"Created Live API session with model: {self.model_id}")
-                return session
-            except Exception as e:
-                # #region agent log (Hypothesis A)
-                _write_debug_log({
-                    "id": f"log_{int(__import__('time').time() * 1000)}_primary_model_failed",
-                    "timestamp": int(__import__('time').time() * 1000),
-                    "location": "live_audio_service.py:105",
-                    "message": "Primary model failed",
-                    "data": {"error": str(e), "error_type": type(e).__name__},
-                    "sessionId": "debug-session",
-                    "runId": "run1",
-                    "hypothesisId": "A"
-                })
-                # #endregion
-                
-                logger.warning(f"Failed to create session with {self.model_id}: {e}")
-                # Try fallback models
-                for fallback_model in self.fallback_models:
-                    try:
-                        session_cm = client.aio.live.connect(
-                            model=fallback_model,
-                            config=config
-                        )
-                        session = await session_cm.__aenter__()
-                        session._cm = session_cm
-                        logger.info(f"Created Live API session with fallback model: {fallback_model}")
-                        return session
-                    except Exception as fallback_error:
-                        logger.warning(f"Fallback model {fallback_model} also failed: {fallback_error}")
-                        continue
-                
-                raise LLMException(f"Failed to create Live API session with any model: {e}")
+            all_models = [self.model_id, *self.fallback_models]
+            model_errors = []
+            for idx, model_name in enumerate(all_models):
+                try:
+                    session_cm = client.aio.live.connect(
+                        model=model_name,
+                        config=config
+                    )
+
+                    # #region agent log (Hypothesis A)
+                    _write_debug_log({
+                        "id": f"log_{int(__import__('time').time() * 1000)}_got_context_manager",
+                        "timestamp": int(__import__('time').time() * 1000),
+                        "location": "live_audio_service.py:85",
+                        "message": "Got context manager from connect",
+                        "data": {"session_cm_type": type(session_cm).__name__, "model": model_name},
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "A"
+                    })
+                    # #endregion
+
+                    session = await session_cm.__aenter__()
+
+                    # #region agent log (Hypothesis A)
+                    _write_debug_log({
+                        "id": f"log_{int(__import__('time').time() * 1000)}_session_entered",
+                        "timestamp": int(__import__('time').time() * 1000),
+                        "location": "live_audio_service.py:95",
+                        "message": "Session context entered successfully",
+                        "data": {"session_type": type(session).__name__, "model": model_name},
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "A"
+                    })
+                    # #endregion
+
+                    session._cm = session_cm
+                    self.model_id = model_name
+                    logger.info(f"Created Live API session with model: {model_name}")
+                    return session
+                except Exception as model_error:
+                    model_errors.append(f"{model_name}: {model_error}")
+                    if idx == 0:
+                        logger.warning(f"Failed to create session with {model_name}: {model_error}")
+                    else:
+                        logger.warning(f"Fallback model {model_name} also failed: {model_error}")
+
+            raise LLMException(
+                "Failed to create Live API session with all candidate models. "
+                f"Tried: {', '.join(all_models)} | Errors: {' | '.join(model_errors)}"
+            )
                 
         except ImportError as import_err:
             # #region agent log (Hypothesis A)
@@ -251,7 +245,7 @@ class LiveAudioService:
             await session.send(
                 input={
                     "data": audio_data,
-                    "mime_type": "audio/pcm"
+                    "mime_type": f"audio/pcm;rate={sample_rate}"
                 }
             )
             

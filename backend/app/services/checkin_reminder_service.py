@@ -15,7 +15,7 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 # ระยะเวลาก่อนเช็คอินที่จะส่งแจ้งเตือน
-FLIGHT_CHECKIN_WINDOWS_HOURS = [24, 2]   # แจ้ง 24h และ 2h ก่อน departure
+FLIGHT_CHECKIN_WINDOWS_HOURS = [24, 1]   # แจ้ง 24h และ 1h ก่อน departure
 HOTEL_CHECKIN_WINDOW_HOURS = 8            # แจ้งเช้าวันที่เช็คอิน (8h ก่อน noon)
 REMINDER_COOLDOWN_HOURS = 1              # ไม่ส่งซ้ำถ้าส่งไปแล้วภายใน 1 ชม.
 

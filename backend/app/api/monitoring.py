@@ -10,6 +10,9 @@ from datetime import datetime
 from app.engine.cost_tracker import cost_tracker
 from app.storage.connection_manager import MongoConnectionManager
 from app.core.logging import get_logger
+from app.core.redis_client import is_redis_available
+from app.core.config import settings
+from app.services.agent_monitor import agent_monitor
 
 logger = get_logger(__name__)
 
@@ -157,27 +160,72 @@ async def monitoring_health() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/search-relaxed/summary")
+async def get_search_relaxed_summary() -> Dict[str, Any]:
+    """
+    สรุป telemetry ของ relaxed search fallback เพื่อดูว่าปัญหา no-choice เกิดจากเงื่อนไขแบบใดบ่อยที่สุด
+    """
+    try:
+        summary = agent_monitor.get_search_relaxed_summary()
+        return {
+            "ok": True,
+            "timestamp": datetime.utcnow().isoformat(),
+            "summary": summary,
+        }
+    except Exception as e:
+        logger.error(f"Error getting search relaxed summary: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # =============================================================================
 # Redis Sync Endpoints (no-op — Redis removed, using MongoDB 100%)
 # =============================================================================
 
 @router.post("/sync/redis/session/{session_id}")
 async def sync_session_from_redis(session_id: str) -> Dict[str, Any]:
-    """No-op: Redis removed — data is already in MongoDB."""
-    return {"ok": True, "session_id": session_id, "message": "MongoDB-only mode: no sync needed"}
+    """
+    No-op สำหรับโหมดปัจจุบัน:
+    - แหล่งข้อมูลจริงอยู่ที่ MongoDB อยู่แล้ว
+    - Redis ใช้เป็น cache/checkpointer เท่านั้น (ไม่ต้อง sync ย้อนกลับ)
+    """
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "message": "MongoDB is source of truth; Redis used only as cache/checkpointer",
+    }
 
 
 @router.post("/sync/redis/all")
 async def sync_all_from_redis() -> Dict[str, Any]:
-    """No-op: Redis removed — data is already in MongoDB."""
-    return {"ok": True, "message": "MongoDB-only mode: no sync needed", "stats": {}}
+    """
+    No-op: ไม่มีการดึงข้อมูลกลับจาก Redis
+    ใช้สำหรับความเข้ากันได้กับเวอร์ชันก่อนหน้าเท่านั้น
+    """
+    return {
+        "ok": True,
+        "message": "MongoDB is source of truth; no reverse sync from Redis required",
+        "stats": {},
+    }
 
 
 @router.get("/sync/redis/status")
 async def get_sync_status() -> Dict[str, Any]:
-    """No-op: Redis removed."""
+    """
+    รายงานสถานะ Redis ปัจจุบัน
+    - redis_available: True ถ้า client พร้อมและเชื่อมต่อสำเร็จแล้ว
+    - enabled_for_cache: True ถ้ามีการตั้งค่า REDIS_URL (ใช้ Redis คู่กับ in-process memory)
+    """
+    available = is_redis_available()
     return {
         "ok": True,
         "timestamp": datetime.utcnow().isoformat(),
-        "status": {"redis_available": False, "redis_removed": True, "message": "Redis removed — using MongoDB only"}
+        "status": {
+            "redis_available": available,
+            "enabled_for_cache": bool(settings.redis_url),
+            "message": (
+                "Redis connected (REDIS_URL set) and used together with in-process memory"
+                if available and settings.redis_url
+                else "Redis URL not set or unavailable; using in-process memory only"
+            ),
+        },
     }

@@ -70,6 +70,11 @@ class Settings:
         self.sessions_dir: Path = Path(_BASE_DIR / "data" / "sessions")
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         
+        # Redis / Caching Configuration (optional)
+        # ใช้ Redis อัตโนมัติเมื่อมี REDIS_URL; ถ้าไม่ตั้งค่า → ใช้ in-process memory อย่างเดียว
+        self.redis_url: str = os.getenv("REDIS_URL", "").strip()
+        self.enable_redis_cache: bool = bool(self.redis_url)
+
         # Logging Configuration
         self.log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
         log_file_str = os.getenv("LOG_FILE", "").strip()
@@ -157,6 +162,10 @@ class Settings:
         # 💳 Omise Payment Gateway Configuration
         self.omise_secret_key: str = os.getenv("OMISE_SECRET_KEY", "").strip()
         self.omise_public_key: str = os.getenv("OMISE_PUBLIC_KEY", "").strip()
+        # PromptPay Mock mode (development/testing): generate mock QR without real Omise charge
+        self.omise_promptpay_mock_enabled: bool = os.getenv("OMISE_PROMPTPAY_MOCK_ENABLED", "false").lower() == "true"
+        # If true and mock is enabled, mark payment as paid immediately after QR creation
+        self.omise_promptpay_mock_auto_paid: bool = os.getenv("OMISE_PROMPTPAY_MOCK_AUTO_PAID", "false").lower() == "true"
         self.frontend_url: str = os.getenv("FRONTEND_URL", "http://localhost:5173").strip()
         # Backend base URL — used by Agent Mode to call booking API internally
         # Set API_BASE_URL in .env for production (e.g. https://api.yourdomain.com)
@@ -217,6 +226,10 @@ class Settings:
 
         if not self.omise_public_key:
             msg = "OMISE_PUBLIC_KEY ไม่ได้ตั้งค่า — ระบบชำระเงินจะไม่ทำงาน"
+            logger.warning(f"[config] ⚠️  {msg}")
+            warnings.append(msg)
+        if self.omise_promptpay_mock_enabled:
+            msg = "OMISE_PROMPTPAY_MOCK_ENABLED=true — PromptPay จะใช้ QR จำลอง (mock mode)"
             logger.warning(f"[config] ⚠️  {msg}")
             warnings.append(msg)
 

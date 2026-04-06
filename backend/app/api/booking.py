@@ -12,6 +12,7 @@ from datetime import datetime
 import random
 import asyncio
 import uuid
+from urllib.parse import quote_plus
 from app.api.notification import push_notification_event
 
 from app.core.config import settings
@@ -31,6 +32,35 @@ BOOKING_REQUIRED_PROFILE_FIELDS = [
     ("phone", "เบอร์โทรศัพท์"),
 ]
 
+# Thai domestic hints (city/airport keywords) for quick domestic vs international validation
+THAI_LOCATION_HINTS = [
+    "thailand", "thai", "ประเทศไทย", "กรุงเทพ", "bangkok", "bkk", "dmk", "hkt", "phuket",
+    "cnx", "chiang mai", "เชียงใหม่", "hdy", "hat yai", "หาดใหญ่", "kkc", "ขอนแก่น",
+    "utp", "pattaya", "พัทยา", "usm", "samui", "สมุย", "krabi", "kbv", "เชียงราย", "cei",
+]
+
+# Visa-free phase 1 (easy-to-edit whitelist)
+# Key: nationality code, Value: set of destination country codes that do not require visa
+VISA_FREE_WHITELIST_BY_NATIONALITY: Dict[str, set[str]] = {
+    "TH": {"JP", "KR", "SG", "MY", "VN", "LA", "KH", "ID", "PH", "HK", "MO", "TW"},
+}
+
+# Destination country resolver (simple keyword map for phase 1)
+DESTINATION_COUNTRY_KEYWORDS: Dict[str, List[str]] = {
+    "JP": ["japan", "ญี่ปุ่น", "tokyo", "โตเกียว", "osaka", "โอซาก้า", "nrt", "hnd", "kix"],
+    "KR": ["korea", "เกาหลี", "seoul", "โซล", "icn", "pusan", "busan", "ปูซาน"],
+    "SG": ["singapore", "สิงคโปร์", "sin", "changi"],
+    "MY": ["malaysia", "มาเลเซีย", "kuala lumpur", "kul", "penang", "ปีนัง"],
+    "VN": ["vietnam", "เวียดนาม", "hanoi", "ฮานอย", "ho chi minh", "โฮจิมินห์", "sgn", "han"],
+    "LA": ["laos", "ลาว", "vientiane", "เวียงจันทน์", "vte", "luang prabang", "lpq"],
+    "KH": ["cambodia", "กัมพูชา", "phnom penh", "พนมเปญ", "pnh", "siem reap", "rep"],
+    "ID": ["indonesia", "อินโดนีเซีย", "jakarta", "จาการ์ตา", "bali", "บาหลี", "cgk", "dps"],
+    "PH": ["philippines", "ฟิลิปปินส์", "manila", "มะนิลา", "mnl", "cebu", "เซบู"],
+    "HK": ["hong kong", "ฮ่องกง", "hkg"],
+    "MO": ["macau", "มาเก๊า", "mfm"],
+    "TW": ["taiwan", "ไต้หวัน", "taipei", "ไทเป", "tpe", "kaohsiung", "เกาสง"],
+}
+
 
 def _get_missing_profile_fields_for_booking(user_doc: dict) -> list[str]:
     """คืนรายการชื่อฟิลด์ (ภาษาไทย) ที่ยังไม่กรอก — ใช้แจ้งผู้ใช้ให้กรอกข้อมูลให้ครบก่อนจอง"""
@@ -44,9 +74,77 @@ def _get_missing_profile_fields_for_booking(user_doc: dict) -> list[str]:
     return missing
 
 
+def _is_location_in_thailand(location: Optional[str]) -> bool:
+    text = (location or "").strip().lower()
+    if not text:
+        return False
+    return any(hint in text for hint in THAI_LOCATION_HINTS)
+
+
+def _is_international_trip(travel_slots: Dict[str, Any]) -> bool:
+    if not isinstance(travel_slots, dict):
+        return False
+    origin = (
+        travel_slots.get("origin_city")
+        or travel_slots.get("origin")
+        or ""
+    )
+    destination = (
+        travel_slots.get("destination_city")
+        or travel_slots.get("destination")
+        or ""
+    )
+    if not origin and not destination:
+        return False
+    return not (_is_location_in_thailand(origin) and _is_location_in_thailand(destination))
+
+
+def _normalize_nationality_code(nationality: Optional[str]) -> str:
+    code = (nationality or "").strip().upper()
+    if not code:
+        return ""
+    return code[:2]
+
+
+def _resolve_destination_country_code(destination_text: Optional[str]) -> Optional[str]:
+    text = (destination_text or "").strip().lower()
+    if not text:
+        return None
+    for country_code, keywords in DESTINATION_COUNTRY_KEYWORDS.items():
+        if any(keyword in text for keyword in keywords):
+            return country_code
+    return None
+
+
+def _is_visa_free_route(nationality: Optional[str], destination_text: Optional[str]) -> bool:
+    nat = _normalize_nationality_code(nationality)
+    if not nat:
+        return False
+    destination_country = _resolve_destination_country_code(destination_text)
+    if not destination_country:
+        return False
+    return destination_country in VISA_FREE_WHITELIST_BY_NATIONALITY.get(nat, set())
+
+
 # ✅ My Bookings = Amadeus sandbox: retry จนกว่าจะสำเร็จ ห้ามฝั่งใดฝั่งหนึ่งสำเร็จอย่างเดียว
 AMADEUS_SYNC_MAX_RETRIES = 5
 AMADEUS_SYNC_RETRY_DELAY_SEC = 2
+
+
+def _build_mock_promptpay_qr(amount: float, booking_id: str, user_id: str) -> tuple[str, str]:
+    """
+    Build mock PromptPay QR/authorize links for development testing.
+    Returns (qr_download_uri, authorize_uri).
+    """
+    payload = f"PROMPTPAY|BOOKING:{booking_id}|USER:{user_id}|AMOUNT:{amount:.2f}|TS:{int(datetime.utcnow().timestamp())}"
+    qr_download_uri = f"https://api.qrserver.com/v1/create-qr-code/?size=320x320&data={quote_plus(payload)}"
+    authorize_uri = (
+        f"{settings.frontend_url}/bookings"
+        f"?booking_id={quote_plus(booking_id)}"
+        f"&payment_status=success"
+        f"&mock_promptpay=1"
+    )
+    return qr_download_uri, authorize_uri
 
 
 async def _amadeus_retry_until_success(operation_name: str, coro_fn: Callable[[], Awaitable[None]]) -> None:
@@ -293,6 +391,51 @@ async def create_booking(booking_request: BookingCreateRequest, fastapi_request:
                 status_code=400,
                 detail=f"กรุณากรอกข้อมูลใน ข้อมูลพื้นฐาน ให้ครบก่อนจึงจะจองได้: {missing_list} — ไปที่ การตั้งค่า > ข้อมูลพื้นฐาน"
             )
+
+        visa_free_route = False
+
+        # ✅ Travel document gate (Ask + Agent): international ต้องมี passport; visa required ยกเว้น visa-free route
+        if _is_international_trip(booking_request.travel_slots or {}):
+            destination_text = (
+                (booking_request.travel_slots or {}).get("destination_city")
+                or (booking_request.travel_slots or {}).get("destination")
+                or ""
+            )
+            visa_free_route = _is_visa_free_route(user_doc.get("nationality"), destination_text)
+            has_passport = bool(
+                (user_doc.get("passport_no") or "").strip()
+                and (user_doc.get("passport_expiry") or "").strip()
+                and (user_doc.get("nationality") or "").strip()
+            )
+            has_visa = bool((user_doc.get("visa_type") or "").strip() or (user_doc.get("visa_number") or "").strip())
+            try:
+                from app.models.visa import ensure_visa_records_from_doc, get_active_visas
+                visa_records = ensure_visa_records_from_doc(user_doc)
+                active_visas = get_active_visas(visa_records)
+                if active_visas:
+                    has_visa = True
+            except Exception:
+                # non-critical: fallback to legacy visa fields above
+                pass
+
+            missing_docs = []
+            if not has_passport:
+                missing_docs.append("Passport")
+            if not has_visa and not visa_free_route:
+                missing_docs.append("Visa")
+            if missing_docs:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"ทริปต่างประเทศไม่สามารถจองได้ เนื่องจากข้อมูลเอกสารเดินทางไม่ครบ ({', '.join(missing_docs)}) "
+                        f"กรุณาไปที่ โปรไฟล์ > Passport/Visa แล้วบันทึกข้อมูลให้ครบก่อน"
+                    ),
+                )
+
+        from app.utils.trip_date_lock import PAST_DEADLINE_DETAIL_TH, is_travel_past_deadline
+
+        if is_travel_past_deadline(booking_request.travel_slots, booking_request.plan):
+            raise HTTPException(status_code=400, detail=PAST_DEADLINE_DETAIL_TH)
         
         # ✅ ประวัติ workflow: บันทึก summary → booking (ผู้ใช้กดยืนยันจอง)
         _session_id = f"{user_id}::{booking_request.chat_id or booking_request.trip_id}"
@@ -581,6 +724,8 @@ async def create_booking(booking_request: BookingCreateRequest, fastapi_request:
             message = "✅ จองสำเร็จแล้ว! (Agent Mode - Auto-confirmed)"
         else:
             message = "Booking created successfully. Please proceed to payment."
+        if visa_free_route:
+            message = f"{message} เส้นทางนี้ฟรีวีซ่าสำหรับสัญชาติของคุณ"
         
         return {
             "ok": True,
@@ -589,6 +734,7 @@ async def create_booking(booking_request: BookingCreateRequest, fastapi_request:
             "status": initial_status,
             "total_price": booking_request.total_price,
             "currency": booking_request.currency or "THB",
+            "visa_free_route": visa_free_route,
         }
         
     except HTTPException:
@@ -832,7 +978,7 @@ async def get_booking_detail(request: Request, booking_id: str = Query(..., desc
     except Exception as e:
         logger.error(f"DB connect failed: {e}")
         raise HTTPException(status_code=503, detail="Database unavailable")
-    if not storage.db:
+    if storage.db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     coll = storage.db["bookings"]
@@ -888,7 +1034,7 @@ async def get_booking_by_trip(request: Request, trip_id: str = Query(..., descri
     except Exception as e:
         logger.error(f"DB connect failed: {e}")
         raise HTTPException(status_code=503, detail="Database unavailable")
-    if not storage.db:
+    if storage.db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     coll = storage.db["bookings"]
@@ -994,6 +1140,11 @@ async def process_payment(
                 "payment_url": None
             }
         
+        from app.utils.trip_date_lock import PAST_DEADLINE_DETAIL_TH, is_travel_past_deadline
+
+        if is_travel_past_deadline(booking.get("travel_slots") or {}, booking.get("plan")):
+            raise HTTPException(status_code=400, detail=PAST_DEADLINE_DETAIL_TH)
+
         # Check if cancelled
         if booking.get("status") == "cancelled":
             raise HTTPException(status_code=400, detail="Cannot pay for cancelled booking")
@@ -1365,6 +1516,10 @@ async def cancel_booking(
         if booking_user_id != user_id:
             logger.error(f"🚨 SECURITY ALERT: Booking {booking_id} user_id mismatch! expected {user_id}, found {booking_user_id}")
             raise HTTPException(status_code=403, detail="You do not have permission to cancel this booking")
+
+        from app.utils.trip_date_lock import PAST_DEADLINE_DETAIL_TH, is_travel_past_deadline
+        if is_travel_past_deadline(booking.get("travel_slots") or {}, booking.get("plan")):
+            raise HTTPException(status_code=400, detail=PAST_DEADLINE_DETAIL_TH)
         
         # ✅ Amadeus sandbox sync: ยกเลิก flight orders แบบ best-effort — ไม่บล็อกการยกเลิก
         amadeus_sync = booking.get("amadeus_sync") or {}
@@ -1516,6 +1671,11 @@ async def update_booking(
                 status_code=400, 
                 detail=f"Cannot update booking with status '{current_status}'. Only 'pending_payment' bookings can be updated."
             )
+
+        from app.utils.trip_date_lock import PAST_DEADLINE_DETAIL_TH, is_travel_past_deadline
+
+        if is_travel_past_deadline(booking.get("travel_slots") or {}, booking.get("plan")):
+            raise HTTPException(status_code=400, detail=PAST_DEADLINE_DETAIL_TH)
         
         # ✅ CRUD STABILITY: Build update data with validation (only include fields that were provided)
         update_data = {}
@@ -2069,6 +2229,39 @@ async def create_charge(fastapi_request: Request, request: CreateChargeRequest):
             cards = saved_doc.get("cards") or []
             if not any(c.get("card_id") == request.card_id for c in cards):
                 raise HTTPException(status_code=403, detail="Card does not belong to your account")
+
+        # Mock PromptPay mode (dev/testing): skip Omise API and return mock QR
+        if use_promptpay and settings.omise_promptpay_mock_enabled:
+            mock_charge_id = f"mock_pp_{uuid.uuid4().hex[:18]}"
+            mock_paid = bool(settings.omise_promptpay_mock_auto_paid)
+            payment_status = "successful" if mock_paid else "pending"
+            booking_status = "paid" if mock_paid else "pending_payment"
+            qr_download_uri, authorize_uri = _build_mock_promptpay_qr(
+                amount=float(request.amount),
+                booking_id=request.booking_id,
+                user_id=user_id,
+            )
+            await bookings_collection.update_one(
+                {"user_id": user_id, "booking_id": request.booking_id},
+                {"$set": {
+                    "status": booking_status,
+                    "payment_id": mock_charge_id,
+                    "payment_status": payment_status,
+                    "promptpay_charge_id": mock_charge_id,
+                    "payment_provider": "promptpay_mock",
+                    "updated_at": datetime.utcnow().isoformat(),
+                }}
+            )
+            return {
+                "ok": True,
+                "message": "Mock PromptPay QR created" if not mock_paid else "Mock PromptPay paid successfully",
+                "charge_id": mock_charge_id,
+                "status": payment_status,
+                "paid": mock_paid,
+                "mock_mode": True,
+                "authorize_uri": authorize_uri,
+                "qr_download_uri": qr_download_uri,
+            }
         
         charge_payload = {
             "amount": amount_satang,

@@ -469,7 +469,7 @@ class AmadeusMCP:
                     },
                 }
 
-            return {
+            out = {
                 "success": True,
                 "tool": "search_flights",
                 "results_count": len(results),
@@ -484,6 +484,12 @@ class AmadeusMCP:
                     "non_stop": non_stop,
                 },
             }
+            fallback_date = next((r.get("_fallback_date") for r in results if r.get("_fallback_date")), None)
+            if fallback_date and fallback_date != departure_date:
+                out["message"] = (
+                    f"ไม่พบเที่ยวบินในวันที่ {departure_date} — แสดงผลสำหรับวันใกล้เคียง {fallback_date} แทน"
+                )
+            return out
         except Exception as e:
             logger.error(f"❌ Error searching flights: {e}", exc_info=True)
             return {
@@ -574,6 +580,13 @@ class AmadeusMCP:
             fallback_results = [r for r in results if r.get("_fallback_check_in")]
             original_results = [r for r in results if not r.get("_fallback_check_in")]
             display_results = original_results[:3] + fallback_results[:2]
+
+            # Enrich with Google Places: ที่อยู่และรูปภาพ (Amadeus v3 ไม่คืน address/media)
+            try:
+                from app.services.hotel_place_enrichment import enrich_hotels_with_google
+                await enrich_hotels_with_google(display_results)
+            except Exception as e:
+                logger.debug(f"Hotel place enrichment skipped: {e}")
 
             # Return full raw Amadeus objects so DataAggregator can run _normalize_and_sync_hotel
             # (images, amenities, check-in/out, price breakdown) instead of minimal formatted list

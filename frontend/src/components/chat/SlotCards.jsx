@@ -1,6 +1,7 @@
 import React from 'react';
 import { AIRLINE_NAMES } from '../../data/airlineNames';
 import { formatPriceInThb } from '../../utils/currency';
+import { dedupeSegments } from '../../utils/flightSegments';
 import '../bookings/TripSummaryUI.css';
 
 // แสดงราคาเป็นบาท (THB) เท่านั้น
@@ -60,7 +61,8 @@ export function FlightSlotCard({ flight, travelSlots }) {
     );
   }
 
-  const segments = flight.segments || [];
+  // ✅ Validate: ห้ามซ้ำกัน — กรอง segment ที่ซ้ำก่อนแสดง
+  const segments = dedupeSegments(flight.segments || []);
   const currency = flight.currency || 'THB';
   const firstSegment = segments[0];
   const lastSegment = segments[segments.length - 1];

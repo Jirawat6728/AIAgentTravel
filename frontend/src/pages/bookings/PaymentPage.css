@@ -377,12 +377,61 @@
   font-weight: 500;
 }
 
-.payment-powered-by {
-  margin-top: 16px;
-  text-align: center;
+/* Footer แบบ Stripe — พื้นหลังดำ ข้อความเทาอ่อน แบ่ง 3 ส่วนด้วยเส้นแนวตั้ง */
+.payment-omise-footer {
+  margin-top: 24px;
+  padding: 16px 20px;
+  background: #000;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+}
+
+.payment-omise-brand {
   font-size: 13px;
-  color: #6b7280;
+  color: #9ca3af;
   font-weight: 500;
+}
+
+.payment-omise-logo {
+  font-weight: 700;
+  font-style: italic;
+  color: #9ca3af;
+  letter-spacing: 0.02em;
+}
+
+.payment-omise-sep {
+  width: 1px;
+  height: 14px;
+  background: #4b5563;
+  flex-shrink: 0;
+}
+
+.payment-omise-link {
+  font-size: 13px;
+  color: #9ca3af;
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.2s;
+}
+
+.payment-omise-link:hover {
+  color: #d1d5db;
+}
+
+.payment-omise-legal {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.payment-omise-legal .payment-omise-link {
+  display: block;
+  line-height: 1.3;
 }
 
 .error-message {

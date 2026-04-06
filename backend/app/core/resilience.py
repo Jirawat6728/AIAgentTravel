@@ -11,6 +11,7 @@ from collections import defaultdict
 from typing import Callable, Any, Optional, Dict, Tuple
 from app.core.logging import get_logger
 from app.storage.connection_manager import MongoConnectionManager
+from app.core.redis_client import is_redis_available
 
 logger = get_logger(__name__)
 
@@ -318,7 +319,7 @@ class HealthMonitor:
         status = {
             "mongodb": False,
             "redis": False,
-            "timestamp": time.time()
+            "timestamp": time.time(),
         }
         
         # Check MongoDB
@@ -330,8 +331,11 @@ class HealthMonitor:
             logger.warning(f"MongoDB health check failed: {e}")
             status["mongodb"] = False
         
-        # Redis removed — always report as disabled
-        status["redis"] = False
+        # Redis (optional)
+        try:
+            status["redis"] = is_redis_available()
+        except Exception:
+            status["redis"] = False
         
         self.health_status = status
         self.last_check = time.time()

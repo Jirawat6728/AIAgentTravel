@@ -1,9 +1,8 @@
 """
-Machine Learning & Deep Learning service for workflow keyword decoding and validation.
+Machine Learning service for workflow keyword decoding and validation.
 
 - ถอดรหัส keyword จากข้อความผู้ใช้ → intent (flight, hotel, transport, date, destination, booking, edit, general)
-- Deep Learning ชั้นที่ 1 (optional): PyTorch LSTM — ใช้เมื่อติดตั้ง torch แล้ว
-- Deep Learning ชั้นที่ 2: TF-IDF + MLP (Multi-Layer Perceptron) + CalibratedClassifierCV
+- Deep Learning: TF-IDF + MLP (Multi-Layer Perceptron) + CalibratedClassifierCV
 - ML: TF-IDF + LogisticRegression (CalibratedClassifierCV) ~90% แม่นยำ
 - ตรวจสอบและ validate ข้อมูลที่ดึงได้ (วันที่, จำนวนคน, งบประมาณ) พร้อม confidence
 """
@@ -17,18 +16,8 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Optional: PyTorch LSTM Deep Learning intent classifier
-_dl_lstm_model = None
-try:
-    from app.services.dl_intent_model import get_dl_intent_model, is_dl_lstm_available
-except ImportError:
-    get_dl_intent_model = None  # type: ignore[misc, assignment]
-    is_dl_lstm_available = lambda: False  # type: ignore[assignment]
-
-# เปิดใช้ Deep Learning (MLP + optional PyTorch LSTM) สำหรับ intent classification
+# เปิดใช้ Deep Learning (MLP) สำหรับ intent classification
 USE_DEEP_LEARNING = True
-# เปิดใช้ PyTorch LSTM เป็นตัวแรกเมื่อติดตั้ง torch แล้ว
-USE_DL_LSTM = True
 
 # Optional: scikit-learn for ML & Deep Learning intent classification
 _sklearn_available = False
@@ -177,9 +166,9 @@ PLANNING_SLOT_HINT: Dict[str, str] = {
 
 class MLKeywordService:
     """
-    ML & Deep Learning keyword decoding and validation for workflow control.
+    ML keyword decoding and validation for workflow control.
     - ML: TF-IDF + LogisticRegression (CalibratedClassifierCV)
-    - Deep Learning: TF-IDF + MLPClassifier (Multi-Layer Perceptron) สำหรับ intent ที่ซับซ้อน
+    - Deep Learning (sklearn): TF-IDF + MLPClassifier (Multi-Layer Perceptron) สำหรับ intent ที่ซับซ้อน
     """
 
     def __init__(self) -> None:
@@ -188,7 +177,6 @@ class MLKeywordService:
         self._classes: Optional[List[str]] = None
         self._trained = False
         self._dl_trained = False
-        self._dl_lstm_trained = False  # PyTorch LSTM (optional)
 
     def _ensure_trained(self) -> bool:
         if not _sklearn_available:
@@ -279,40 +267,7 @@ class MLKeywordService:
             }
 
         self._ensure_trained()
-        # ✅ Deep Learning ชั้นที่ 1: PyTorch LSTM (เมื่อติดตั้ง torch แล้ว)
-        if USE_DL_LSTM and get_dl_intent_model is not None and is_dl_lstm_available():
-            if not self._dl_lstm_trained:
-                try:
-                    lstm = get_dl_intent_model()
-                    if lstm is not None:
-                        X = [t[0].lower().strip() for t in INTENT_LABELED_EXAMPLES]
-                        y = [t[1] for t in INTENT_LABELED_EXAMPLES]
-                        if lstm.fit(X, y):
-                            self._dl_lstm_trained = True
-                except Exception as e:
-                    logger.debug("DL LSTM first-time train skipped: %s", e)
-            if self._dl_lstm_trained:
-                try:
-                    lstm = get_dl_intent_model()
-                    if lstm is not None:
-                        out = lstm.predict_proba(text_clean)
-                        if out is not None:
-                            pred, probs = out
-                            idx = lstm.label2idx.get(pred, 0)
-                            confidence = float(probs[idx]) if idx < len(probs) else 0.0
-                            workflow_intent = WORKFLOW_INTENT_MAP.get(pred, pred)
-                            suggested_slot = PLANNING_SLOT_HINT.get(pred, "")
-                            return {
-                                "intent": pred,
-                                "confidence": round(confidence, 4),
-                                "workflow_intent": workflow_intent,
-                                "keywords": self._rule_extract_keywords(text_clean),
-                                "suggested_slot": suggested_slot,
-                                "model": "dl_lstm",
-                            }
-                except Exception as e:
-                    logger.debug("DL LSTM decode failed, trying MLP: %s", e)
-        # ✅ Deep Learning ชั้นที่ 2: MLP (sklearn) + Calibrated
+        # ✅ Deep Learning: MLP (sklearn) + Calibrated
         if USE_DEEP_LEARNING and self._dl_trained and self._dl_pipeline is not None:
             try:
                 pred = self._dl_pipeline.predict([text_clean])[0]

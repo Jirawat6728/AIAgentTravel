@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { AIRLINE_NAMES } from '../../data/airlineNames';
+import { AIRLINE_NAMES, AIRLINE_DOMAINS } from '../../data/airlineNames';
 import { getAirportDisplay } from '../../data/airportNames';
 import { formatPriceInThb } from '../../utils/currency';
 import './PlanChoiceCard.css'; // ใช้คลาสจากไฟล์หลักร่วมกันได้
@@ -60,62 +60,45 @@ function calculateSegmentPrice(totalPrice, segmentDuration, totalDuration) {
   }
 }
 
-// ✅ ดึง airline logo จาก CDN หรือ Google - หลายแหล่งข้อมูล
-function getAirlineLogoUrl(carrierCode, attempt = 1) {
-  if (!carrierCode) return null;
-  
-  const code = carrierCode.toUpperCase();
-  
-  // ใช้หลายแหล่งข้อมูลตามลำดับความน่าจะเป็น
-  switch (attempt) {
-    case 1:
-      // Skyscanner CDN (มี airline logos มากที่สุด)
-      return `https://logos.skyscnr.com/images/airlines/favicon/${code}.png`;
-    case 2:
-      // Avicon.io API (fallback 1)
-      return `https://avicon.io/api/airlines/${code}`;
-    case 3:
-      // AirlineCodes.info (fallback 2)
-      return `https://www.airlinecodes.info/airline-logos/${code}.png`;
-    case 4:
-      // ContentSquare CDN (fallback 3)
-      return `https://d1yjjnpx0p53s8.cloudfront.net/images/airlines/${code}.png`;
-    case 5:
-      // Travelpayouts (fallback 4)
-      return `https://pics.avs.io/200/200/${code}.png`;
-    default:
-      return null;
-  }
-}
+// ✅ ดึง airline logo — ใช้แหล่งเดียวกับ PlanChoiceCardFlights และ FlightsPage (Duffel → Kiwi → Clearbit → Google favicon)
+const getDuffelLogoUrl = (code) => {
+  const c = String(code || '').toUpperCase();
+  if (!c || c.length !== 2) return null;
+  return `https://assets.duffel.com/img/airlines/for-light-background/full-color-logo/${c}.svg`;
+};
+const getKiwiLogoUrl = (code) => `https://images.kiwi.com/airlines/64/${String(code).toUpperCase()}.png`;
+const getClearbitLogoUrl = (code) => {
+  const domain = AIRLINE_DOMAINS[String(code).toUpperCase()];
+  return domain ? `https://logo.clearbit.com/${domain}` : null;
+};
+const getGoogleFaviconUrl = (code) => {
+  const domain = AIRLINE_DOMAINS[String(code).toUpperCase()];
+  return domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=64` : null;
+};
 
-// ✅ Component สำหรับแสดง airline logo พร้อม fallback หลายแหล่งข้อมูล
+// ✅ Component สำหรับแสดง airline logo (fallback chain เหมือน FlightsPage / PlanChoiceCardFlights)
 function AirlineLogo({ carrierCode, size = 40, style = {} }) {
-  const [logoAttempt, setLogoAttempt] = React.useState(1);
-  const [logoError, setLogoError] = React.useState(false);
-  const [currentUrl, setCurrentUrl] = React.useState(null);
-  
-  React.useEffect(() => {
-    if (carrierCode) {
-      setLogoAttempt(1);
-      setLogoError(false);
-      setCurrentUrl(getAirlineLogoUrl(carrierCode, 1));
-    }
-  }, [carrierCode]);
-  
-  const handleImageError = () => {
-    // ลอง fallback URLs ตามลำดับ (1-5)
-    if (logoAttempt < 5) {
-      const nextAttempt = logoAttempt + 1;
-      setLogoAttempt(nextAttempt);
-      setCurrentUrl(getAirlineLogoUrl(carrierCode, nextAttempt));
-    } else {
-      // ถ้าทุก URL ล้มเหลว ให้แสดง carrier code แทน
-      setLogoError(true);
-    }
+  const [showFallback, setShowFallback] = React.useState(false);
+  const kiwiUrl = carrierCode ? getKiwiLogoUrl(carrierCode) : null;
+  const duffelUrl = carrierCode ? getDuffelLogoUrl(carrierCode) : null;
+  const clearbitUrl = carrierCode ? getClearbitLogoUrl(carrierCode) : null;
+  const googleFaviconUrl = carrierCode ? getGoogleFaviconUrl(carrierCode) : null;
+  const initialSrc = duffelUrl || kiwiUrl;
+
+  const handleError = (e) => {
+    const img = e.target;
+    const src = (img.src || '').toLowerCase();
+    const isDuffel = src.includes('assets.duffel.com');
+    const isKiwi = src.includes('images.kiwi.com');
+    const isClearbit = src.includes('logo.clearbit.com');
+    if (isDuffel && kiwiUrl) { img.src = kiwiUrl; return; }
+    if (isKiwi && clearbitUrl) { img.src = clearbitUrl; return; }
+    if (isClearbit && googleFaviconUrl) { img.src = googleFaviconUrl; return; }
+    setShowFallback(true);
+    img.style.display = 'none';
   };
-  
-  // ถ้าไม่มี logo หรือ error ให้แสดง carrier code แทน
-  if (!carrierCode || logoError || !currentUrl) {
+
+  if (!carrierCode || showFallback || !initialSrc) {
     return (
       <div style={{
         width: `${size}px`,
@@ -130,14 +113,14 @@ function AirlineLogo({ carrierCode, size = 40, style = {} }) {
         color: '#fff',
         ...style
       }}>
-        {carrierCode || 'N/A'}
+        ✈️ {carrierCode || 'N/A'}
       </div>
     );
   }
-  
+
   return (
     <img
-      src={currentUrl}
+      src={initialSrc}
       alt={`${carrierCode} logo`}
       style={{
         width: `${size}px`,
@@ -146,13 +129,10 @@ function AirlineLogo({ carrierCode, size = 40, style = {} }) {
         objectFit: 'contain',
         background: 'rgba(255, 255, 255, 0.05)',
         padding: '4px',
+        display: showFallback ? 'none' : 'block',
         ...style
       }}
-      onError={handleImageError}
-      onLoad={() => {
-        // Reset error state เมื่อโหลดสำเร็จ
-        if (logoError) setLogoError(false);
-      }}
+      onError={handleError}
     />
   );
 }
@@ -305,7 +285,7 @@ function carriersLabel(flight) {
   return carriers.length ? carriers.join(', ') : null;
 }
 
-export default function PlanChoiceCard({ choice, onSelect }) {
+export default function PlanChoiceCard({ choice, onSelect, cardStyle }) {
   const [showItinerary, setShowItinerary] = useState(false);
   const [showFlightDetails, setShowFlightDetails] = useState(false);
   
@@ -486,9 +466,31 @@ export default function PlanChoiceCard({ choice, onSelect }) {
   const hotelName = hotel?.hotelName || null;
   const hotelNights = hotel?.nights != null ? hotel.nights : null;
   const hotelBoard = hotel?.boardType || null;
+  const toFinite = (v) => (typeof v === 'number' ? v : (typeof v === 'string' && v.trim() ? Number(v) : NaN));
+  const pickFirstNonNull = (...vals) => {
+    for (const v of vals) {
+      const n = toFinite(v);
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  };
+  const hotelPricingCurrency = hotel?.booking?.pricing?.currency || hotel?.currency || displayCurrency;
+  const hotelTotalAmount = pickFirstNonNull(
+    hotel?.booking?.pricing?.total_amount,
+    hotel?.price_total,
+    choice?.price_amount,
+    choice?.total_price,
+    choice?.price,
+  );
+  const hotelPricePerNight = pickFirstNonNull(
+    hotel?.booking?.pricing?.price_per_night,
+    (hotelTotalAmount != null && hotelNights != null && hotelNights > 0) ? hotelTotalAmount / hotelNights : null,
+  );
+  const hotelTaxesRaw = toFinite(hotel?.booking?.pricing?.taxes_and_fees);
+  const hotelTaxesAndFees = Number.isFinite(hotelTaxesRaw) && hotelTaxesRaw > 0 ? hotelTaxesRaw : null;
   const hotelPrice = formatPriceInThb(
-    typeof hotel?.price_total === 'number' ? hotel.price_total : null,
-    hotel?.currency || displayCurrency
+    hotelTotalAmount,
+    hotelPricingCurrency
   );
 
   // ===== Transport (your legacy structure) =====
@@ -516,7 +518,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
       : null;
 
   return (
-    <div className={`plan-card ${recommended ? 'plan-card-recommended' : ''}`}>
+    <div className={`plan-card ${recommended ? 'plan-card-recommended' : ''}`} style={cardStyle}>
       {/* Header */}
       <div className="plan-card-header">
         <div className="plan-card-title">
@@ -556,7 +558,7 @@ export default function PlanChoiceCard({ choice, onSelect }) {
         {tags && Array.isArray(tags) && tags.length > 0 && (
           <div className="plan-card-tags">
             {[...new Set(tags)]
-              .filter(tag => !['Amadeus', 'ราคาจริง', 'จองได้ทันที'].includes(tag))
+              .filter(tag => !['Amadeus', 'ราคาจริง', 'จองได้ทันที', 'Google', 'ไม่ใช่ราคาจริง'].includes(tag))
               .filter(tag => {
                 if (tag === 'แนะนำ' && recommended) return false;
                 if (tag === 'บินตรง' && (choice?.is_non_stop || (flight && flightStops === 'Non-stop'))) return false;
@@ -1193,20 +1195,26 @@ export default function PlanChoiceCard({ choice, onSelect }) {
             </div>
 
             {/* 6. Price Breakdown */}
-            {hotel.booking?.pricing && (
+            {(hotel.booking?.pricing || hotelTotalAmount != null) && (
                  <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.2)' }}>
-                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                         <span style={{ fontSize: '13px', opacity: 0.8 }}>ราคาต่อคืน</span>
-                         <span style={{ fontWeight: '600' }}>{formatPriceInThb(hotel.booking.pricing.price_per_night, hotel.booking.pricing.currency)}</span>
-                     </div>
-                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                         <span style={{ fontSize: '13px', opacity: 0.8 }}>ภาษีและค่าธรรมเนียม</span>
-                         <span style={{ fontSize: '13px' }}>{formatPriceInThb(hotel.booking.pricing.taxes_and_fees, hotel.booking.pricing.currency)}</span>
-                     </div>
-                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px', fontSize: '16px' }}>
-                         <span style={{ fontWeight: '600' }}>ราคารวม ({hotel.booking.check_out_date ? 'ตามวันที่เลือก' : 'Total'})</span>
-                         <span style={{ fontWeight: '700', color: '#81c784' }}>{formatPriceInThb(hotel.booking.pricing.total_amount, hotel.booking.pricing.currency)}</span>
-                     </div>
+                     {hotelPricePerNight != null && (
+                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                           <span style={{ fontSize: '13px', opacity: 0.8 }}>ราคาต่อคืน</span>
+                           <span style={{ fontWeight: '600' }}>{formatPriceInThb(hotelPricePerNight, hotelPricingCurrency)}</span>
+                       </div>
+                     )}
+                     {hotelTaxesAndFees != null && (
+                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                           <span style={{ fontSize: '13px', opacity: 0.8 }}>ภาษีและค่าธรรมเนียม</span>
+                           <span style={{ fontSize: '13px' }}>{formatPriceInThb(hotelTaxesAndFees, hotelPricingCurrency)}</span>
+                       </div>
+                     )}
+                     {hotelTotalAmount != null && (
+                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px', fontSize: '16px' }}>
+                           <span style={{ fontWeight: '600' }}>ราคารวมจาก Amadeus</span>
+                           <span style={{ fontWeight: '700', color: '#81c784' }}>{formatPriceInThb(hotelTotalAmount, hotelPricingCurrency)}</span>
+                       </div>
+                     )}
                  </div>
             )}
             
